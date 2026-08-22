@@ -72,7 +72,9 @@ Server → client (in order)
 // source: "nbp" = sampled one byte at a time; "mbp" = accepted from the multi-byte head's parallel proposal
 // boundary: the router opened a new chunk at this byte; chunk: index of the chunk this byte belongs to
 
-{ "type": "chunk", "index": 3, "start": 14, "end": 19, "bytes": 6, "text": " tend" }   // a chunk closed
+{ "type": "chunk", "index": 3, "start": 14, "end": 19, "bytes": 6, "partial": false, "text": " tend" }   // a chunk closed
+// start/end are reply-local byte indices (same space as byte.i), inclusive; bytes counts the whole chunk.
+// partial: the chunk began inside the prompt (then start is clamped to 0 and bytes > end - start + 1).
 
 { "type": "stats", "bytes": 64, "elapsed_ms": 1730, "bytes_per_sec": 37.0, "chunks": 11,
   "bytes_per_chunk": 5.8, "mbp_proposed": 30, "mbp_accepted": 12, "mbp_accept_rate": 0.40,

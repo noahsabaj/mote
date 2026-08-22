@@ -39,8 +39,24 @@
     if (!Number.isFinite(x0)) return null;
     if (x1 === x0) x1 = x0 + 1;
     const pad = (y1 - y0) * 0.08 || 0.05;
-    return { x0, x1, y0: y0 - pad, y1: y1 + pad };
+    // Snap the y domain outwards to a round step so the axis labels are readable numbers.
+    const step = niceStep((y1 + pad - (y0 - pad)) / 2);
+    return {
+      x0,
+      x1,
+      y0: Math.floor((y0 - pad) / step) * step,
+      y1: Math.ceil((y1 + pad) / step) * step,
+      step
+    };
   });
+
+  /** Largest of 1, 2 or 5 × 10^k that is not greater than `span`. */
+  function niceStep(span: number): number {
+    if (!(span > 0)) return 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(span)));
+    const norm = span / mag;
+    return (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * mag;
+  }
 
   function sx(x: number): number {
     if (!bounds) return PAD_L;
@@ -73,9 +89,9 @@
   const ticks = $derived.by(() => {
     if (!bounds) return [];
     const out: { y: number; label: string }[] = [];
-    for (let i = 0; i <= 2; i++) {
-      const v = bounds.y0 + ((bounds.y1 - bounds.y0) * i) / 2;
-      out.push({ y: sy(v), label: v.toFixed(digits) });
+    const decimals = Math.max(0, Math.min(digits, -Math.floor(Math.log10(bounds.step))));
+    for (let v = bounds.y0; v <= bounds.y1 + bounds.step / 2; v += bounds.step) {
+      out.push({ y: sy(v), label: v.toFixed(decimals) });
     }
     return out;
   });

@@ -26,8 +26,8 @@ export function pct(x: number | undefined | null, digits = 0): string {
   return `${(x * 100).toFixed(digits)}%`;
 }
 
-export function minutes(m: number): string {
-  if (!Number.isFinite(m)) return '—';
+export function minutes(m: number | null | undefined): string {
+  if (m === null || m === undefined || !Number.isFinite(m)) return '—';
   if (m < 1) return `${Math.round(m * 60)}${NBSP}s`;
   if (m < 90) return `${m < 10 ? m.toFixed(1) : Math.round(m)}${NBSP}min`;
   const h = Math.floor(m / 60);

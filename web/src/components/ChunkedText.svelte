@@ -23,7 +23,7 @@
     }));
   });
 
-  const hidden = $derived(structure ? Math.max(0, trace.chunkRows().length - CAP_CHUNKS) : 0);
+  const hidden = $derived(structure ? Math.max(0, (trace.version, trace.runCount) - CAP_CHUNKS) : 0);
 </script>
 
 <!-- No whitespace between the spans: the container is `pre-wrap`, so stray template

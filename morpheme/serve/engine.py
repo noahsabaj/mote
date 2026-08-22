@@ -262,7 +262,10 @@ class Engine:
             abs_i = len(prompt_ids) + len(generated)
             if is_b:
                 if abs_i > chunk_start:
-                    emit({"type": "chunk", "index": chunk_index, "start": chunk_start, "end": abs_i - 1, "bytes": abs_i - chunk_start,
+                    # reply-local inclusive coordinates; a chunk that began inside the prompt is reported from reply byte 0
+                    P = len(prompt_ids)
+                    emit({"type": "chunk", "index": chunk_index, "start": max(chunk_start - P, 0), "end": abs_i - 1 - P,
+                          "bytes": abs_i - chunk_start, "partial": chunk_start < P,
                           "text": bytes(b for b in (prompt_ids + generated)[chunk_start:abs_i] if b < 256).decode("utf-8", errors="replace")})
                 chunk_index += 1
                 chunk_start = abs_i

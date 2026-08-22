@@ -5,11 +5,13 @@
 // reactive signal — it is bumped once per animation frame by the flush loop, so components
 // that show detail re-read the arrays at most once a frame.
 
-import type { ByteEvent, ChunkEvent } from './types';
+import type { ByteEvent } from './types';
 
 export interface ChunkRow {
   index: number;
+  /** byte-event index of the first byte of this chunk */
   start: number;
+  /** byte-event index just past the last byte of this chunk */
   end: number;
   bytes: number;
   text: string;
@@ -49,15 +51,24 @@ export class ByteTrace {
   /** Cumulative length of `#text` after this byte, so a byte's characters are a slice. */
   #textEnd = new Int32Array(this.#cap);
   #text = '';
-  #chunks: ChunkRow[] = [];
+  /**
+   * Byte-event index at which each chunk run starts. Chunk spans are derived from the
+   * `chunk` field carried by every byte rather than from the `chunk` event's start/end:
+   * the serving engine reports those in whole-context coordinates (prompt included) while
+   * `byte.i` is reply-local, and its `end` disagrees with its own `bytes` count. The per-byte
+   * field is unambiguous and always in the same frame as everything else here.
+   */
+  #runStart: number[] = [];
+  #closed = 0;
   #dirty = false;
 
   get size(): number {
     return this.#n;
   }
 
-  get chunks(): readonly ChunkRow[] {
-    return this.#chunks;
+  /** Number of chunk runs present, open one included. */
+  get runCount(): number {
+    return this.#runStart.length;
   }
 
   get liveText(): string {
@@ -74,6 +85,7 @@ export class ByteTrace {
     this.#chunk[s] = ev.chunk;
     this.#tMs[s] = ev.t_ms;
     this.#flags[s] = (ev.boundary ? FLAG_BOUNDARY : 0) | (ev.source === 'mbp' ? FLAG_MBP : 0);
+    if (s === 0 || this.#chunk[s - 1] !== ev.chunk) this.#runStart.push(s);
     if (ev.text) this.#text += ev.text;
     this.#textEnd[s] = this.#text.length;
     this.#n = s + 1;
@@ -81,14 +93,9 @@ export class ByteTrace {
     this.#dirty = true;
   }
 
-  closeChunk(ev: ChunkEvent): void {
-    this.#chunks.push({
-      index: ev.index,
-      start: ev.start,
-      end: ev.end,
-      bytes: ev.bytes,
-      text: ev.text
-    });
+  /** A `chunk` event only tells us one closed; its spans are not used (see `#runStart`). */
+  closeChunk(): void {
+    this.#closed += 1;
     this.#dirty = true;
   }
 
@@ -99,7 +106,7 @@ export class ByteTrace {
     this.text = this.#text;
     this.pending = this.#pendingRaw;
     this.count = this.#n;
-    this.chunkCount = this.#chunks.length;
+    this.chunkCount = this.#closed;
     this.version++;
     return true;
   }
@@ -111,7 +118,7 @@ export class ByteTrace {
     this.#pendingRaw = 0;
     this.pending = 0;
     this.count = this.#n;
-    this.chunkCount = this.#chunks.length;
+    this.chunkCount = this.#closed;
     this.version++;
   }
 
@@ -179,17 +186,19 @@ export class ByteTrace {
     return out;
   }
 
-  /** Chunks plus the still-open trailing chunk, so live text is never dropped. */
+  /** Every chunk, including the one still open, tiling the reply with no gaps. */
   chunkRows(): ChunkRow[] {
-    const rows = this.#chunks.slice();
-    const last = rows.length ? rows[rows.length - 1].end : 0;
-    if (last < this.#n) {
+    const rows: ChunkRow[] = [];
+    for (let r = 0; r < this.#runStart.length; r++) {
+      const start = this.#runStart[r];
+      const end = r + 1 < this.#runStart.length ? this.#runStart[r + 1] : this.#n;
+      if (end <= start) continue;
       rows.push({
-        index: rows.length,
-        start: last,
-        end: this.#n,
-        bytes: this.#n - last,
-        text: this.#text.slice(last > 0 ? this.#textEnd[last - 1] : 0)
+        index: this.#chunk[start],
+        start,
+        end,
+        bytes: end - start,
+        text: this.#text.slice(start > 0 ? this.#textEnd[start - 1] : 0, this.#textEnd[end - 1])
       });
     }
     return rows;

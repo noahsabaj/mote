@@ -16,7 +16,8 @@ export const MOCK_NOTE =
 interface CkptSpec {
   id: string;
   step: number;
-  val_bpb: number;
+  /** null mirrors the backend, which reports no bits/byte until a run has an eval record */
+  val_bpb: number | null;
   bytes_seen: number;
   trained_minutes: number;
   created_at: string;
@@ -26,7 +27,7 @@ export const CHECKPOINTS: CkptSpec[] = [
   {
     id: 'mock_pilot_1h/step_1200.pt',
     step: 1200,
-    val_bpb: 2.11,
+    val_bpb: null,
     bytes_seen: 39321600,
     trained_minutes: 23.4,
     created_at: '2026-08-21T09:41:02Z'

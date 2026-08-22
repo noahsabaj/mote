@@ -38,6 +38,7 @@
     </dl>
     {#if diagnostics.rate.length > 1}
       <div class="plot">
+        <p class="meta">Bytes/s at each stats update, from the start of the reply.</p>
         <Sparkline
           values={diagnostics.rate}
           min={0}

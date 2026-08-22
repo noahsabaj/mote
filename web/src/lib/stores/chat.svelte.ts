@@ -227,7 +227,7 @@ class Chat {
           trace?.push(ev);
           break;
         case 'chunk':
-          trace?.closeChunk(ev);
+          trace?.closeChunk();
           break;
         case 'stats':
           stats = ev;

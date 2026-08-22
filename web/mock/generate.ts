@@ -142,11 +142,16 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
 
     if (boundary && i > 0) {
       const text = decoded.slice(chunkTextStart);
+      // Mirrors morpheme/serve/engine.py: chunk spans are reported in whole-context
+      // coordinates (prompt included) and `end` is one short of `start + bytes`, while
+      // `byte.i` is reply-local. The client ignores these spans and rebuilds chunks from
+      // the per-byte `chunk` field; emitting the awkward values here keeps dev honest
+      // about what production actually sends.
       send(ws, {
         type: 'chunk',
         index: chunkIndex,
-        start: chunkStart,
-        end: i,
+        start: promptBytes + chunkStart,
+        end: promptBytes + i - 1,
         bytes: i - chunkStart,
         text
       });
@@ -230,8 +235,8 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
     send(ws, {
       type: 'chunk',
       index: chunkIndex,
-      start: chunkStart,
-      end: emitted,
+      start: promptBytes + chunkStart,
+      end: promptBytes + emitted - 1,
       bytes: emitted - chunkStart,
       text: decoded.slice(chunkTextStart)
     });

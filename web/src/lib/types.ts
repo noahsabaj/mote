@@ -12,8 +12,9 @@ export interface CheckpointInfo {
   path: string;
   step: number;
   bytes_seen: number;
-  val_bpb: number;
-  trained_minutes: number;
+  /** null until the run log contains an eval record */
+  val_bpb: number | null;
+  trained_minutes: number | null;
   created_at: string;
 }
 
@@ -60,7 +61,7 @@ export interface ModelInfo {
 export interface CheckpointListItem {
   id: string;
   step: number;
-  val_bpb: number;
+  val_bpb: number | null;
   bytes_seen: number;
   created_at: string;
   loaded: boolean;
@@ -69,7 +70,7 @@ export interface CheckpointListItem {
 export interface TrainingRun {
   id: string;
   steps: number;
-  last_val_bpb: number;
+  last_val_bpb: number | null;
   running: boolean;
   started_at: string;
 }

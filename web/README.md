@@ -36,7 +36,8 @@ The mock streams at 26–57 bytes/s, opens chunks on word-like units, accepts ru
 the multi-byte head, includes a multi-byte UTF-8 character in every reply so the `pending` path
 is exercised, and emits `stats` every 16 bytes and `diagnostics` at each chunk boundary. One
 training run reports `running: true` and its log genuinely grows while the dev server is up, so
-the polling path is real.
+the polling path is real. One checkpoint reports `val_bpb: null`, which the backend does for any
+run whose log has no eval record yet, so the "not measured" rendering is visible in dev too.
 
 ## Layout
 
@@ -91,6 +92,13 @@ is a version counter bumped on flush. No byte creates a DOM node unless you open
 a 272-byte reply keeps the whole page at ~86 elements. Structure view adds one span per chunk
 (not per byte) and caps at 1500 chunks; the byte inspector is windowed, so 4096 bytes cost ~33
 rows.
+
+**Chunk spans.** `chunk` events are used only as "a chunk closed" signals. Their `start`/`end`
+come from `morpheme/serve/engine.py` in whole-context coordinates (prompt included) and its
+`end` is one short of its own `bytes` count, while `byte.i` is reply-local — so chunk spans are
+rebuilt from the `chunk` index that every byte already carries, which is unambiguous and in the
+same frame as everything else. The dev mock emits the same awkward values on purpose, so this
+does not silently regress.
 
 **Conversations.** The backend stores nothing, so the full message list is sent every turn.
 The transcript is kept in `localStorage` (up to 30 conversations, listed in the header menu with
