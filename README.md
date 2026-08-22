@@ -87,6 +87,13 @@ python -m morpheme.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
 entropy, chunk boundaries, multi-byte acceptances, UTF-8 assembly, live Mamba-3 retention and Relation exchange mass).
 The built frontend (`web/dist`) is served at `/`.
 
+## Frontend
+
+`web/` is a Vite + Svelte 5 + TypeScript app (see `web/README.md`): `npm install`, `npm run dev` (standalone against a
+clearly-labelled dev mock), `npm run build` (→ `web/dist`, served by the backend at `/`), `npm run check`. One page: the
+conversation, a one-line honesty strip, and Structure/Bytes toggles under each reply; Model, Diagnostics and Training
+open as sheets. Everything it shows comes from the API above.
+
 ## Cloud (Lightning.ai)
 
 `cloud/launch.py` drives a studio through the SDK; nothing starts without `--go`. `plan` prints the budget math.
