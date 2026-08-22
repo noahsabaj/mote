@@ -41,10 +41,11 @@
     const pad = (y1 - y0) * 0.08 || 0.05;
     // Snap the y domain outwards to a round step so the axis labels are readable numbers.
     const step = niceStep((y1 + pad - (y0 - pad)) / 2);
+    const nonNegative = y0 >= 0; // bits/byte, bytes/chunk, rates: never draw a negative axis for these
     return {
       x0,
       x1,
-      y0: Math.floor((y0 - pad) / step) * step,
+      y0: nonNegative ? Math.max(0, Math.floor((y0 - pad) / step) * step) : Math.floor((y0 - pad) / step) * step,
       y1: Math.ceil((y1 + pad) / step) * step,
       step
     };
