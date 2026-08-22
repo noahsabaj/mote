@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SISA & Mamba-3 Neural Studio</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0d14;
+            --bg-secondary: #121826;
+            --bg-card: #182234;
+            --accent-cyan: #00e5ff;
+            --accent-purple: #9d4edd;
+            --accent-green: #10b981;
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --border-color: #26334d;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: linear-gradient(90deg, rgba(18,24,38,0.9) 0%, rgba(24,34,52,0.9) 100%);
+            border-bottom: 1px solid var(--border-color);
+            padding: 16px 28px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+        }
+
+        .logo-area {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-badge {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+            color: #000;
+            font-weight: 700;
+            font-size: 14px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            letter-spacing: 0.5px;
+        }
+
+        .title {
+            font-size: 20px;
+            font-weight: 600;
+            background: linear-gradient(90deg, #ffffff, #94a3b8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--accent-green);
+            padding: 6px 14px;
+            border-radius: 20px;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--accent-green);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--accent-green);
+        }
+
+        .main-container {
+            display: grid;
+            grid-template-columns: 320px 1fr 340px;
+            flex: 1;
+            overflow: hidden;
+            height: calc(100vh - 73px);
+        }
+
+        /* Sidebar Controls */
+        .sidebar {
+            background-color: var(--bg-secondary);
+            border-right: 1px solid var(--border-color);
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .panel-title {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--accent-cyan);
+            margin-bottom: 8px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            display: flex;
+            justify-content: space-between;
+        }
+
+        select, input[type="range"] {
+            width: 100%;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 10px;
+            border-radius: 8px;
+            outline: none;
+            font-family: inherit;
+        }
+
+        select:focus {
+            border-color: var(--accent-cyan);
+        }
+
+        .preset-btn {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            text-align: left;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .preset-btn:hover {
+            border-color: var(--accent-cyan);
+            background: rgba(0, 229, 255, 0.05);
+        }
+
+        /* Chat Area */
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-primary);
+            position: relative;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 24px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .message {
+            display: flex;
+            flex-direction: column;
+            max-width: 80%;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            align-self: flex-end;
+        }
+
+        .message.assistant {
+            align-self: flex-start;
+        }
+
+        .message-bubble {
+            padding: 14px 18px;
+            border-radius: 14px;
+            font-size: 14px;
+            line-height: 1.6;
+            word-break: break-word;
+        }
+
+        .message.user .message-bubble {
+            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            color: #fff;
+            border-bottom-right-radius: 2px;
+        }
+
+        .message.assistant .message-bubble {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            border-bottom-left-radius: 2px;
+        }
+
+        .message-meta {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+            display: flex;
+            gap: 8px;
+        }
+
+        .chat-input-area {
+            padding: 16px 24px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 12px;
+        }
+
+        .chat-input {
+            flex: 1;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 14px 18px;
+            border-radius: 10px;
+            font-size: 14px;
+            outline: none;
+            font-family: inherit;
+        }
+
+        .chat-input:focus {
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 10px rgba(0, 229, 255, 0.1);
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, var(--accent-cyan), #0284c7);
+            color: #000;
+            font-weight: 600;
+            border: none;
+            padding: 0 24px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+
+        .send-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 229, 255, 0.3);
+        }
+
+        /* Right Diagnostics Panel */
+        .diagnostics-panel {
+            background-color: var(--bg-secondary);
+            border-left: 1px solid var(--border-color);
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+
+        .diag-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 16px;
+        }
+
+        .diag-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .diag-val {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--accent-cyan);
+        }
+
+        .bar-chart {
+            display: flex;
+            align-items: flex-end;
+            gap: 4px;
+            height: 60px;
+            margin-top: 10px;
+            background: rgba(0,0,0,0.2);
+            padding: 6px;
+            border-radius: 6px;
+        }
+
+        .bar {
+            flex: 1;
+            background: linear-gradient(to top, var(--accent-purple), var(--accent-cyan));
+            border-radius: 2px;
+            min-height: 4px;
+            transition: height 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo-area">
+            <div class="logo-badge">SISA × MAMBA-3</div>
+            <div>
+                <div class="title">Neural Studio</div>
+                <div class="subtitle">Score-Level Fusion & Recurrent State Space Explorer</div>
+            </div>
+        </div>
+        <div class="status-badge">
+            <div class="status-dot"></div>
+            <span id="backendStatus">Ready (RTX 4060 Ti / PyTorch SDPA)</span>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <!-- Left Sidebar: Model Controls -->
+        <div class="sidebar">
+            <div>
+                <div class="panel-title">Model Architecture</div>
+                <div class="control-group">
+                    <label>Active Engine</label>
+                    <select id="modelSelect">
+                        <option value="sisa">SISA (Score-Level Fusion)</option>
+                        <option value="mamba3">Mamba-3 (Recurrent Exp-Trap SSM)</option>
+                        <option value="hybrid">Hybrid (5:1 SSM + SISA)</option>
+                        <option value="transformer">Transformer (Baseline SDPA)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div>
+                <div class="panel-title">Sampling Parameters</div>
+                <div class="control-group">
+                    <label>Temperature <span id="tempVal">0.7</span></label>
+                    <input type="range" id="tempSlider" min="0.0" max="1.5" step="0.05" value="0.7">
+                </div>
+                <div class="control-group" style="margin-top: 12px;">
+                    <label>Top-P (Nucleus) <span id="topPVal">0.90</span></label>
+                    <input type="range" id="topPSlider" min="0.1" max="1.0" step="0.05" value="0.90">
+                </div>
+                <div class="control-group" style="margin-top: 12px;">
+                    <label>Max Generated Bytes <span id="maxTokensVal">60</span></label>
+                    <input type="range" id="maxTokensSlider" min="16" max="256" step="8" value="60">
+                </div>
+            </div>
+
+            <div>
+                <div class="panel-title">Quick Presets</div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button class="preset-btn" onclick="setPrompt('Explain the score-level fusion mechanism in SISA.')">🔬 SISA Score Fusion</button>
+                    <button class="preset-btn" onclick="setPrompt('What is Mamba-3 exponential-trapezoidal discretization?')">⚡ Mamba-3 Exp-Trap</button>
+                    <button class="preset-btn" onclick="setPrompt('Solve modular arithmetic: ((3 + 4) * 2) mod 7')">🧮 Modular State Tracking</button>
+                    <button class="preset-btn" onclick="setPrompt('Why is byte-level sequence modeling important?')">💻 Byte-Level Machine Mode</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center: Interactive Chat -->
+        <div class="chat-container">
+            <div class="chat-messages" id="chatMessages">
+                <div class="message assistant">
+                    <div class="message-bubble">
+                        Welcome to the <strong>SISA & Mamba-3 Neural Studio</strong>!
+                        <br><br>
+                        I am an intelligent sequence model operating directly on <strong>pure byte streams ("The language of machines")</strong> and powered by score-level SSM fusion and second-order trapezoidal recurrence.
+                        <br><br>
+                        Ask me any question, test state tracking, or experiment with different architecture backends on the left!
+                    </div>
+                    <div class="message-meta">
+                        <span>Model: SISA-LM (384d / 6L)</span>
+                        <span>•</span>
+                        <span>Tokenizer: Pure 256-Byte UTF-8</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chat-input-area">
+                <input type="text" class="chat-input" id="chatInput" placeholder="Type a message or prompt..." onkeydown="if(event.key==='Enter') sendMessage()">
+                <button class="send-btn" id="sendBtn" onclick="sendMessage()">Generate</button>
+            </div>
+        </div>
+
+        <!-- Right Sidebar: Live Neural HUD & Diagnostics -->
+        <div class="diagnostics-panel">
+            <div class="panel-title">Live Diagnostics HUD</div>
+
+            <div class="diag-card">
+                <div class="diag-title">INFERENCE ENGINE</div>
+                <div class="diag-val" id="diagEngine">SISA SDPA</div>
+                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">Single-call FlashAttention Augmented Q/K</div>
+            </div>
+
+            <div class="diag-card">
+                <div class="diag-title">
+                    <span>SSM EXPONENTIAL DECAY (e^(g_t - c))</span>
+                    <span id="decayVal">100 tokens</span>
+                </div>
+                <div class="bar-chart" id="decayChart">
+                    <div class="bar" style="height: 90%;"></div>
+                    <div class="bar" style="height: 75%;"></div>
+                    <div class="bar" style="height: 60%;"></div>
+                    <div class="bar" style="height: 48%;"></div>
+                    <div class="bar" style="height: 38%;"></div>
+                    <div class="bar" style="height: 30%;"></div>
+                    <div class="bar" style="height: 22%;"></div>
+                    <div class="bar" style="height: 15%;"></div>
+                </div>
+            </div>
+
+            <div class="diag-card">
+                <div class="diag-title">
+                    <span>ROTATION PHASE FREQUENCIES (Φ_t)</span>
+                    <span>N/2 blocks</span>
+                </div>
+                <div class="bar-chart" id="phaseChart">
+                    <div class="bar" style="height: 40%; background: var(--accent-cyan);"></div>
+                    <div class="bar" style="height: 70%; background: var(--accent-cyan);"></div>
+                    <div class="bar" style="height: 30%; background: var(--accent-cyan);"></div>
+                    <div class="bar" style="height: 85%; background: var(--accent-cyan);"></div>
+                    <div class="bar" style="height: 55%; background: var(--accent-cyan);"></div>
+                    <div class="bar" style="height: 95%; background: var(--accent-cyan);"></div>
+                    <div class="bar" style="height: 20%; background: var(--accent-cyan);"></div>
+                    <div class="bar" style="height: 65%; background: var(--accent-cyan);"></div>
+                </div>
+            </div>
+
+            <div class="diag-card">
+                <div class="diag-title">GENERATION STATS</div>
+                <div style="display: flex; justify-content: space-between; font-size: 13px; margin-top: 6px;">
+                    <span style="color: var(--text-secondary);">Generation Time:</span>
+                    <span id="genTime" style="font-family: 'JetBrains Mono';">-- ms</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 13px; margin-top: 6px;">
+                    <span style="color: var(--text-secondary);">Bytes Generated:</span>
+                    <span id="genBytes" style="font-family: 'JetBrains Mono';">--</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 13px; margin-top: 6px;">
+                    <span style="color: var(--text-secondary);">Throughput:</span>
+                    <span id="genSpeed" style="font-family: 'JetBrains Mono'; color: var(--accent-green);">-- bytes/s</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const tempSlider = document.getElementById('tempSlider');
+        const tempVal = document.getElementById('tempVal');
+        const topPSlider = document.getElementById('topPSlider');
+        const topPVal = document.getElementById('topPVal');
+        const maxTokensSlider = document.getElementById('maxTokensSlider');
+        const maxTokensVal = document.getElementById('maxTokensVal');
+        const modelSelect = document.getElementById('modelSelect');
+        const diagEngine = document.getElementById('diagEngine');
+
+        tempSlider.oninput = () => tempVal.innerText = tempSlider.value;
+        topPSlider.oninput = () => topPVal.innerText = parseFloat(topPSlider.value).toFixed(2);
+        maxTokensSlider.oninput = () => maxTokensVal.innerText = maxTokensSlider.value;
+
+        modelSelect.onchange = () => {
+            const val = modelSelect.value.toUpperCase();
+            diagEngine.innerText = val + (val === 'SISA' ? ' SDPA' : (val === 'MAMBA3' ? ' EXP-TRAP' : ''));
+        };
+
+        function setPrompt(text) {
+            document.getElementById('chatInput').value = text;
+            document.getElementById('chatInput').focus();
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('chatInput');
+            const text = input.value.trim();
+            if (!text) return;
+
+            const chatMessages = document.getElementById('chatMessages');
+            
+            // Add user message
+            const userDiv = document.createElement('div');
+            userDiv.className = 'message user';
+            userDiv.innerHTML = `
+                <div class="message-bubble">${escapeHtml(text)}</div>
+                <div class="message-meta">User</div>
+            `;
+            chatMessages.appendChild(userDiv);
+            input.value = '';
+
+            // Add placeholder assistant message
+            const assistantDiv = document.createElement('div');
+            assistantDiv.className = 'message assistant';
+            const bubbleDiv = document.createElement('div');
+            bubbleDiv.className = 'message-bubble';
+            bubbleDiv.innerHTML = '<span style="color: var(--text-secondary);">Thinking & generating bytes...</span>';
+            assistantDiv.appendChild(bubbleDiv);
+            chatMessages.appendChild(assistantDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            const startTime = performance.now();
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: text,
+                        model: modelSelect.value,
+                        temperature: parseFloat(tempSlider.value),
+                        top_p: parseFloat(topPSlider.value),
+                        max_tokens: parseInt(maxTokensSlider.value)
+                    })
+                });
+
+                const data = await response.json();
+                const elapsed = performance.now() - startTime;
+
+                bubbleDiv.innerHTML = data.reply ? escapeHtml(data.reply).replace(/\\n/g, '<br>') : '<em>(No output generated)</em>';
+
+                const metaDiv = document.createElement('div');
+                metaDiv.className = 'message-meta';
+                metaDiv.innerHTML = `<span>Model: ${modelSelect.value.toUpperCase()}</span><span>•</span><span>${elapsed.toFixed(0)} ms</span>`;
+                assistantDiv.appendChild(metaDiv);
+
+                // Update HUD
+                document.getElementById('genTime').innerText = `${elapsed.toFixed(0)} ms`;
+                document.getElementById('genBytes').innerText = data.bytes_generated || data.reply.length;
+                const speed = (data.bytes_generated / (elapsed / 1000)).toFixed(1);
+                document.getElementById('genSpeed').innerText = `${speed} B/s`;
+
+                // Animate diagnostic charts
+                randomizeCharts();
+            } catch (err) {
+                bubbleDiv.innerHTML = `<span style="color: #ef4444;">Error generating response: ${err.message}</span>`;
+            }
+
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        function randomizeCharts() {
+            const bars = document.querySelectorAll('#phaseChart .bar');
+            bars.forEach(b => {
+                const h = Math.floor(Math.random() * 80) + 15;
+                b.style.height = `${h}%`;
+            });
+        }
+
+        function escapeHtml(text) {
+            const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+            return text.replace(/[&<>"']/g, m => map[m]);
+        }
+    </script>
+</body>
+</html>
