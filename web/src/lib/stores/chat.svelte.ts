@@ -82,7 +82,8 @@ class Chat {
       onLinkState: (s) => {
         this.link = s;
       },
-      onInterrupted: () => this.#fail('The connection dropped mid-reply.')
+      onInterrupted: () => this.#fail('The connection dropped mid-reply.'),
+      onAborted: () => this.#abort()
     });
   }
 
@@ -282,6 +283,17 @@ class Chat {
   #patch(id: string | null, patch: Partial<Turn>): void {
     if (!id) return;
     this.turns = this.turns.map((t) => (t.id === id ? { ...t, ...patch } : t));
+  }
+
+  /** The request never reached the backend, so there is nothing to keep. */
+  #abort(): void {
+    const id = this.streamingId;
+    if (id) this.turns = this.turns.filter((t) => t.id !== id || t.content.length > 0);
+    if (id) delete this.traces[id];
+    this.streamingId = null;
+    this.awaitingStart = false;
+    diagnostics.end(null);
+    this.#save();
   }
 
   #fail(message: string): void {

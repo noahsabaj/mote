@@ -121,11 +121,14 @@ def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len:
         bm = out.routing.boundary_mask
         tot_bytes += bm.numel()
         tot_chunks += bm.sum().item()
-        # boundary alignment: fraction of boundaries (excluding position 0) whose previous byte is space/newline/punct
-        prev = inputs[:, :-1]
-        is_sep = (prev == 32) | (prev == 10) | ((prev >= 33) & (prev <= 47)) | ((prev >= 58) & (prev <= 64))
+        # boundary/word alignment (excluding position 0): a boundary is "word-aligned" if its previous byte is a
+        # separator (space/newline/punct) OR the boundary byte itself is one (chunks that start with the space).
+        def sep(t):
+            return (t == 32) | (t == 10) | ((t >= 33) & (t <= 47)) | ((t >= 58) & (t <= 64))
+
+        prev, cur = inputs[:, :-1], inputs[:, 1:]
         b_inner = bm[:, 1:]
-        word_hits += (b_inner & is_sep).sum().item()
+        word_hits += (b_inner & (sep(prev) | sep(cur))).sum().item()
         boundary_count += b_inner.sum().item()
         if out.mbp_logits is not None:
             pred = out.mbp_logits.argmax(-1)
