@@ -209,6 +209,8 @@ def main(argv=None):
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--sft", action="store_true", help="train on an SFT shard (assistant-byte loss mask)")
     ap.add_argument("--init-from", default=None, help="checkpoint to initialize weights from (e.g. pretrain -> SFT)")
+    ap.add_argument("--ratio-weight", type=float, default=None, help="override dc.ratio_loss_weight (α)")
+    ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
     args = ap.parse_args(argv)
 
     torch.manual_seed(args.seed)
@@ -218,6 +220,10 @@ def main(argv=None):
 
     cfg = MorphemeConfig.load(args.config) if args.config else getattr(MorphemeConfig, args.preset)()
     cfg.max_seq_len = max(cfg.max_seq_len, args.seq_len)
+    if args.ratio_weight is not None:
+        cfg.dc.ratio_loss_weight = args.ratio_weight
+    if args.target_ratio is not None:
+        cfg.dc.target_ratio_init, cfg.dc.target_ratio_final = args.target_ratio
     cfg.save(out_dir / "config.json")
     (out_dir / "run.json").write_text(json.dumps({**vars(args), "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
 
