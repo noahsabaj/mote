@@ -31,7 +31,7 @@ USERNAME_FALLBACK = "noahbsabaj"
 PRETRAIN_CMD = (
     "cd ~/{d} && export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True && "
     "nohup .venv-cloud/bin/python -m morpheme.train.train --preset flagship --data data/pretrain_mix --out runs/flagship "
-    "--batch-size 16 --grad-accum 2 --seq-len 4096 --lr 6e-4 --max-minutes {minutes} --eval-every 500 --eval-batches 16 "
+    "--batch-size 16 --grad-accum 2 --seq-len 4096 --lr 6e-4 --ratio-weight 0.1 --max-minutes {minutes} --eval-every 500 --eval-batches 16 "
     "--ckpt-minutes 10 --log-every 20 {resume} > runs/flagship/stdout.log 2>&1 &"
 )
 SFT_CMD = (

@@ -43,6 +43,12 @@ python cloud/launch.py stop --go                    # stop the machine (the disk
 python -m morpheme.serve.app --checkpoint runs/flagship_sft/last.pt
 ```
 
+## Chunking knob (decided from the local pilots)
+The pilot at the paper's α=0.03 settled at ~3.0 bytes/chunk (sub-word); α=0.1 gave ~3.7 bytes/chunk, multi-word chunks,
+and better bits/byte at equal wall-clock (faster steps). The launcher therefore passes `--ratio-weight 0.1` with the
+default ATDC target schedule 5→6.5. Override with `--ratio-weight` / `--target-ratio INIT FINAL` in `PRETRAIN_CMD` if you
+want to push harder (the H-Net paper itself lands at 4.6–4.8 bytes/chunk for a target of 6).
+
 ## Notes
 * `cloud/bootstrap.sh` pins `state-spaces/mamba` to commit `e9594ce` (the one validated locally) and runs the test suite.
 * Everything training-side is identical to the local pilot (`morpheme/train/train.py`); only the preset, batch and data differ.
