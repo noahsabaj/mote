@@ -77,6 +77,26 @@ def test_mamba3_step_matches_forward_and_state_continuation():
     assert rel(y_ref, y_step) < 1e-4, rel(y_ref, y_step)
 
 
+def test_chunked_ema_matches_sequential_recurrence():
+    from morpheme.model.dc import DeChunkLayer
+
+    torch.manual_seed(0)
+    B, M, D = 2, 203, 16  # not a multiple of the 64-step block on purpose
+    x = torch.randn(B, M, D, dtype=torch.float64)
+    p = torch.rand(B, M, dtype=torch.float64).clamp(1e-4, 1 - 1e-4)
+    ref = torch.empty_like(x)
+    z = torch.zeros(B, D, dtype=torch.float64)
+    for t in range(M):
+        z = p[:, t, None] * x[:, t] + (1 - p[:, t, None]) * z
+        ref[:, t] = z
+    out = DeChunkLayer._ema_chunked(x, p)
+    assert (out - ref).abs().max().item() < 1e-9
+    # gradients flow (no in-place hazards)
+    xg = x.clone().requires_grad_(True)
+    DeChunkLayer._ema_chunked(xg, p).sum().backward()
+    assert xg.grad is not None and torch.isfinite(xg.grad).all()
+
+
 def test_ratio_loss_minimum_is_one_at_target():
     N = 6
     L = 600

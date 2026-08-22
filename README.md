@@ -1,76 +1,103 @@
-# SISA × Mamba-3: High-Performance Sequence Modeling & Scientific Testbed
+# Morpheme
 
-A unified, modular PyTorch library implementing **SISA** (*SSM-Informed Softmax Attention via score-level fusion*) and **Mamba-3** (*Exponential-Trapezoidal Discretization, Complex RoPE State Tracking, and MIMO parameterization*), complete with a **pure Byte-Level sequence engine**, **interactive Web UI Neural Studio**, and a **scientific & mathematical benchmark suite**.
+A byte-level language model that learns its own tokenizer, and a studio for chatting with it and
+looking inside. Working name; the package is `morpheme/`.
 
----
+**Architecture** — a one-stage H-Net (Hwang, Wang & Gu, 2025) over raw UTF-8 bytes:
 
-## 🌟 Key Innovations Implemented
-
-### 1. SISA (SSM-Informed Softmax Attention)
-- **Score-Level Fusion**: Directly fuses sequential importance into attention logits:
-  $$s_{ij}^{\text{SISA}} = \frac{q_i^\top k_j}{\sqrt{d_h}} + \lambda \cdot \bar{C}_i^\top \bar{B}_j$$
-- **Single-SDPA Reduction (Proposition 1)**: Realized via augmented Query/Key vectors without custom kernels:
-  $$\hat{Q}_i = [q_i; s \bar{C}_i], \quad \hat{K}_j = [k_j; s \bar{B}_j], \quad s = d_h^{1/4} \sqrt{\lambda}$$
-  Dispatched in a single `torch.nn.functional.scaled_dot_product_attention` call with `scale = 1 / sqrt(d_h)` (100% FlashAttention compatible).
-- **Fast Retrieval & KV Cache**: Reaches 100% Needle-in-a-Haystack (NIAH) from step 1K while maintaining exact $O(1)$ step KV-cached autoregressive generation.
-
-### 2. Mamba-3 (State Space Principles)
-- **Exponential-Trapezoidal Discretization (Proposition 1 & 4)**:
-  $$h_t = \alpha_t h_{t-1} + \beta_t \bar{B}_{t-1} x_{t-1} + \gamma_t \bar{B}_t x_t$$
-  Achieves second-order $O(\Delta^3)$ local truncation error (vs $O(\Delta^2)$ in Euler) and creates an implicit width-2 causal convolution on the state input.
-- **Complex State Tracking & RoPE Trick (Proposition 2 & 3)**:
-  Bypasses complex matrix overhead while enabling rotational state tracking (solving parity and modular arithmetic).
-- **BC Normalization & Learnable Biases**:
-  RMSNorm on $B, C$ projections followed by learnable channel-wise biases initialized to $1.0$.
-- **MIMO Formulation**:
-  Rank-$R$ matrix projections ($B_t \in \mathbb{R}^{N \times R}, X_t \in \mathbb{R}^{P \times R}$) increasing arithmetic intensity during decoding.
-
-### 3. Pure Byte-Level Modeling ("The Language of Machines")
-- Zero-tokenization raw UTF-8 machine byte stream processing (Vocab: 256 bytes + special tokens = 261).
-- Incremental multi-byte UTF-8 streaming decoder.
-
----
-
-## 🚀 Quickstart & Interactive Web UI
-
-### 1. Launch the Interactive Web Studio
-Open a browser and navigate to `http://127.0.0.1:7860`:
-```pwsh
-.\.venv\Scripts\python -m sisa_mamba.web.app --port 7860
 ```
-- **Real-time natural language chat & byte generation**.
-- **Switch models live**: SISA, Mamba-3, Hybrid (5:1 SSM+SISA), Transformer.
-- **Live Diagnostics HUD**: Visualizes SSM exponential decay profiles ($e^{g_t - c}$) and RoPE rotational phase frequencies ($\Phi_t$).
-
-### 2. Run the Conversational Training Pipeline
-Train a byte-level conversational agent on local GPU (RTX 4060 Ti):
-```pwsh
-.\.venv\Scripts\python -m sisa_mamba.training.train_conversational --model sisa --epochs 3 --batch_size 16
+bytes ─▶ Mamba-3 encoder ─▶ dynamic chunking ─▶ Relation main network ─▶ dechunk (EMA) ─▶ Mamba-3 decoder ─▶ next byte
+                                           └──────────────────────────────────────────▶ multi-byte head (LCA) ─▶ several bytes at once
 ```
 
----
+* **Encoder / decoder**: official Mamba-3 SISO mixers (`state-spaces/mamba`, Triton kernels on Linux/WSL2;
+  a weight-compatible pure-PyTorch path everywhere else, including a recurrent decode step) — `morpheme/model/mamba3.py`.
+* **Dynamic chunking**: cosine-similarity router, straight-through boundaries, EMA dechunking, ratio loss with the
+  ATDC target schedule — `morpheme/model/dc.py`.
+* **Main network**: Full Relation (Ge, Yang & Nie, 2026): Self/Exchange relations, count calibration λ, Givens head mixing,
+  `{P2, Ĩ}` decode cache — `morpheme/model/relation.py`.
+* **Multi-byte prediction**: Latent-Causal-Attention head (Owodunni et al., 2026) that proposes the rest of a chunk
+  in parallel; bytes are accepted while the head's confidence ≥ τ — `morpheme/model/mbp.py`.
+* **Tokenizer**: none. 256 byte values + `<|bos|> <|eos|> <|pad|> <|system|> <|user|> <|assistant|>` — `morpheme/tokenizer.py`.
 
-## 🔬 Scientific & Mathematical Benchmarks
+Every number the studio shows is real: checkpoint metadata, live tensors, run logs. Undertrained checkpoints are
+labelled as such.
 
-### 1. Continuous ODE Discretization Error Scaling
-Verifies that Mamba-3's Exponential-Trapezoidal discretization achieves second-order error scaling ($384\times$ lower truncation error than Euler):
-```pwsh
-.\.venv\Scripts\python -m sisa_mamba.benchmarks.ode_discretization
+## Status (2026-08-22)
+
+* Model, trainer, serving engine and API are implemented and tested (`tests/`, incl. prefill+step decoding
+  reproducing the full forward logits).
+* Local pilot (12.7M params, RTX 4060 Ti, WSL2): dynamic chunking finds word-like boundaries within minutes;
+  see `runs/pilot_*/log.jsonl`.
+* Flagship training on Lightning.ai (`cloud/`) has **not** been run yet.
+* Frontend (`web/`, Vite + Svelte 5) in progress.
+
+## Setup
+
+Python ≥ 3.11. Two environments are useful on Windows:
+
+* **Windows venv** (`.venv`): tests, data building, serving with the pure-PyTorch paths.
+  `uv pip install -e . --python .venv/Scripts/python.exe`
+* **WSL2 Ubuntu** (`~/hnet-venv`): the official Mamba-3 Triton kernels for training. Once:
+  ```bash
+  uv venv ~/hnet-venv --python 3.12
+  uv pip install --python ~/hnet-venv/bin/python torch --index-url https://download.pytorch.org/whl/cu126
+  uv pip install --python ~/hnet-venv/bin/python "triton>=3.5" einops numpy huggingface_hub transformers datasets fastapi "uvicorn[standard]" websockets pytest
+  MAMBA_SKIP_CUDA_BUILD=TRUE uv pip install --python ~/hnet-venv/bin/python -e /mnt/d/Code/Storage/mamba --no-deps --no-build-isolation
+  ```
+  `cloud/bootstrap.sh` does the same on a Lightning studio.
+
+## Data
+
+```bash
+python -m morpheme.data.build_bytes --out data/fineweb_edu_pilot --target-mb 300 --val-mb 8     # pilot: FineWeb-Edu ≤4 KB docs
+python -m morpheme.data.build_mix   --out data/pretrain_mix --target-gb 10 --val-mb 64           # flagship mix (morpheme/data/sources.py)
+python -m morpheme.data.build_sft   --out data/sft_mix --target-mb 300 --val-mb 8                # chat SFT mix with loss masks
 ```
 
-### 2. Chomsky Formal Language State-Tracking (Parity & Modular Arithmetic)
-Evaluates rotational expressivity on parity bitstreams and modular arithmetic:
-```pwsh
-.\.venv\Scripts\python -m sisa_mamba.benchmarks.state_tracking
+Shards are uint16 ids (bytes + specials) with BOS/EOS separators; SFT shards add a uint8 mask (1 on assistant bytes).
+
+## Train
+
+```bash
+# in WSL2 (kernels):
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -m morpheme.train.train \
+  --preset pilot --data ~/data/fineweb_edu_pilot --out runs/pilot_1h --batch-size 4 --grad-accum 4 --seq-len 2048 --max-minutes 60
+# SFT from a pretrained checkpoint:
+python -m morpheme.train.train --preset pilot --sft --init-from runs/pilot_1h/last.pt --data data/sft_mix --out runs/pilot_sft --max-minutes 20
 ```
 
-### 3. Needle-in-a-Haystack (NIAH) Long-Context Retrieval
-Measures exact key retrieval across varying sequence lengths ($L \in \{256, 512, 1024, 2048\}$):
-```pwsh
-.\.venv\Scripts\python -m sisa_mamba.benchmarks.niah_retrieval
+`log.jsonl` records train loss/BPB, bytes-per-chunk, ratio loss, multi-byte-head loss, and periodic evals
+(val BPB, boundary/separator alignment, MBP top-1, a chunked text sample). `last.pt` is written atomically
+every `--ckpt-minutes`; `--resume` continues. With `--max-steps 0` (default) the LR and ratio schedules follow
+wall-clock progress toward `--max-minutes`.
+
+Notes learned the hard way: batch 4 × accum 4 at 2048 bytes is the 8 GB sweet spot (at initialization the router
+fires on ~50% of bytes, so the materialized Relation attention is ~6× larger than after convergence); the Triton
+SSD kernel re-autotunes for every new chunk count, so the EMA dechunk uses a chunked pure-PyTorch scan instead.
+
+## Serve
+
+```bash
+python -m morpheme.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
 ```
 
-### 4. Run PyTest Unit Tests
-```pwsh
-.\.venv\Scripts\pytest -v
+`docs/api.md` is the contract: `/api/model`, `/api/checkpoints` (+ hot-swap), `/api/training/runs`,
+`/v1/chat/completions` (OpenAI-compatible SSE), and `/ws/generate` streaming per-byte events (probabilities,
+entropy, chunk boundaries, multi-byte acceptances, UTF-8 assembly, live Mamba-3 retention and Relation exchange mass).
+The built frontend (`web/dist`) is served at `/`.
+
+## Cloud (Lightning.ai)
+
+`cloud/launch.py` drives a studio through the SDK; nothing starts without `--go`. `plan` prints the budget math.
+Training runs on an interruptible H100 and auto-resumes from the studio disk.
+
+## Tests
+
+```bash
+python -m pytest -q tests/
 ```
+
+## References
+
+H-Net 2507.07955 · Mamba-3 2603.15569 · Relation 2608.20172 · LCA multi-byte prediction 2608.15454 · ATDC 2605.30080.

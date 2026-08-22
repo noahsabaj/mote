@@ -139,7 +139,8 @@ async function handle(
         await new Promise((r) => setTimeout(r, 40));
       }
       res.write('data: [DONE]\n\n');
-      return res.end();
+      res.end();
+      return;
     }
     return json(res, 200, {
       object: 'chat.completion',

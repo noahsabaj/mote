@@ -130,13 +130,49 @@ class DeChunkLayer(nn.Module):
         self.eps = prob_clamp
         assert d_model % headdim == 0
         self.nheads = d_model // headdim
+        self.use_kernel = False  # the Triton SSD kernel re-autotunes for every new chunk count; chunked torch is faster for us
 
     def allocate_inference_cache(self, batch_size: int, device, dtype=None) -> DeChunkState:
         return DeChunkState(last_value=torch.zeros(batch_size, self.d_model, device=device, dtype=dtype))
 
+    @staticmethod
+    def _ema_chunked(x: torch.Tensor, p: torch.Tensor, C: int = 64) -> torch.Tensor:
+        """Stable parallel EMA: z̄_t = p_t x_t + (1-p_t) z̄_{t-1}, evaluated per block of C steps.
+
+        Within a block, z̄_t = Σ_{s≤t} exp(L_t - L_s) p_s x_s + exp(L_t - L_0) z̄_0 with L_t = Σ_{u≤t} log(1-p_u);
+        all exponents are ≤ 0 so nothing overflows. O(M·C·D) work, no sequential Python loop over M.
+        """
+        B, M, D = x.shape
+        wdt = torch.float64 if x.dtype == torch.float64 else torch.float32
+        xf, pf = x.to(wdt), p.to(wdt)
+        pad = (-M) % C
+        if pad:
+            xf = F.pad(xf, (0, 0, 0, pad))
+            pf = F.pad(pf, (0, pad))  # p=0 on padding: state is carried unchanged
+        nb = xf.shape[1] // C
+        xf = xf.view(B, nb, C, D)
+        pf = pf.view(B, nb, C)
+        logq = torch.log1p(-pf)  # log(1-p) ≤ 0
+        L = torch.cumsum(logq, dim=-1)  # [B, nb, C]
+        # within-block transfer matrix A[t, s] = exp(L_t - L_s) for s <= t
+        diff = L[..., :, None] - L[..., None, :]  # [B, nb, C, C]
+        mask = torch.tril(torch.ones(C, C, device=x.device, dtype=torch.bool))
+        A = torch.exp(diff.masked_fill(~mask, float("-inf")))
+        local = torch.matmul(A, pf[..., None] * xf)  # [B, nb, C, D]
+        # carry across blocks: z̄ at block end = local_end + exp(L_end) * carry_in
+        carry = torch.zeros(B, D, device=x.device, dtype=wdt)
+        decay_t = torch.exp(L)  # exp(L_t - L_0) with L_0 = 0 at block start  [B, nb, C]
+        blocks = []
+        for b in range(nb):
+            blk = local[:, b] + decay_t[:, b, :, None] * carry[:, None, :]
+            blocks.append(blk)
+            carry = blk[:, -1]
+        out = torch.stack(blocks, dim=1)  # no in-place writes: autograd-safe
+        return out.reshape(B, nb * C, D)[:, :M].to(x.dtype)
+
     def _ema(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
         """x: [B, M, D] chunk outputs (compacted); p: [B, M] boundary probs. Returns z̄ [B, M, D]."""
-        if HAS_SSD_KERNEL and x.is_cuda:
+        if self.use_kernel and HAS_SSD_KERNEL and x.is_cuda:
             dt = torch.log(1 / (1 - p)).to(torch.bfloat16)  # so that exp(-dt) = 1 - p
             xs = (x / dt[..., None]).to(torch.bfloat16)
             A = -torch.ones(self.nheads, device=x.device, dtype=torch.float32)
@@ -151,15 +187,7 @@ class DeChunkLayer(nn.Module):
                 chunk_size=self.block_size,
             )
             return out.reshape(x.shape)
-        # pure-PyTorch sequential scan (inference fallback / CPU)
-        B, M, D = x.shape
-        out = torch.empty_like(x, dtype=torch.float32)
-        z = torch.zeros(B, D, device=x.device, dtype=torch.float32)
-        xf, pf = x.float(), p.float()
-        for t in range(M):
-            z = pf[:, t, None] * xf[:, t] + (1 - pf[:, t, None]) * z
-            out[:, t] = z
-        return out.to(x.dtype)
+        return self._ema_chunked(x, p)
 
     def forward(
         self,

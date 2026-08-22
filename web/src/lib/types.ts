@@ -106,18 +106,23 @@ export interface EvalLogRecord extends LogRecordBase {
 }
 
 /** The run log is JSONL and heterogeneous — checkpoint / done / stopped markers appear too. */
-export type LogRecord = LogRecordBase & Record<string, unknown>;
+export interface LogRecord extends LogRecordBase {
+  [key: string]: unknown;
+}
+
+export type EvalRecord = LogRecord & EvalLogRecord;
+export type TrainRecord = LogRecord & TrainLogRecord;
 
 export interface LogPage {
   records: LogRecord[];
   next: number;
 }
 
-export function isEvalRecord(r: LogRecord): r is EvalLogRecord {
+export function isEvalRecord(r: LogRecord): r is EvalRecord {
   return typeof r.eval === 'object' && r.eval !== null;
 }
 
-export function isTrainRecord(r: LogRecord): r is TrainLogRecord {
+export function isTrainRecord(r: LogRecord): r is TrainRecord {
   return typeof r.train_bpb === 'number';
 }
 

@@ -54,7 +54,7 @@
 </script>
 
 <div class="scrim" role="presentation" onclick={onclose}></div>
-<section
+<div
   class="sheet"
   bind:this={panel}
   role="dialog"
@@ -75,7 +75,7 @@
   <div class="body">
     {@render children()}
   </div>
-</section>
+</div>
 
 <style>
   .scrim {
