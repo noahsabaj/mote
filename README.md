@@ -60,8 +60,9 @@ Shards are uint16 ids (bytes + specials) with BOS/EOS separators; SFT shards add
 ## Train
 
 ```bash
-# in WSL2 (kernels):
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -m morpheme.train.train \
+# in WSL2 (kernels). Do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True under WSL2: it makes the
+# driver fail with "CUDA driver error: device not ready" mid-run (reproduced 3 times; fine on native Linux).
+python -m morpheme.train.train \
   --preset pilot --data ~/data/fineweb_edu_pilot --out runs/pilot_1h --batch-size 4 --grad-accum 4 --seq-len 2048 --max-minutes 60
 # SFT from a pretrained checkpoint:
 python -m morpheme.train.train --preset pilot --sft --init-from runs/pilot_1h/last.pt --data data/sft_mix --out runs/pilot_sft --max-minutes 20
