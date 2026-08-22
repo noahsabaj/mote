@@ -38,6 +38,10 @@
         ? 'stopped'
         : ''
   );
+
+  // All samples of this reply slot in the order they were generated; `turn` is the shown one.
+  const pool = $derived([...(turn.samples ?? []), turn].sort((a, b) => a.at - b.at));
+  const cur = $derived(pool.findIndex((t) => t.id === turn.id));
 </script>
 
 {#if turn.role === 'user'}
@@ -80,10 +84,32 @@
             {#if turn.stats.mbp_proposed > 0}
               · {pct(turn.stats.mbp_accept_rate)} multi-byte accepted
             {/if}
+            {#if turn.ttfbMs !== undefined}· first byte in {num(turn.ttfbMs, 0)} ms{/if}
             {#if reasonNote}· {reasonNote}{/if}
           {/if}
         </p>
         <div class="actions">
+          {#if pool.length > 1}
+            <span class="samples" role="group" aria-label="Samples of this reply">
+              <button
+                class="quiet prev"
+                disabled={cur <= 0 || chat.busy}
+                onclick={() => chat.chooseSample(turn.id, pool[cur - 1].id)}
+                aria-label="Previous sample"
+              >
+                <Icon name="chevron" size={13} />
+              </button>
+              <span class="meta tabular">{cur + 1}/{pool.length}</span>
+              <button
+                class="quiet"
+                disabled={cur >= pool.length - 1 || chat.busy}
+                onclick={() => chat.chooseSample(turn.id, pool[cur + 1].id)}
+                aria-label="Next sample"
+              >
+                <Icon name="chevron" size={13} />
+              </button>
+            </span>
+          {/if}
           {#if trace}
             <button
               class="quiet"
@@ -197,9 +223,23 @@
 
   .actions {
     display: flex;
+    align-items: center;
     gap: 0.1rem;
     opacity: 0;
     transition: opacity 120ms ease;
+  }
+  .samples {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.05rem;
+    margin-right: 0.4rem;
+  }
+  .samples .meta {
+    font-size: 0.75rem;
+    padding: 0 0.15rem;
+  }
+  .prev :global(svg) {
+    transform: rotate(180deg);
   }
   .turn:hover .actions,
   footer:focus-within .actions,

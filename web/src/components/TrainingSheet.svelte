@@ -1,46 +1,62 @@
 <script lang="ts">
+  // Runs are read from the log files on disk. One run is the "primary" (details, probe sample);
+  // any number can be selected to overlay their curves and compare final numbers.
+  import { untrack } from 'svelte';
   import { api, ApiError } from '../lib/api';
-  import { isEvalRecord, isTrainRecord, type LogRecord, type TrainingRun } from '../lib/types';
+  import {
+    isEvalRecord,
+    isTrainRecord,
+    type EvalRecord,
+    type LogRecord,
+    type TrainRecord,
+    type TrainingRun
+  } from '../lib/types';
   import Curve from './Curve.svelte';
-  import type { Point } from '../lib/chart';
+  import type { Series } from '../lib/chart';
   import Icon from './Icon.svelte';
   import { count, minutes, num, pct, when } from '../lib/format';
 
   const POLL_MS = 3000;
+  const PALETTE = ['var(--accent)', '#4f86e0', '#3aa37a', '#b35cc9', '#c9a227', '#7c8590'];
 
   let runs = $state<TrainingRun[]>([]);
   let runsError = $state<string | null>(null);
-  let selected = $state<string | null>(null);
-  let records = $state<LogRecord[]>([]);
+  let selected = $state<string[]>([]);
+  let logs = $state<Record<string, LogRecord[]>>({});
   let logError = $state<string | null>(null);
-  let cursor = 0;
-  let pulling = false;
-
-  const run = $derived(runs.find((r) => r.id === selected) ?? null);
-  const running = $derived(run?.running === true);
+  const cursors: Record<string, number> = {};
+  const pulling = new Set<string>();
 
   async function loadRuns() {
     try {
       runs = await api.runs();
       runsError = null;
-      if (!selected && runs.length) selected = runs[0].id;
+      if (!selected.length && runs.length) selected = [runs[0].id];
     } catch (e) {
       runsError = e instanceof ApiError ? e.message : String(e);
     }
   }
 
   async function pull(id: string) {
-    if (pulling) return;
-    pulling = true;
+    if (pulling.has(id)) return;
+    pulling.add(id);
     try {
-      const page = await api.runLog(id, cursor);
-      if (page.records.length) records = [...records, ...page.records];
-      cursor = page.next;
+      const page = await api.runLog(id, cursors[id] ?? 0);
+      if (page.records.length) logs = { ...logs, [id]: [...(logs[id] ?? []), ...page.records] };
+      cursors[id] = page.next;
       logError = null;
     } catch (e) {
       logError = e instanceof ApiError ? e.message : String(e);
     } finally {
-      pulling = false;
+      pulling.delete(id);
+    }
+  }
+
+  function toggle(id: string) {
+    if (selected.includes(id)) {
+      if (selected.length > 1) selected = selected.filter((x) => x !== id);
+    } else {
+      selected = [...selected, id];
     }
   }
 
@@ -48,41 +64,102 @@
     void loadRuns();
   });
 
-  // A run change starts the log over; `since` then only ever asks for what is new.
+  // First selection of a run starts its log; later pulls only ask for what is new.
   $effect(() => {
-    const id = selected;
-    if (!id) return;
-    cursor = 0;
-    records = [];
-    void pull(id);
+    const ids = selected;
+    untrack(() => {
+      for (const id of ids) {
+        if (cursors[id] === undefined) {
+          cursors[id] = 0;
+          void pull(id);
+        }
+      }
+    });
   });
 
   $effect(() => {
-    const id = selected;
-    if (!id || !running) return;
+    const live = selected.filter((id) => runs.find((r) => r.id === id)?.running);
+    if (!live.length) return;
     const timer = setInterval(() => {
-      void pull(id);
+      for (const id of live) void pull(id);
       void loadRuns();
     }, POLL_MS);
     return () => clearInterval(timer);
   });
 
-  const trainPoints = $derived<Point[]>(
-    records.filter(isTrainRecord).map((r) => ({ x: r.step, y: r.train_bpb }))
+  const single = $derived(selected.length === 1);
+  const primary = $derived(selected[0] ?? null);
+  const primaryRun = $derived(runs.find((r) => r.id === primary) ?? null);
+  const primaryRecords = $derived(primary ? (logs[primary] ?? []) : []);
+  const primaryRunning = $derived(primaryRun?.running === true);
+
+  const colorOf = (i: number) => PALETTE[i % PALETTE.length];
+  const evals = (recs: LogRecord[]): EvalRecord[] => recs.filter(isEvalRecord);
+  const trains = (recs: LogRecord[]): TrainRecord[] => recs.filter(isTrainRecord);
+
+  const bpbSeries = $derived.by<Series[]>(() => {
+    const out: Series[] = [];
+    selected.forEach((id, i) => {
+      const recs = logs[id] ?? [];
+      if (single) {
+        out.push({ points: trains(recs).map((r) => ({ x: r.step, y: r.train_bpb })), label: 'train', weight: 'faint' });
+      }
+      out.push({
+        points: evals(recs).map((r) => ({ x: r.step, y: r.eval.val_bpb })),
+        label: single ? 'val' : id,
+        weight: 'solid',
+        dots: true,
+        color: single ? undefined : colorOf(i)
+      });
+    });
+    return out;
+  });
+
+  const bpicSeries = $derived.by<Series[]>(() => {
+    const out: Series[] = [];
+    selected.forEach((id, i) => {
+      const recs = logs[id] ?? [];
+      const t = trains(recs);
+      if (single) {
+        out.push({ points: t.map((r) => ({ x: r.step, y: r.bpic })), label: 'measured', weight: 'faint' });
+        out.push({ points: t.map((r) => ({ x: r.step, y: r.target_ratio })), label: 'target', weight: 'solid' });
+      } else {
+        out.push({ points: t.map((r) => ({ x: r.step, y: r.bpic })), label: id, weight: 'solid', color: colorOf(i) });
+      }
+    });
+    return out;
+  });
+
+  const table = $derived(
+    selected.map((id, i) => {
+      const recs = logs[id] ?? [];
+      const ev = evals(recs);
+      const tr = trains(recs);
+      const last = ev.length ? ev[ev.length - 1] : null;
+      const lastT = tr.length ? tr[tr.length - 1] : null;
+      return {
+        id,
+        color: colorOf(i),
+        steps: runs.find((r) => r.id === id)?.steps ?? 0,
+        minutes: lastT?.elapsed_min,
+        bps: lastT?.bytes_per_sec,
+        valBpb: last?.eval.val_bpb,
+        bpic: last?.eval.val_bpic,
+        sep: last?.eval.boundary_on_separator_frac,
+        mbp: last?.eval.mbp_top1_acc
+      };
+    })
   );
-  const evalRecords = $derived(records.filter(isEvalRecord));
-  const valPoints = $derived<Point[]>(evalRecords.map((r) => ({ x: r.step, y: r.eval.val_bpb })));
-  const bpicPoints = $derived<Point[]>(
-    records.filter(isTrainRecord).map((r) => ({ x: r.step, y: r.bpic }))
-  );
-  const targetPoints = $derived<Point[]>(
-    records.filter(isTrainRecord).map((r) => ({ x: r.step, y: r.target_ratio }))
-  );
-  const latest = $derived(evalRecords.length ? evalRecords[evalRecords.length - 1] : null);
+
+  const latest = $derived.by(() => {
+    const ev = evals(primaryRecords);
+    return ev.length ? ev[ev.length - 1] : null;
+  });
   const lastTrain = $derived.by(() => {
-    const t = records.filter(isTrainRecord);
+    const t = trains(primaryRecords);
     return t.length ? t[t.length - 1] : null;
   });
+  const anyRecords = $derived(selected.some((id) => (logs[id] ?? []).length > 0));
 </script>
 
 {#if runsError}
@@ -90,15 +167,14 @@
 {:else if runs.length === 0}
   <p class="empty">No training runs found in the runs directory.</p>
 {:else}
-  <div class="picker" role="group" aria-label="Training run">
+  <div class="picker" role="group" aria-label="Training runs">
     {#each runs as r (r.id)}
-      <button
-        class="run"
-        class:on={r.id === selected}
-        aria-pressed={r.id === selected}
-        onclick={() => (selected = r.id)}
-      >
-        <span class="name">{r.id}</span>
+      {@const i = selected.indexOf(r.id)}
+      <button class="run" class:on={i >= 0} aria-pressed={i >= 0} onclick={() => toggle(r.id)}>
+        <span class="name">
+          {#if i >= 0 && !single}<span class="dot" style:background={colorOf(i)}></span>{/if}
+          {r.id}
+        </span>
         <span class="meta">
           {r.steps.toLocaleString()} steps · {num(r.last_val_bpb, 3)} bits/byte
           {#if r.running}<span class="live">running</span>{/if}
@@ -106,17 +182,18 @@
       </button>
     {/each}
   </div>
+  <p class="hint">Select more than one run to overlay their curves and compare.</p>
 
   {#if logError}
     <p class="fail small"><Icon name="alert" size={13} />{logError}</p>
   {/if}
 
-  {#if run}
+  {#if single && primaryRun}
     <dl class="rows head">
       <dt>Started</dt>
-      <dd>{when(run.started_at)}</dd>
+      <dd>{when(primaryRun.started_at)}</dd>
       <dt>Records</dt>
-      <dd>{records.length.toLocaleString()} read{running ? ' · polling' : ''}</dd>
+      <dd>{primaryRecords.length.toLocaleString()} read{primaryRunning ? ' · polling' : ''}</dd>
       {#if lastTrain}
         <dt>Elapsed</dt>
         <dd>{minutes(lastTrain.elapsed_min ?? 0)}</dd>
@@ -130,36 +207,58 @@
     </dl>
   {/if}
 
-  {#if records.length === 0}
+  {#if !single}
+    <section class="compare">
+      <h3>Side by side — last evaluation of each</h3>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>run</th>
+              <th>steps</th>
+              <th>min</th>
+              <th>bytes/s</th>
+              <th>val bpb</th>
+              <th>B/chunk</th>
+              <th>@sep</th>
+              <th>mbp top-1</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each table as row (row.id)}
+              <tr>
+                <td class="name"><span class="dot" style:background={row.color}></span>{row.id}</td>
+                <td>{row.steps.toLocaleString()}</td>
+                <td>{row.minutes !== undefined ? num(row.minutes, 0) : '—'}</td>
+                <td>{row.bps !== undefined ? count(row.bps) : '—'}</td>
+                <td>{row.valBpb !== undefined ? num(row.valBpb, 3) : '—'}</td>
+                <td>{row.bpic !== undefined ? num(row.bpic, 2) : '—'}</td>
+                <td>{row.sep !== undefined ? pct(row.sep, 0) : '—'}</td>
+                <td>{row.mbp !== undefined ? pct(row.mbp, 0) : '—'}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {/if}
+
+  {#if !anyRecords}
     <p class="empty">The log for this run is empty.</p>
   {:else}
     <section>
-      <Curve
-        series={[
-          { points: trainPoints, label: 'train', weight: 'faint' },
-          { points: valPoints, label: 'val', weight: 'solid', dots: true }
-        ]}
-        yLabel="Bits per byte"
-        xLabel="step"
-        digits={2}
-      />
+      <Curve series={bpbSeries} yLabel="Bits per byte" xLabel="step" digits={2} />
     </section>
 
     <section>
-      <Curve
-        series={[
-          { points: bpicPoints, label: 'measured', weight: 'faint' },
-          { points: targetPoints, label: 'target', weight: 'solid' }
-        ]}
-        yLabel="Bytes per chunk"
-        xLabel="step"
-        digits={1}
-      />
+      <Curve series={bpicSeries} yLabel="Bytes per chunk" xLabel="step" digits={1} />
     </section>
 
     {#if latest}
       <section>
-        <h3>Last evaluation — step {latest.step.toLocaleString()}</h3>
+        <h3>
+          {single ? 'Last evaluation' : `Last evaluation of ${primary}`} — step {latest.step.toLocaleString()}
+        </h3>
         <dl class="rows">
           <dt>Val bits/byte</dt>
           <dd>{num(latest.eval.val_bpb, 4)}</dd>
@@ -176,7 +275,7 @@
         {#if latest.eval.sample}
           <h4>Learned chunking of a fixed probe</h4>
           <p class="sample">
-            {#each latest.eval.sample.split('|') as piece, i (i)}<span class="piece" class:first={i === 0}>{piece}</span>{/each}
+            {#each latest.eval.sample.split('|') as piece, i (i)}<span class="piece" class:alt={i % 2 === 1}>{piece}</span>{/each}
           </p>
         {/if}
       </section>
@@ -188,7 +287,13 @@
   .picker {
     display: grid;
     gap: 0.3rem;
-    margin-bottom: 1.2rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .hint {
+    margin: 0 0 1.2rem;
+    font-size: 0.75rem;
+    color: var(--ink-3);
   }
 
   .run {
@@ -211,10 +316,20 @@
   }
 
   .name {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
     font-family: var(--font-mono);
     font-size: 0.8125rem;
     color: var(--ink);
+  }
+
+  .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: none;
   }
 
   .run :global(.meta) {
@@ -236,6 +351,45 @@
 
   section + section {
     margin-top: 1.8rem;
+  }
+
+  .compare {
+    margin-bottom: 1.6rem;
+  }
+
+  .tablewrap {
+    overflow-x: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+  }
+  th,
+  td {
+    padding: 0.4rem 0.45rem;
+    border-top: 1px solid var(--rule);
+    text-align: right;
+    white-space: nowrap;
+  }
+  th {
+    border-top: 0;
+    font-weight: 500;
+    color: var(--ink-3);
+  }
+  th:first-child,
+  td:first-child {
+    text-align: left;
+    padding-left: 0;
+  }
+  td.name {
+    font-family: var(--font-mono);
+  }
+  td.name .dot {
+    margin-right: 0.4rem;
+    vertical-align: 0;
   }
 
   h3 {
@@ -262,14 +416,14 @@
   }
 
   .piece {
-    border-left: 1px solid var(--accent-line);
-    padding-left: 0.11em;
-    margin-left: 0.05em;
+    background: var(--chunk-a);
+    padding: 0.05em 0;
+    border-radius: 3px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
   }
-  .piece.first {
-    border-left: 0;
-    padding-left: 0;
-    margin-left: 0;
+  .piece.alt {
+    background: var(--chunk-b);
   }
 
   .empty {

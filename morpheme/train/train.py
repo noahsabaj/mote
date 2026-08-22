@@ -187,7 +187,7 @@ def load_checkpoint(path: Path, model, opt=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preset", default="pilot", choices=["pilot", "flagship"])
+    ap.add_argument("--preset", default="pilot", choices=["pilot", "local", "flagship"])
     ap.add_argument("--config", default=None, help="JSON config overriding the preset")
     ap.add_argument("--data", required=True, help="shard prefix, e.g. data/fineweb_edu_pilot")
     ap.add_argument("--out", required=True)

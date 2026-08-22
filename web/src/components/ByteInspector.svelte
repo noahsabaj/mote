@@ -40,6 +40,19 @@
     ro.observe(viewport);
     return () => ro.disconnect();
   });
+
+  let copied = $state(false);
+  async function copyJson() {
+    try {
+      const rows = [];
+      for (let i = 0; i < total; i++) rows.push(trace.byteAt(i));
+      await navigator.clipboard.writeText(JSON.stringify({ bytes: total, chunks: trace.chunkCount, rows }, null, 0));
+      copied = true;
+      setTimeout(() => (copied = false), 1600);
+    } catch {
+      /* clipboard blocked */
+    }
+  }
 </script>
 
 <section class="summary">
@@ -51,6 +64,9 @@
     <dt>Parallel</dt>
     <dd>{pct(trace.mbpFraction(), 1)} of bytes came from the multi-byte head</dd>
   </dl>
+  <button class="quiet" onclick={copyJson} title="Copy every row of this trace as JSON, for sharing or a notebook">
+    {copied ? 'Copied' : 'Copy trace as JSON'}
+  </button>
 </section>
 
 <section class="plot">

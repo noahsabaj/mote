@@ -121,6 +121,18 @@ class MorphemeConfig:
         )
 
     @classmethod
+    def local(cls) -> "MorphemeConfig":
+        """~35M params: the largest comfortable overnight run on the 8 GB RTX 4060 Ti (5.9 GB peak at batch 4x2048)."""
+        return cls(
+            d_model_outer=384,
+            encoder_layers=2,
+            decoder_layers=2,
+            main=RelationCfg(n_layers=8, d_model=512, n_heads=8, d_ff=1536),
+            mbp=MBPCfg(n_layers=2, n_heads=4, d_ff=1024),
+            max_seq_len=2048,
+        )
+
+    @classmethod
     def flagship(cls) -> "MorphemeConfig":
         """~100M params target for the H100 run; final dims set after the pilot measures throughput."""
         return cls(

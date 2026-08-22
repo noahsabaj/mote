@@ -12,7 +12,10 @@
     | 'alert'
     | 'check'
     | 'chevron'
-    | 'structure';
+    | 'structure'
+    | 'sun'
+    | 'moon'
+    | 'auto';
 
   let { name, size = 16 }: { name: Name; size?: number } = $props();
 
@@ -28,7 +31,10 @@
     alert: 'M8 5.6v3.2M8 11.4h.01M6.9 2.6 1.7 11.6a1.2 1.2 0 0 0 1.1 1.9h10.4a1.2 1.2 0 0 0 1.1-1.9L9.1 2.6a1.2 1.2 0 0 0-2.2 0Z',
     check: 'M3 8.4l3.4 3.4L13 4.6',
     chevron: 'M5.5 3.5 10 8l-4.5 4.5',
-    structure: 'M2.5 4h4M9.5 4h4M2.5 12h4M9.5 12h4M8 2.2v11.6'
+    structure: 'M2.5 4h4M9.5 4h4M2.5 12h4M9.5 12h4M8 2.2v11.6',
+    sun: 'M8 1.6v1.7M8 12.7v1.7M1.6 8h1.7M12.7 8h1.7M3.5 3.5l1.2 1.2M11.3 11.3l1.2 1.2M3.5 12.5l1.2-1.2M11.3 4.7l1.2-1.2',
+    moon: 'M13.2 9.8A5.6 5.6 0 0 1 6.2 2.8a5.6 5.6 0 1 0 7 7Z',
+    auto: ''
   };
 </script>
 
@@ -50,6 +56,12 @@
     <path d={PATHS.sliders} />
     <circle cx="6" cy="4.5" r="1.9" fill="var(--bg)" />
     <circle cx="10.5" cy="11.5" r="1.9" fill="var(--bg)" />
+  {:else if name === 'sun'}
+    <circle cx="8" cy="8" r="2.9" />
+    <path d={PATHS.sun} />
+  {:else if name === 'auto'}
+    <circle cx="8" cy="8" r="5.4" />
+    <path d="M8 2.6a5.4 5.4 0 0 1 0 10.8Z" fill="currentColor" stroke="none" />
   {:else}
     <path d={PATHS[name]} />
   {/if}

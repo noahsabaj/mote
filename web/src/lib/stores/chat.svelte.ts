@@ -6,7 +6,7 @@
 // the DOM on its own.
 
 import { GenerateSocket, type LinkState } from '../ws';
-import { ByteTrace } from '../trace.svelte';
+import { ByteTrace, type SerializedTrace } from '../trace.svelte';
 import * as persist from '../persist';
 import { settings } from './settings.svelte';
 import { diagnostics } from './diagnostics.svelte';
@@ -25,6 +25,10 @@ export interface Turn {
   truncated?: boolean;
   contextBytes?: number;
   contextLimit?: number;
+  /** milliseconds from send to the first byte of the reply */
+  ttfbMs?: number;
+  /** earlier samples of this reply slot ("Again" keeps them); each is a complete Turn */
+  samples?: Turn[];
 }
 
 interface StoredConversation {
@@ -43,7 +47,10 @@ export interface ConversationSummary {
 const INDEX_KEY = 'conversations';
 const CURRENT_KEY = 'current';
 const convKey = (id: string) => `conv.${id}`;
+const tracesKey = (id: string) => `conv.${id}.traces`;
 const MAX_CONVERSATIONS = 30;
+/** Per conversation, the byte traces of the most recent replies survive a reload. */
+const MAX_TRACES = 8;
 
 function newId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -74,6 +81,7 @@ class Chat {
   #frame: number | null = null;
   #guard: ReturnType<typeof setTimeout> | null = null;
   #saveTimer: ReturnType<typeof setTimeout> | null = null;
+  #sentAt = 0;
 
   constructor() {
     this.#socket = new GenerateSocket({
@@ -121,7 +129,16 @@ class Chat {
     if (!stored) return;
     this.id = stored.id;
     this.turns = stored.turns;
-    this.traces = {};
+    const saved = persist.read<Record<string, SerializedTrace>>(tracesKey(id), {});
+    const traces: Record<string, ByteTrace> = {};
+    for (const [tid, s] of Object.entries(saved)) {
+      try {
+        traces[tid] = ByteTrace.fromJSON(s);
+      } catch {
+        /* a corrupt trace is simply not shown */
+      }
+    }
+    this.traces = traces;
     persist.write(CURRENT_KEY, this.id);
   }
 
@@ -135,6 +152,7 @@ class Chat {
 
   deleteConversation(id: string): void {
     persist.drop(convKey(id));
+    persist.drop(tracesKey(id));
     this.index = this.index.filter((c) => c.id !== id);
     persist.write(INDEX_KEY, this.index);
     if (id === this.id) this.newConversation();
@@ -149,14 +167,32 @@ class Chat {
     this.#dispatch();
   }
 
+  /** Sample the last reply again. The previous sample(s) are kept and can be flipped back to. */
   regenerate(): void {
     if (this.busy) return;
     let cut = this.turns.length;
     while (cut > 0 && this.turns[cut - 1].role === 'assistant') cut -= 1;
     if (cut === this.turns.length) return;
-    for (const dropped of this.turns.slice(cut)) delete this.traces[dropped.id];
+    const samples: Turn[] = [];
+    for (const t of this.turns.slice(cut)) {
+      samples.push(...(t.samples ?? []), { ...t, samples: undefined });
+    }
     this.turns = this.turns.slice(0, cut);
-    this.#dispatch();
+    this.#dispatch(samples);
+  }
+
+  /** Show another sample of a reply slot; it becomes the one the next turn is conditioned on. */
+  chooseSample(turnId: string, sampleId: string): void {
+    if (this.busy) return;
+    const turn = this.turns.find((t) => t.id === turnId);
+    if (!turn?.samples) return;
+    const idx = turn.samples.findIndex((s) => s.id === sampleId);
+    if (idx < 0) return;
+    const pool = turn.samples.slice();
+    const chosen = pool[idx];
+    pool[idx] = { ...turn, samples: undefined };
+    this.turns = this.turns.map((t) => (t.id === turnId ? { ...chosen, samples: pool } : t));
+    this.#save();
   }
 
   stop(): void {
@@ -164,7 +200,7 @@ class Chat {
     this.#socket.stop();
   }
 
-  #dispatch(): void {
+  #dispatch(samples?: Turn[]): void {
     const history: { role: ChatRole; content: string }[] = this.turns.map((t) => ({
       role: t.role,
       content: t.content
@@ -175,12 +211,14 @@ class Chat {
       content: '',
       at: Date.now(),
       stats: null,
-      error: null
+      error: null,
+      samples: samples?.length ? samples : undefined
     };
     this.traces = { ...this.traces, [reply.id]: new ByteTrace() };
     this.turns = [...this.turns, reply];
     this.streamingId = reply.id;
     this.awaitingStart = true;
+    this.#sentAt = performance.now();
     diagnostics.begin();
     this.#socket.generate(history, settings.params);
     this.#save();
@@ -224,6 +262,9 @@ class Chat {
           });
           break;
         case 'byte':
+          if (trace && trace.size === 0) {
+            this.#patch(id, { ttfbMs: performance.now() - this.#sentAt });
+          }
           trace?.push(ev);
           break;
         case 'chunk':
@@ -312,12 +353,37 @@ class Chat {
       updatedAt: Date.now()
     };
     persist.write(convKey(this.id), record);
+    persist.write(tracesKey(this.id), this.#serializeTraces());
     const rest = this.index.filter((c) => c.id !== this.id);
     const next = [{ id: this.id, title, updatedAt: record.updatedAt }, ...rest];
-    for (const stale of next.slice(MAX_CONVERSATIONS)) persist.drop(convKey(stale.id));
+    for (const stale of next.slice(MAX_CONVERSATIONS)) {
+      persist.drop(convKey(stale.id));
+      persist.drop(tracesKey(stale.id));
+    }
     this.index = next.slice(0, MAX_CONVERSATIONS);
     persist.write(INDEX_KEY, this.index);
     persist.write(CURRENT_KEY, this.id);
+  }
+
+  /** Traces of the newest replies (samples included), newest first, capped; a reply still streaming is skipped. */
+  #serializeTraces(): Record<string, SerializedTrace> {
+    const candidates: Turn[] = [];
+    for (const t of this.turns) {
+      if (t.role !== 'assistant') continue;
+      candidates.push(t, ...(t.samples ?? []));
+    }
+    candidates.sort((a, b) => b.at - a.at);
+    const out: Record<string, SerializedTrace> = {};
+    let kept = 0;
+    for (const t of candidates) {
+      if (kept >= MAX_TRACES) break;
+      if (t.id === this.streamingId) continue;
+      const trace = this.traces[t.id];
+      if (!trace || trace.size === 0) continue;
+      out[t.id] = trace.toJSON();
+      kept += 1;
+    }
+    return out;
   }
 }
 

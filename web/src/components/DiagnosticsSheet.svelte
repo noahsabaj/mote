@@ -28,6 +28,10 @@
 
   <section>
     <h3>Throughput</h3>
+    <p class="meta">
+      Decoding speed of the loaded model on this machine. Every byte is one model step unless the
+      multi-byte head filled it in.
+    </p>
     <dl class="rows">
       <dt>Bytes/s</dt>
       <dd>{s ? num(s.bytes_per_sec, 1) : '—'}</dd>
@@ -52,6 +56,11 @@
 
   <section>
     <h3>Multi-byte head</h3>
+    <p class="meta">
+      At every new chunk the head proposes the next n bytes at once. They are taken, left to
+      right, while its confidence is at least τ; the first doubtful byte and everything after it
+      go back to one byte per step.
+    </p>
     <dl class="rows">
       <dt>Accept rate</dt>
       <dd>{s ? pct(s.mbp_accept_rate, 1) : '—'}</dd>
@@ -64,6 +73,10 @@
 
   <section>
     <h3>Context</h3>
+    <p class="meta">
+      Prompt plus reply so far, in bytes. When the next turn would not fit, the oldest turns are
+      dropped and the reply is marked truncated.
+    </p>
     <dl class="rows">
       <dt>Used</dt>
       <dd>{s ? `${s.context_bytes} of ${s.context_limit} bytes` : '—'}</dd>
@@ -78,7 +91,10 @@
 
   <section>
     <h3>Boundary probability</h3>
-    <p class="meta">The router's p(boundary) over the last bytes it emitted.</p>
+    <p class="meta">
+      The router's p(boundary) for the last bytes: how different each byte's encoder state is
+      from the previous one. Above 0.5 a new chunk starts and the main network runs.
+    </p>
     {#if d && d.boundary_probs.length}
       <div class="plot">
         <Sparkline
@@ -94,7 +110,10 @@
 
   <section>
     <h3>Mamba-3 retention</h3>
-    <p class="meta">Mean exp(A·Δt) per head — how much state each head carries forward.</p>
+    <p class="meta">
+      Per head, the share of its state carried to the next byte (exp(A·Δt)) at the newest chunk
+      boundary: 1.0 remembers everything so far, 0 forgets instantly. Read live from the tensors.
+    </p>
     <h4>Encoder</h4>
     <Bars values={d?.mamba3.encoder_retention ?? []} prefix="h" />
     <h4>Decoder</h4>
@@ -103,7 +122,10 @@
 
   <section>
     <h3>Relation exchange mass</h3>
-    <p class="meta">g per layer for the newest chunk — how much it draws from earlier chunks.</p>
+    <p class="meta">
+      For the newest chunk, how much of each Relation layer's output is drawn from earlier chunks
+      (g) rather than from the chunk itself (1 − g). Low means "ask self", high means "ask others".
+    </p>
     <Bars values={d?.relation.exchange_mass ?? []} prefix="L" />
   </section>
 {/if}

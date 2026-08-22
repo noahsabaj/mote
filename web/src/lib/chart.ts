@@ -12,4 +12,6 @@ export interface Series {
   /** 'faint' is the noisy per-step trace, 'solid' the evaluated one */
   weight: 'faint' | 'solid';
   dots?: boolean;
+  /** CSS color; defaults to the accent. Used when several runs share one chart. */
+  color?: string;
 }

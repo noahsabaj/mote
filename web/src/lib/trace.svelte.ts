@@ -26,6 +26,42 @@ export interface Segment {
 const FLAG_BOUNDARY = 1;
 const FLAG_MBP = 2;
 
+export interface SerializedTrace {
+  v: 1;
+  n: number;
+  text: string;
+  closed: number;
+  runStart: number[];
+  byte: string;
+  flags: string;
+  p: string;
+  entropy: string;
+  boundaryP: string;
+  tMs: string;
+  chunk: string;
+  textEnd: string;
+}
+
+function b64(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x2000) {
+    s += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x2000)));
+  }
+  return btoa(s);
+}
+
+function unb64(s: string): Uint8Array {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function fill<T extends { set(a: ArrayLike<number>): void }>(dst: T, src: ArrayLike<number>): T {
+  dst.set(src);
+  return dst;
+}
+
 export class ByteTrace {
   /** Bumped once per flush; read it to make a component depend on the whole trace. */
   version = $state(0);
@@ -202,6 +238,49 @@ export class ByteTrace {
       });
     }
     return rows;
+  }
+
+  // ------------------------------------------------------------ persistence
+  // Typed arrays are stored as base64 of their raw bytes; text and the chunk-run table as-is.
+
+  toJSON(): SerializedTrace {
+    const n = this.#n;
+    return {
+      v: 1,
+      n,
+      text: this.#text,
+      closed: this.#closed,
+      runStart: this.#runStart.slice(),
+      byte: b64(this.#byte.subarray(0, n)),
+      flags: b64(this.#flags.subarray(0, n)),
+      p: b64(new Uint8Array(this.#p.buffer, 0, n * 4)),
+      entropy: b64(new Uint8Array(this.#entropy.buffer, 0, n * 4)),
+      boundaryP: b64(new Uint8Array(this.#boundaryP.buffer, 0, n * 4)),
+      tMs: b64(new Uint8Array(this.#tMs.buffer, 0, n * 4)),
+      chunk: b64(new Uint8Array(this.#chunk.buffer, 0, n * 4)),
+      textEnd: b64(new Uint8Array(this.#textEnd.buffer, 0, n * 4))
+    };
+  }
+
+  static fromJSON(d: SerializedTrace): ByteTrace {
+    const t = new ByteTrace();
+    const n = d.n;
+    const cap = Math.max(1024, n);
+    t.#cap = cap;
+    t.#n = n;
+    t.#byte = fill(new Uint8Array(cap), unb64(d.byte));
+    t.#flags = fill(new Uint8Array(cap), unb64(d.flags));
+    t.#p = fill(new Float32Array(cap), new Float32Array(unb64(d.p).buffer));
+    t.#entropy = fill(new Float32Array(cap), new Float32Array(unb64(d.entropy).buffer));
+    t.#boundaryP = fill(new Float32Array(cap), new Float32Array(unb64(d.boundaryP).buffer));
+    t.#tMs = fill(new Float32Array(cap), new Float32Array(unb64(d.tMs).buffer));
+    t.#chunk = fill(new Int32Array(cap), new Int32Array(unb64(d.chunk).buffer));
+    t.#textEnd = fill(new Int32Array(cap), new Int32Array(unb64(d.textEnd).buffer));
+    t.#runStart = d.runStart.slice();
+    t.#closed = d.closed;
+    t.#text = d.text;
+    t.settle(d.text);
+    return t;
   }
 
   #grow(): void {

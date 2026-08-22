@@ -30,7 +30,7 @@
      newlines would show up in the text. -->
 {#if structure}<span class="prose structured"
     >{#if hidden}<span class="elided">… {hidden} earlier chunks not shown …&#10;</span
-      >{/if}{#each rows as row (row.key)}<span class="chunk" title={row.label}
+      >{/if}{#each rows as row, r (row.key)}<span class="chunk" class:alt={r % 2 === 1} title={row.label}
         >{#each row.segments as seg, i (i)}<span class:par={seg.mbp}>{seg.text}</span
           >{/each}</span
       >{/each}{#if streaming}<span
@@ -54,7 +54,7 @@
 
 {#if structure}
   <p class="legend" aria-label="How to read this view">
-    <span class="key"><span class="swatch-rule"></span>new chunk</span>
+    <span class="key"><span class="swatch-a"></span><span class="swatch-b"></span>one learned chunk each</span>
     <span class="key"><span class="swatch-par">bytes</span> taken in parallel from the multi-byte head</span>
   </p>
 {/if}
@@ -65,10 +65,17 @@
     overflow-wrap: break-word;
   }
 
+  /* Alternating tints: a chunk is a span of shading, not a rule through the text, so the
+     paragraph still reads as prose with Structure on. */
   .structured .chunk {
-    border-left: 1px solid var(--accent-line);
-    padding-left: 0.11em;
-    margin-left: 0.05em;
+    background: var(--chunk-a);
+    padding: 0.05em 0;
+    border-radius: 3px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+  .structured .chunk.alt {
+    background: var(--chunk-b);
   }
 
   .structured .par {
@@ -118,11 +125,17 @@
     align-items: center;
     gap: 0.35em;
   }
-  .swatch-rule {
+  .swatch-a,
+  .swatch-b {
     display: inline-block;
-    width: 1px;
-    height: 0.95em;
-    background: var(--accent-line);
+    width: 0.9em;
+    height: 0.9em;
+    border-radius: 2px;
+    background: var(--chunk-a);
+  }
+  .swatch-b {
+    background: var(--chunk-b);
+    margin-left: -0.2em;
   }
   .swatch-par {
     text-decoration: underline;

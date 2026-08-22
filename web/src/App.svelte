@@ -12,6 +12,7 @@
   import { untrack } from 'svelte';
   import { chat } from './lib/stores/chat.svelte';
   import { model } from './lib/stores/model.svelte';
+  import { ui } from './lib/stores/ui.svelte';
 
   let sheet = $state<SheetView | null>(null);
   let inspecting = $state<string | null>(null);
@@ -22,6 +23,7 @@
   // state that `start()` reads and re-run on the first reply.
   $effect(() => {
     untrack(() => {
+      ui.applyTheme();
       chat.start();
       void model.refresh();
     });

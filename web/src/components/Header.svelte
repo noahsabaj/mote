@@ -2,6 +2,7 @@
   import Wordmark from './Wordmark.svelte';
   import Icon from './Icon.svelte';
   import { chat } from '../lib/stores/chat.svelte';
+  import { ui } from '../lib/stores/ui.svelte';
   import { dismissable } from '../lib/actions';
   import { when } from '../lib/format';
   import type { SheetView } from '../lib/views';
@@ -89,6 +90,14 @@
     <button class="quiet" aria-pressed={open === 'training'} onclick={() => onopen('training')}>
       Training
     </button>
+    <button
+      class="quiet theme"
+      onclick={() => ui.cycleTheme()}
+      title={`Theme: ${ui.theme} — click to change`}
+      aria-label={`Theme: ${ui.theme}. Click to change.`}
+    >
+      <Icon name={ui.theme === 'light' ? 'sun' : ui.theme === 'dark' ? 'moon' : 'auto'} size={15} />
+    </button>
   </nav>
 </header>
 
@@ -131,8 +140,13 @@
 
   nav {
     display: flex;
+    align-items: center;
     gap: 0.1rem;
     flex: none;
+  }
+  .theme {
+    margin-left: 0.35rem;
+    padding: 0 0.45em;
   }
 
   .menu {

@@ -103,7 +103,9 @@
     <span class="y">{yLabel}</span>
     <span class="keys">
       {#each series as s (s.label)}
-        <span class="key"><span class="swatch {s.weight}"></span>{s.label}</span>
+        <span class="key"
+          ><span class="swatch {s.weight}" style:background={s.color ?? null}></span>{s.label}</span
+        >
       {/each}
     </span>
   </figcaption>
@@ -115,10 +117,10 @@
         <text x={PAD_L - 5} y={t.y + 3} class="tick" text-anchor="end">{t.label}</text>
       {/each}
       {#each series as s (s.label)}
-        <path d={d(s.points)} class="line {s.weight}" />
+        <path d={d(s.points)} class="line {s.weight}" style:stroke={s.color ?? null} />
         {#if s.dots}
           {#each thin(s.points) as p, i (i)}
-            <circle cx={sx(p.x)} cy={sy(p.y)} r="1.9" class="dot" />
+            <circle cx={sx(p.x)} cy={sy(p.y)} r="1.9" class="dot" style:fill={s.color ?? null} />
           {/each}
         {/if}
       {/each}

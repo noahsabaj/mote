@@ -109,6 +109,7 @@ class Engine:
                 self.model.step(torch.tensor([[65]], device=self.device), state)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()  # give the warm-up's transient buffers back (training may share this GPU)
         return time.perf_counter() - t0
 
     def _attach_telemetry(self):

@@ -88,7 +88,7 @@ def load_checkpoint(body: LoadBody):
             del old
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            eng = Engine(path)
+            eng = Engine(path, device=STATE.get("device"))
             eng.warmup()
             STATE["engine"] = eng
         finally:
@@ -268,12 +268,14 @@ def main(argv=None):
     ap.add_argument("--checkpoint", default=None, help="default: newest checkpoint under runs/ or checkpoints/")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7860)
+    ap.add_argument("--device", default=None, help="cuda (default when available) or cpu — e.g. to leave the GPU to a training run")
     args = ap.parse_args(argv)
     ck = Path(args.checkpoint) if args.checkpoint else (discover_checkpoints(ROOT) or [None])[0]
     if ck is None:
         raise SystemExit("no checkpoint found; train one first or pass --checkpoint")
     print(f"loading {ck} ...", flush=True)
-    eng = Engine(ck)
+    STATE["device"] = args.device
+    eng = Engine(ck, device=args.device)
     print(f"warming up kernels ... ({eng.warmup():.1f} s)", flush=True)
     STATE["engine"] = eng
     print(json.dumps(eng.info(), indent=1), flush=True)

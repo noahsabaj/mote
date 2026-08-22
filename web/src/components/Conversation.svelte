@@ -34,7 +34,7 @@
 </script>
 
 <div class="scroller" bind:this={scroller} onscroll={onscroll}>
-  <div class="column">
+  <div class="column" class:empty={chat.isEmpty}>
     {#if chat.isEmpty}
       <div class="opening">
         <p class="lede">
@@ -79,9 +79,17 @@
     padding: 2rem var(--gutter) 1.5rem;
   }
 
+  /* Empty state sits in the middle of the free space above the composer, not at the top. */
+  .column.empty {
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
   .opening {
     max-width: 30rem;
-    padding: min(14vh, 6rem) 0 0;
+    padding: 0 0 6vh;
   }
 
   .lede {
