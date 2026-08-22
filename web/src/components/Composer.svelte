@@ -121,6 +121,10 @@
 
 <style>
   .composer {
+    /* same measure and centring as the transcript column */
+    max-width: calc(var(--measure) + 6rem);
+    width: 100%;
+    margin: 0 auto;
     padding: 0 var(--gutter) max(0.7rem, env(safe-area-inset-bottom));
   }
 

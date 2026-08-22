@@ -95,6 +95,22 @@ class Engine:
         self._attach_telemetry()
 
     # ------------------------------------------------------------------------------
+    @torch.no_grad()
+    def warmup(self) -> float:
+        """Trigger Triton JIT/autotune for prefill at a few prompt lengths (incl. odd and 16-aligned ones) and one
+        decode step, so the first user request doesn't pay the ~40 s compile. Returns seconds spent."""
+        t0 = time.perf_counter()
+        with self.lock:
+            for L in (5, 16, 33, 128, 257, 512, 640, 1024, 2048, 4096):
+                L = min(L, self.cfg.max_seq_len - 4)
+                ids = torch.randint(0, 256, (1, L), device=self.device)
+                state = self.model.allocate_inference_state(self.device)
+                self.model.prefill(ids, state)
+                self.model.step(torch.tensor([[65]], device=self.device), state)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        return time.perf_counter() - t0
+
     def _attach_telemetry(self):
         for name, m in self.model.named_modules():
             if isinstance(m, (Mamba3Mixer, FullRelation)):

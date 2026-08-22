@@ -74,11 +74,11 @@
         <p class="stats meta">
           {#if turn.stats}
             {turn.stats.bytes} bytes · {turn.stats.chunks} chunks · {num(
-              turn.stats.bytes_per_chunk,
-              1
-            )} B per chunk · {num(turn.stats.bytes_per_sec, 0)} B/s
+              turn.stats.bytes_per_sec,
+              0
+            )} B/s
             {#if turn.stats.mbp_proposed > 0}
-              · {pct(turn.stats.mbp_accept_rate)} of multi-byte proposals accepted
+              · {pct(turn.stats.mbp_accept_rate)} multi-byte accepted
             {/if}
             {#if reasonNote}· {reasonNote}{/if}
           {/if}

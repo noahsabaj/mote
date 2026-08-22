@@ -43,10 +43,6 @@ export class GenerateSocket {
     this.#handlers = handlers;
   }
 
-  get linkState(): LinkState {
-    return this.#state;
-  }
-
   connect(): void {
     if (this.#disposed) return;
     const live = this.#ws?.readyState;

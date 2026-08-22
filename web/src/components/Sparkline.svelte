@@ -5,16 +5,13 @@
     min = 0,
     max = 1,
     height = 34,
-    label,
-    threshold
+    label
   }: {
     values: number[];
     min?: number;
     max?: number;
     height?: number;
     label: string;
-    /** optional horizontal reference line, in data units */
-    threshold?: number;
   } = $props();
 
   const W = 240;
@@ -32,18 +29,9 @@
     }
     return d;
   });
-
-  const thresholdY = $derived(
-    threshold === undefined
-      ? null
-      : height - ((threshold - min) / Math.max(1e-6, max - min)) * height
-  );
 </script>
 
 <svg viewBox="0 0 {W} {height}" preserveAspectRatio="none" role="img" aria-label={label} {height}>
-  {#if thresholdY !== null}
-    <line x1="0" x2={W} y1={thresholdY} y2={thresholdY} class="threshold" />
-  {/if}
   <path d={path} class="trace" vector-effect="non-scaling-stroke" />
 </svg>
 
@@ -59,11 +47,5 @@
     stroke-width: 1.25;
     stroke-linejoin: round;
     stroke-linecap: round;
-  }
-  .threshold {
-    stroke: var(--rule-strong);
-    stroke-width: 1;
-    stroke-dasharray: 2 3;
-    vector-effect: non-scaling-stroke;
   }
 </style>

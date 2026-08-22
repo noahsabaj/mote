@@ -69,7 +69,8 @@
     flex: 1;
     overflow-y: auto;
     overscroll-behavior-y: contain;
-    scrollbar-gutter: stable;
+    /* both-edges keeps the centred column aligned with the composer, which has no scrollbar */
+    scrollbar-gutter: stable both-edges;
   }
 
   .column {

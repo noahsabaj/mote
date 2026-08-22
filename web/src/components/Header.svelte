@@ -116,6 +116,13 @@
   .convo {
     max-width: 15rem;
   }
+  .convo :global(svg) {
+    transform: rotate(90deg);
+    transition: transform 140ms ease;
+  }
+  .convo[aria-expanded='true'] :global(svg) {
+    transform: rotate(-90deg);
+  }
   .convo-title {
     overflow: hidden;
     text-overflow: ellipsis;

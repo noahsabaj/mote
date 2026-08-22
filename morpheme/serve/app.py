@@ -85,10 +85,12 @@ def load_checkpoint(body: LoadBody):
         STATE["swapping"] = True
         try:
             old = STATE["engine"]
-            STATE["engine"] = Engine(path)
             del old
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            eng = Engine(path)
+            eng.warmup()
+            STATE["engine"] = eng
         finally:
             STATE["swapping"] = False
     return STATE["engine"].info()
@@ -271,8 +273,10 @@ def main(argv=None):
     if ck is None:
         raise SystemExit("no checkpoint found; train one first or pass --checkpoint")
     print(f"loading {ck} ...", flush=True)
-    STATE["engine"] = Engine(ck)
-    print(json.dumps(STATE["engine"].info(), indent=1), flush=True)
+    eng = Engine(ck)
+    print(f"warming up kernels ... ({eng.warmup():.1f} s)", flush=True)
+    STATE["engine"] = eng
+    print(json.dumps(eng.info(), indent=1), flush=True)
     uvicorn.run(app, host=args.host, port=args.port)
 
 

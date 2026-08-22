@@ -68,7 +68,6 @@ class Chat {
   /** true between "send" and the backend's `start` */
   awaitingStart = $state(false);
   link = $state<LinkState>('offline');
-  lastError = $state<string | null>(null);
 
   #socket: GenerateSocket;
   #queue: ServerEvent[] = [];
@@ -93,14 +92,6 @@ class Chat {
 
   get isEmpty(): boolean {
     return this.turns.length === 0;
-  }
-
-  get canRegenerate(): boolean {
-    return !this.busy && this.turns.some((t) => t.role === 'assistant');
-  }
-
-  traceFor(turnId: string): ByteTrace | undefined {
-    return this.traces[turnId];
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -131,7 +122,6 @@ class Chat {
     this.id = stored.id;
     this.turns = stored.turns;
     this.traces = {};
-    this.lastError = null;
     persist.write(CURRENT_KEY, this.id);
   }
 
@@ -140,7 +130,6 @@ class Chat {
     this.id = newId();
     this.turns = [];
     this.traces = {};
-    this.lastError = null;
     persist.write(CURRENT_KEY, this.id);
   }
 
@@ -192,7 +181,6 @@ class Chat {
     this.turns = [...this.turns, reply];
     this.streamingId = reply.id;
     this.awaitingStart = true;
-    this.lastError = null;
     diagnostics.begin();
     this.#socket.generate(history, settings.params);
     this.#save();
@@ -300,7 +288,6 @@ class Chat {
     const id = this.streamingId;
     const trace = id ? this.traces[id] : undefined;
     if (id) this.#patch(id, { error: message, content: trace?.liveText ?? '' });
-    this.lastError = message;
     this.streamingId = null;
     this.awaitingStart = false;
     diagnostics.end(null);
