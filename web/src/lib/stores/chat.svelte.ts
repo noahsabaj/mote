@@ -164,6 +164,7 @@ class Chat {
     let cut = this.turns.length;
     while (cut > 0 && this.turns[cut - 1].role === 'assistant') cut -= 1;
     if (cut === this.turns.length) return;
+    for (const dropped of this.turns.slice(cut)) delete this.traces[dropped.id];
     this.turns = this.turns.slice(0, cut);
     this.#dispatch();
   }

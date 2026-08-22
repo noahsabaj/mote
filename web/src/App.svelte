@@ -9,6 +9,7 @@
   import DiagnosticsSheet from './components/DiagnosticsSheet.svelte';
   import TrainingSheet from './components/TrainingSheet.svelte';
   import ByteInspector from './components/ByteInspector.svelte';
+  import { untrack } from 'svelte';
   import { chat } from './lib/stores/chat.svelte';
   import { model } from './lib/stores/model.svelte';
 
@@ -17,9 +18,13 @@
 
   const inspectTrace = $derived(inspecting ? chat.traces[inspecting] : undefined);
 
+  // untrack: this runs once on mount. Without it the effect would subscribe to the chat
+  // state that `start()` reads and re-run on the first reply.
   $effect(() => {
-    chat.start();
-    void model.refresh();
+    untrack(() => {
+      chat.start();
+      void model.refresh();
+    });
     return () => chat.dispose();
   });
 

@@ -33,7 +33,7 @@
         bind:this={trigger}
         class="quiet convo"
         aria-expanded={menuOpen}
-        aria-haspopup="menu"
+        aria-haspopup="true"
         onclick={() => (menuOpen = !menuOpen)}
       >
         <span class="convo-title">{title}</span>
@@ -43,10 +43,10 @@
       {#if menuOpen}
         <div
           class="menu"
-          role="menu"
+          aria-label="Conversations"
           use:dismissable={{ onDismiss: () => (menuOpen = false), trigger }}
         >
-          <button class="item new" role="menuitem" onclick={fresh}>
+          <button class="item new" onclick={fresh}>
             <Icon name="plus" size={14} />
             New conversation
           </button>
@@ -55,7 +55,7 @@
             <ul>
               {#each chat.index as c (c.id)}
                 <li class:current={c.id === chat.id}>
-                  <button class="item" role="menuitem" onclick={() => pick(c.id)}>
+                  <button class="item" onclick={() => pick(c.id)} aria-current={c.id === chat.id}>
                     <span class="label">{c.title}</span>
                     <span class="meta stamp">{when(new Date(c.updatedAt).toISOString())}</span>
                   </button>

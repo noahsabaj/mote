@@ -23,7 +23,7 @@
   </p>
 {:else if info}
   <section>
-    <p class="note"><span class="tag">{info.status}</span>{info.status_note}</p>
+    <p class="note"><span class="tag">{info.status}</span> {info.status_note}</p>
   </section>
 
   <section>
