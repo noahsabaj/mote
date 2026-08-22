@@ -1,8 +1,9 @@
 """Lightning.ai driver for the flagship run. NOTHING here starts a machine unless you pass --go.
 
     python cloud/launch.py plan                         # print what would happen (default machine, budget math)
-    python cloud/launch.py up --go                      # create/start the studio (interruptible H100), sync, bootstrap
-    python cloud/launch.py data --go                    # build the pretraining + SFT mixes on the studio (detached)
+    python cloud/launch.py up --go                      # create/start the studio on a CPU machine, sync, bootstrap
+    python cloud/launch.py data --go                    # build the pretraining + SFT mixes on the studio (detached, CPU is enough)
+    python cloud/launch.py switch --machine H100 --go   # move to an interruptible H100 once the data is built
     python cloud/launch.py train --go [--resume]        # start/resume the flagship pretraining (detached)
     python cloud/launch.py sft --go                     # SFT from the latest pretrain checkpoint (detached)
     python cloud/launch.py status | logs | pull | stop --go
@@ -87,8 +88,9 @@ def cmd_up(args):
     s, ts = studio(create=True)
     print(f"studio {s.name} in teamspace {ts.name}: status {s.status}")
     if str(s.status).lower() != "running":
-        s.start(machine=getattr(Machine, MACHINE), interruptible=True)
-        print("started (interruptible)")
+        machine = getattr(Machine, args.machine)
+        s.start(machine=machine, interruptible=args.machine != "CPU")
+        print(f"started on {args.machine}" + (" (interruptible)" if args.machine != "CPU" else ""))
     print("syncing repo ...")
     s.upload_folder(str(ROOT), remote_path=REMOTE_DIR, progress_bar=False)
     out, code = s.run_with_exit_code(f"cd ~/{REMOTE_DIR} && bash cloud/bootstrap.sh")
@@ -118,6 +120,15 @@ def cmd_sft(args):
     s.run(f"mkdir -p ~/{REMOTE_DIR}/runs/flagship_sft")
     s.run_and_detach(SFT_CMD.format(d=REMOTE_DIR, minutes=args.sft_minutes, resume="--resume" if args.resume else ""))
     print("sft detached; follow with: python cloud/launch.py logs --file runs/flagship_sft/stdout.log")
+
+
+def cmd_switch(args):
+    """Move the running studio to another machine type (e.g. CPU for data building -> H100 for training)."""
+    require_go(args)
+    from lightning_sdk import Machine
+    s, _ = studio(create=False)
+    s.switch_machine(getattr(Machine, args.machine), interruptible=args.machine != "CPU")
+    print(f"switched to {args.machine}")
 
 
 def cmd_status(args):
@@ -152,7 +163,8 @@ def cmd_stop(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["plan", "up", "data", "train", "sft", "status", "logs", "pull", "stop"])
+    ap.add_argument("command", choices=["plan", "up", "switch", "data", "train", "sft", "status", "logs", "pull", "stop"])
+    ap.add_argument("--machine", default="CPU", help="for up/switch: CPU (data building, cheap) or H100 (training, interruptible)")
     ap.add_argument("--go", action="store_true", help="actually touch cloud resources")
     ap.add_argument("--minutes", type=float, default=600.0, help="pretraining wall-clock budget")
     ap.add_argument("--sft-minutes", type=float, default=60.0)
