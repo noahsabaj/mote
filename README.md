@@ -73,9 +73,11 @@ python -m morpheme.train.train --preset pilot --sft --init-from runs/pilot_1h/la
 every `--ckpt-minutes`; `--resume` continues. With `--max-steps 0` (default) the LR and ratio schedules follow
 wall-clock progress toward `--max-minutes`.
 
-Notes learned the hard way: batch 4 × accum 4 at 2048 bytes is the 8 GB sweet spot (at initialization the router
-fires on ~50% of bytes, so the materialized Relation attention is ~6× larger than after convergence); the Triton
-SSD kernel re-autotunes for every new chunk count, so the EMA dechunk uses a chunked pure-PyTorch scan instead.
+Notes learned the hard way: on the 8 GB card under WSL2 use **batch 2 × accum 8** at 2048 bytes — batch 4 sits at the
+memory ceiling and the default allocator fragments across the ever-changing chunk counts (13 kB/s vs 80 kB/s measured);
+`expandable_segments` would fix the fragmentation but crashes the WSL2 driver. At initialization the router fires on
+~50% of bytes, so the materialized Relation attention is ~6× larger than after convergence. The Triton SSD kernel
+re-autotunes for every new chunk count, so the EMA dechunk uses a chunked pure-PyTorch scan instead.
 
 ## Serve
 
