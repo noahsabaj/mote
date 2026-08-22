@@ -1,0 +1,233 @@
+/* Morpheme — one accent, hairlines instead of boxes, typography for hierarchy.
+   No webfont: the studio is a local tool and should not reach the network to render text.
+   Both schemes are authored; `prefers-color-scheme` picks between them. */
+
+:root {
+  color-scheme: light dark;
+
+  --font-ui: system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', 'Noto Sans',
+    sans-serif;
+  --font-read: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Charter,
+    Cambria, Georgia, 'Times New Roman', serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', SFMono-Regular, 'Segoe UI Mono', Menlo,
+    Consolas, monospace;
+
+  --bg: #faf9f7;
+  --bg-veil: rgb(250 249 247 / 0.86);
+  --surface: #f1eee8;
+  --surface-2: #e9e5dd;
+  --ink: #1c1a17;
+  --ink-2: #56514a;
+  --ink-3: #6f6960;
+  --rule: #e3ded5;
+  --rule-strong: #cfc8bc;
+  --accent: #a34a1f;
+  --accent-ink: #8f3f18;
+  --accent-soft: rgb(163 74 31 / 0.1);
+  --accent-line: rgb(163 74 31 / 0.34);
+  --shadow: 0 1px 2px rgb(28 26 23 / 0.05), 0 12px 32px -12px rgb(28 26 23 / 0.18);
+
+  --measure: 34rem;
+  --gutter: clamp(1rem, 4vw, 2.5rem);
+  --radius: 12px;
+  --radius-sm: 7px;
+  --tap: 34px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131211;
+    --bg-veil: rgb(19 18 17 / 0.86);
+    --surface: #1d1b19;
+    --surface-2: #262321;
+    --ink: #ece8e2;
+    --ink-2: #a7a099;
+    --ink-3: #8b847c;
+    --rule: #2b2825;
+    --rule-strong: #3d3936;
+    --accent: #e0a070;
+    --accent-ink: #eab183;
+    --accent-soft: rgb(224 160 112 / 0.13);
+    --accent-line: rgb(224 160 112 / 0.36);
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 16px 40px -14px rgb(0 0 0 / 0.7);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  height: 100%;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 550;
+  line-height: 1.22;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+a {
+  color: var(--accent-ink);
+  text-underline-offset: 2px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* ------------------------------------------------------------------ controls */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4em;
+  min-height: var(--tap);
+  padding: 0 0.85em;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.btn:hover:not(:disabled) {
+  background: var(--surface);
+}
+.btn:disabled {
+  color: var(--ink-3);
+  cursor: default;
+  opacity: 0.65;
+}
+.btn.accent {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--bg);
+}
+.btn.accent:hover:not(:disabled) {
+  background: var(--accent-ink);
+}
+
+/* Text-only control: recedes until hovered or focused. */
+.quiet {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  min-height: 28px;
+  padding: 0 0.35em;
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+.quiet:hover:not(:disabled),
+.quiet[aria-pressed='true'],
+.quiet[aria-expanded='true'] {
+  color: var(--ink);
+  background: var(--surface);
+}
+.quiet[aria-pressed='true'] {
+  color: var(--accent-ink);
+}
+.quiet:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.meta {
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Definition rows used by the model and diagnostics panels — hairlines, not cards. */
+.rows {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(7.5rem, auto) 1fr;
+  gap: 0;
+}
+.rows dt,
+.rows dd {
+  margin: 0;
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--rule);
+  font-size: 0.875rem;
+}
+.rows dt {
+  color: var(--ink-3);
+  padding-right: 1rem;
+}
+.rows dd {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.rows dt:first-of-type,
+.rows dt:first-of-type + dd {
+  border-top: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

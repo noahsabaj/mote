@@ -1,22 +1,32 @@
 [project]
-name = "sisa-mamba"
+name = "morpheme"
 version = "0.1.0"
-description = "High-performance PyTorch library integrating SISA (SSM-Informed Softmax Attention) and Mamba-3 architectures, with byte-level sequence modeling, interactive Web UI, and scientific benchmarks."
+description = "Byte-level H-Net language model (Mamba-3 encoder/decoder, Relation main network, multi-byte prediction head) and the studio that serves it."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.2.0",
-    "transformers>=4.40.0",
+    "torch>=2.6.0",
+    "numpy>=1.26",
     "datasets>=2.18.0",
-    "einops>=0.7.0",
+    "huggingface_hub>=0.23",
     "fastapi>=0.110.0",
-    "uvicorn>=0.29.0",
-    "rich>=13.7.0",
-    "scipy>=1.12.0",
-    "matplotlib>=3.8.0",
+    "uvicorn[standard]>=0.29.0",
+    "websockets>=12.0",
     "pytest>=8.0.0",
 ]
+
+[project.optional-dependencies]
+# Official Mamba-3 Triton kernels: Linux / WSL2 only. Install from the upstream source tree:
+#   MAMBA_SKIP_CUDA_BUILD=TRUE pip install -e /path/to/state-spaces/mamba --no-deps --no-build-isolation
+# plus `triton>=3.5 einops`. Without them the pure-PyTorch paths are used automatically.
+cloud = ["lightning-sdk>=2026.8"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["morpheme*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
