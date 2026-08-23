@@ -113,7 +113,12 @@ export function modelPayload(): ModelInfo {
             hold_rate: 0.7143,
             concede_rate: 0.625,
             n_identity: 24,
-            n_facts: 40
+            n_facts: 40,
+            identity_acc_seen: 1,
+            hold_rate_seen: 0.875,
+            concede_rate_seen: 0.75,
+            n_identity_seen: 6,
+            n_facts_seen: 8
           }
         : null,
     identity_card: MOCK_IDENTITY_CARD

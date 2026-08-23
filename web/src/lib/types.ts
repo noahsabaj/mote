@@ -56,7 +56,12 @@ export interface ModelInfo {
   kernels: Kernels;
   defaults: SamplingParams;
   /** identity / pushback probe (morpheme.eval.probe), measured on this checkpoint; absent until run */
-  probe?: { identity_acc: number; hold_rate: number; concede_rate: number; n_identity: number; n_facts: number } | null;
+  probe?: {
+    /** primary scores: held-out prompts, facts and pushback wordings absent from the identity training data */
+    identity_acc: number; hold_rate: number; concede_rate: number; n_identity: number; n_facts: number;
+    /** the same scores on prompts that share the training templates (present once the probe has both sets) */
+    identity_acc_seen?: number; hold_rate_seen?: number; concede_rate_seen?: number; n_identity_seen?: number; n_facts_seen?: number;
+  } | null;
   /** the system message the engine prepends so the model knows what it is */
   identity_card?: string;
 }

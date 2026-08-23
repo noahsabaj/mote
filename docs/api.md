@@ -36,7 +36,8 @@ shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair
   "device": { "name": "NVIDIA GeForce RTX 4060 Ti", "vram_total_mb": 8188, "vram_used_mb": 912 },
   "kernels": { "mamba3": true, "ssd": true },
   "defaults": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "n_candidates": 3 },
-  "probe": { "identity_acc": 0.83, "hold_rate": 0.5, "concede_rate": 0.75, "n_identity": 6, "n_facts": 8 },
+  "probe": { "identity_acc": 0.83, "hold_rate": 0.5, "concede_rate": 0.75, "n_identity": 6, "n_facts": 8,
+             "identity_acc_seen": 1.0, "hold_rate_seen": 0.875, "concede_rate_seen": 0.75, "n_identity_seen": 6, "n_facts_seen": 8 },
   "identity_card": "You are Mote, a small byte-level language model ..."
 }
 ```

@@ -123,7 +123,9 @@ dialogues plus *balanced* pushback dialogues (user wrong → hold with a one-lin
 pairs. Mix the shard into SFT with `--mix data/sft_identity:0.05`, then optionally run
 `python -m morpheme.train.dpo --init-from <sft.pt> --pairs data/sft_identity.dpo.jsonl --out <dir>`.
 `python -m morpheme.eval.probe --checkpoint <pt>` measures identity accuracy, hold rate and concede rate with greedy
-decoding and writes `probe.json` next to the checkpoint; the studio's Model sheet shows it. The pilot scores 0/0/0.
+decoding on *held-out* prompts (phrasings, facts, numbers and pushback wordings absent from the training data; the
+training-style set is reported as `*_seen`) and writes `probe.json` next to the checkpoint; the studio's Model sheet
+shows it. The pilot scores 0/0/0.
 
 ## Run the studio
 

@@ -199,7 +199,8 @@ class Engine:
             return None
         try:
             r = json.loads(p.read_text(encoding="utf-8"))
-            return {k: r[k] for k in ("identity_acc", "hold_rate", "concede_rate", "n_identity", "n_facts") if k in r}
+            keys = ("identity_acc", "hold_rate", "concede_rate", "n_identity", "n_facts")
+            return {k: r[k] for k in keys + tuple(f"{k}_seen" for k in keys) if k in r}
         except Exception:
             return None
 

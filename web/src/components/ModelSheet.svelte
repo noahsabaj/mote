@@ -67,8 +67,9 @@
   <section>
     <h3>Identity and pushback</h3>
     <p class="meta lead">
-      Greedy answers to a fixed probe set, scored on this checkpoint — whether it knows what it
-      is, and what it does when it is contradicted.
+      Greedy answers to held-out prompts — phrasings, facts and pushback wordings absent from the
+      identity training data — scored on this checkpoint: whether it knows what it is, and what it
+      does when it is contradicted.
     </p>
     {#if info.probe}
       <dl class="rows">
@@ -80,6 +81,10 @@
         <dd>{pct(info.probe.concede_rate, 0)}</dd>
         <dt>Facts probed</dt>
         <dd>{info.probe.n_facts}</dd>
+        {#if info.probe.identity_acc_seen !== undefined && info.probe.hold_rate_seen !== undefined && info.probe.concede_rate_seen !== undefined}
+          <dt>On training-style prompts</dt>
+          <dd>{pct(info.probe.identity_acc_seen, 0)} identity · {pct(info.probe.hold_rate_seen, 0)} holds · {pct(info.probe.concede_rate_seen, 0)} concedes</dd>
+        {/if}
       </dl>
     {:else}
       <p class="none">Not measured for this checkpoint.</p>

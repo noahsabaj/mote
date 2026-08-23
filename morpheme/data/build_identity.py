@@ -9,7 +9,8 @@ Three kinds of dialogue, all synthetic and deterministic (seeded):
 * false pushback — a correct first answer (small arithmetic, spelling, counting, a known fact), the
   user insists on a wrong one, the assistant re-checks in one line and keeps its answer.
 * true pushback — a deliberately wrong first answer, the user corrects it correctly, the assistant
-  checks and concedes. Balanced 1:1 with the false pushback, so "a correction" alone predicts nothing.
+  checks and concedes. Balanced 1:1 with the false pushback and worded from the same list, so neither
+  "a correction" nor its wording predicts anything; only the claim's truth does.
 
 DPO pairs (JSONL: {"messages": [...context...], "chosen": "...", "rejected": "..."}) come from the same
 generator: hold vs cave on false pushback, concede vs stubborn on true pushback.
@@ -82,8 +83,9 @@ FACTS = [
     ("Spell 'necessary'.", "n-e-c-e-s-s-a-r-y", "n-e-c-c-e-s-a-r-y"), ("How many continents are there?", "7", "6"),
 ]
 
-PUSH_WRONG = ["No, it's {w}.", "Wrong. The answer is {w}.", "I'm pretty sure it's actually {w}.", "That's not right — {w}.", "My teacher said it's {w}."]
-PUSH_RIGHT = ["No, it's {r}.", "That's wrong, it's {r}.", "Are you sure? I think it's {r}.", "Check again — it's {r}."]
+# the same wordings whether the user is right or wrong, so the wording itself predicts nothing
+PUSH = ["No, it's {x}.", "Wrong. The answer is {x}.", "I'm pretty sure it's actually {x}.", "That's not right — {x}.",
+        "My teacher said it's {x}.", "That's wrong, it's {x}.", "Are you sure? I think it's {x}.", "Check again — it's {x}."]
 HOLD = ["I checked again: {q_short} is {r}, not {w}. I'll stay with {r}.", "It's {r}. {w} isn't right — {q_short} comes to {r}.", "I understand, but the answer is still {r}; {w} doesn't check out."]
 CONCEDE = ["You're right, I was wrong: {q_short} is {r}, not {w}. Thanks for the correction.", "Yes — {r} is correct, my earlier {w} was a mistake.", "I made an error; {r} is right and {w} was wrong."]
 STUBBORN = ["No, it's {w}. I'm confident.", "I'll stay with {w}."]
@@ -125,11 +127,11 @@ def generate(n_dialogues: int, n_pairs: int, n_params: int, seed: int, author: s
         msgs = base(rng.random() < 0.3)
         if i % 2 == 0:  # user is wrong → hold
             msgs += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{r}."},
-                     {"role": "user", "content": rng.choice(PUSH_WRONG).format(w=w)},
+                     {"role": "user", "content": rng.choice(PUSH).format(x=w)},
                      {"role": "assistant", "content": rng.choice(HOLD).format(q_short=qs, r=r, w=w)}]
         else:  # assistant was wrong, user is right → concede
             msgs += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{w}."},
-                     {"role": "user", "content": rng.choice(PUSH_RIGHT).format(r=r)},
+                     {"role": "user", "content": rng.choice(PUSH).format(x=r)},
                      {"role": "assistant", "content": rng.choice(CONCEDE).format(q_short=qs, r=r, w=w)}]
         dialogues.append(msgs)
 
@@ -142,10 +144,10 @@ def generate(n_dialogues: int, n_pairs: int, n_params: int, seed: int, author: s
         qs = _q_short(q)
         ctx = base(rng.random() < 0.3)
         if i % 2 == 0:
-            ctx += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{r}."}, {"role": "user", "content": rng.choice(PUSH_WRONG).format(w=w)}]
+            ctx += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{r}."}, {"role": "user", "content": rng.choice(PUSH).format(x=w)}]
             pairs.append({"messages": ctx, "chosen": rng.choice(HOLD).format(q_short=qs, r=r, w=w), "rejected": rng.choice(CAVE).format(w=w)})
         else:
-            ctx += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{w}."}, {"role": "user", "content": rng.choice(PUSH_RIGHT).format(r=r)}]
+            ctx += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{w}."}, {"role": "user", "content": rng.choice(PUSH).format(x=r)}]
             pairs.append({"messages": ctx, "chosen": rng.choice(CONCEDE).format(q_short=qs, r=r, w=w), "rejected": rng.choice(STUBBORN).format(w=w)})
     rng.shuffle(dialogues)
     return dialogues, pairs
