@@ -68,6 +68,10 @@ python -m morpheme.train.train \
 python -m morpheme.train.train --preset pilot --sft --init-from runs/pilot_1h/last.pt --data data/sft_mix --out runs/pilot_sft --max-minutes 20
 ```
 
+Multi-byte head options (A/B knobs from the 2026 speculative-decoding review, `docs/research/speculative-decoding-2026-08-23.md`):
+`--mbp-weight 0.3` (loss weight), `--mbp-gamma 3` (position weighting exp(-offset/γ)), `--mbp-transition` (a 264×264
+byte-transition bias so each draft slot conditions on the draft byte sampled before it), `--no-mbp` (no head at all).
+
 `log.jsonl` records train loss/BPB, bytes-per-chunk, ratio loss, multi-byte-head loss, and periodic evals
 (val BPB, boundary/separator alignment, MBP top-1, a chunked text sample). `last.pt` is written atomically
 every `--ckpt-minutes`; `--resume` continues. With `--max-steps 0` (default) the LR and ratio schedules follow

@@ -52,9 +52,10 @@ class MBPCfg:
     n_layers: int = 2
     n_heads: int = 4
     d_ff: int = 768
-    n_candidates: int = 3  # speculative bytes proposed per boundary at inference
-    accept_threshold: float = 0.9  # τ: accept a proposed byte while P(byte) >= τ
+    n_candidates: int = 3  # draft length per boundary at inference (verified exactly)
     loss_weight: float = 1.0  # λ1 in L = λ0·L_nbp + λ1·L_mbp + α·L_ratio
+    position_gamma: float = 0.0  # >0: weight the head's loss by exp(-offset/γ) (DFlash/DSpark position weighting)
+    transition: bool = False  # first-order byte-transition bias on the head's logits (DSpark's Markov head; V×V at byte vocab)
 
 
 @dataclass
@@ -67,6 +68,12 @@ class DCCfg:
     ratio_loss_weight: float = 0.03  # α
     prob_clamp: float = 1e-4  # p clamped to [ε, 1-ε] before the EMA
     chunk_bucket: int = 64  # pad the chunk count to a multiple of this so shapes repeat (1 = exact); bit-neutral
+
+
+
+def _make(cls, d: dict):
+    """Build a config dataclass from a dict, ignoring keys the class no longer has (old checkpoints)."""
+    return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
@@ -94,10 +101,10 @@ class MorphemeConfig:
     def from_dict(cls, d: Dict[str, Any]) -> "MorphemeConfig":
         d = dict(d)
         return cls(
-            main=RelationCfg(**d.pop("main", {})),
-            mbp=MBPCfg(**d.pop("mbp", {})),
-            dc=DCCfg(**d.pop("dc", {})),
-            mamba3=Mamba3Cfg(**d.pop("mamba3", {})),
+            main=_make(RelationCfg, d.pop("main", {})),
+            mbp=_make(MBPCfg, d.pop("mbp", {})),
+            dc=_make(DCCfg, d.pop("dc", {})),
+            mamba3=_make(Mamba3Cfg, d.pop("mamba3", {})),
             **d,
         )
 

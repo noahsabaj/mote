@@ -71,7 +71,7 @@ class HNetForCausalLM(nn.Module):
         self.pad_dimension = nn.Parameter(torch.zeros(D1 - D0, **fk)) if D1 > D0 else None
         self.decoder = make_mamba3_stack(cfg.decoder_layers, D0, cfg.mamba3, cfg.norm_eps, cfg.encoder_layers, **fk)
         self.lm_head = nn.Linear(D0, V, bias=False, **fk)
-        self.mbp_head = LCAHead(D0, cfg.mbp.n_layers, cfg.mbp.n_heads, cfg.mbp.d_ff, cfg.norm_eps, **fk) if cfg.mbp.enabled else None
+        self.mbp_head = LCAHead(D0, cfg.mbp.n_layers, cfg.mbp.n_heads, cfg.mbp.d_ff, cfg.norm_eps, vocab=V, transition=getattr(cfg.mbp, "transition", False), **fk) if cfg.mbp.enabled else None
         if cfg.tie_embeddings:
             self.lm_head.weight = self.embeddings.weight
         self.init_weights()
@@ -149,6 +149,8 @@ class HNetForCausalLM(nn.Module):
             x = self.mbp_head.build_inputs(z, start_state, offset)
             x = self.mbp_head(x, chunk_id, mask)
             mbp_logits = self.lm_head(x)
+            if self.mbp_head.transition is not None:
+                mbp_logits = mbp_logits + self.mbp_head.transition(input_ids).to(mbp_logits.dtype)  # teacher-forced previous byte
         return HNetOutput(logits, mbp_logits, routing, chunk_id, offset)
 
     # ------------------------------------------------------------------------------

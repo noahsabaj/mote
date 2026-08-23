@@ -83,7 +83,9 @@ Server → client (in order)
 `source` is `nbp` (sampled from the next-byte head), `mbp` (a byte drafted by the multi-byte head and accepted by
 exact speculative verification — Leviathan/Chen rejection sampling against the next-byte head's distribution, with
 temperature and top-p applied to both), or `fix` (the correction drawn when a draft byte was rejected). The byte
-stream is distributed exactly as plain sampling would be; `n_candidates` is the draft length (0 disables).
+stream is distributed exactly as plain sampling would be; `n_candidates` is the draft length (0 disables). The engine
+measures bytes/s of speculative rounds against plain steps within each reply and pauses drafting (`spec_paused`, plus a
+`diagnostics.note`) once it is slower — so a weak drafter can never slow a reply below plain decoding.
 // text: the completed UTF-8 character(s) this byte finished, or null while a multi-byte char is pending
 // pending: bytes currently buffered in UTF-8 assembly
 // source: "nbp" = sampled one byte at a time; "mbp" = accepted from the multi-byte head's parallel proposal
@@ -94,7 +96,7 @@ stream is distributed exactly as plain sampling would be; `n_candidates` is the 
 // partial: the chunk began inside the prompt (then start is clamped to 0 and bytes > end - start + 1).
 
 { "type": "stats", "bytes": 64, "elapsed_ms": 1730, "bytes_per_sec": 37.0, "chunks": 11,
-  "bytes_per_chunk": 5.8, "mbp_proposed": 30, "mbp_accepted": 12, "mbp_accept_rate": 0.40, "spec_rounds": 10, "spec_fixes": 7, "spec_replays": 3,
+  "bytes_per_chunk": 5.8, "mbp_proposed": 30, "mbp_accepted": 12, "mbp_accept_rate": 0.40, "spec_rounds": 10, "spec_fixes": 7, "spec_replays": 3, "spec_paused": false,
   "context_bytes": 125, "context_limit": 2048 }                                         // every 16 bytes
 
 { "type": "diagnostics",                                                                // at every chunk boundary

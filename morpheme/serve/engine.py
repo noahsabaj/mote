@@ -263,9 +263,10 @@ class Engine:
         generated: List[int] = []
         text_parts: List[str] = []
         spec = {"rounds": 0, "proposed": 0, "accepted": 0, "fixes": 0, "replays": 0, "paused": False}
-        # Break-even for a recurrent target: a round costs ~1 sequence forward (+ a replay on rejection) against
-        # the k steps it replaces; below this acceptance rate drafting only slows decoding, so stop for the reply.
-        PAUSE_AFTER, PAUSE_BELOW = 48, 0.15
+        # Measured break-even: seconds per emitted byte in speculative rounds vs plain steps, over this reply.
+        # Drafting pauses for the rest of the reply once it is measurably slower than stepping.
+        PAUSE_AFTER = 24  # proposed bytes before the comparison is trusted
+        timing = {"spec_s": 0.0, "spec_bytes": 0, "plain_s": 0.0, "plain_bytes": 0}
         chunk_start = P  # absolute index where the current chunk began
         chunk_index = n_chunks - 1
         reason = "max_bytes"
@@ -315,10 +316,14 @@ class Engine:
             """Draft logits [n, V] for the bytes after a fresh boundary, or None."""
             if not is_b or n_draft <= 0 or spec["paused"]:
                 return None
-            if spec["proposed"] >= PAUSE_AFTER and spec["accepted"] < PAUSE_BELOW * spec["proposed"]:
-                spec["paused"] = True
-                emit({"type": "diagnostics", **self._diagnostics(boundary_probs), "note": f"drafting paused: {spec['accepted']}/{spec['proposed']} draft bytes accepted, below break-even"})
-                return None
+            if spec["proposed"] >= PAUSE_AFTER and timing["plain_bytes"] >= 8 and timing["spec_bytes"] >= 8:
+                spec_rate = timing["spec_bytes"] / max(timing["spec_s"], 1e-9)
+                plain_rate = timing["plain_bytes"] / max(timing["plain_s"], 1e-9)
+                if spec_rate < plain_rate:
+                    spec["paused"] = True
+                    emit({"type": "diagnostics", **self._diagnostics(boundary_probs),
+                          "note": f"drafting paused: {spec['accepted']}/{spec['proposed']} draft bytes accepted; speculative rounds ran at {spec_rate:.0f} B/s vs {plain_rate:.0f} B/s plain"})
+                    return None
             if mbp is None:
                 mbp = self.model._speculate(state)
             return mbp[0, :n_draft]
@@ -338,13 +343,19 @@ class Engine:
                 # ---- speculative round: draw the draft, verify it in ONE pass from a snapshot, exact acceptance
                 k = min(int(draft.shape[0]), room - 1)
                 q_dists, xs = [], []
+                trans = getattr(self.model.mbp_head, "transition", None)
+                prev = generated[-1] if generated else prompt_ids[-1]  # the chunk's first byte
                 for m in range(k):
-                    qd = _dist(draft[m], params.temperature, params.top_p)
+                    base = draft[m]
+                    if trans is not None:  # condition this slot on the draft byte actually sampled before it
+                        base = base.float() + trans.weight[prev]
+                    qd = _dist(base, params.temperature, params.top_p)
                     b = _draw(qd)
                     if b in STOP_IDS:
                         break  # the target decides about stopping; the draft never proposes it
                     q_dists.append(qd)
                     xs.append(b)
+                    prev = b
                 draft = None
                 if not xs:
                     continue
@@ -356,29 +367,39 @@ class Engine:
                 p_dists = [_dist(lg, params.temperature, params.top_p) for lg in target_logits]
                 n_acc, fix, fix_p = verify_draft(xs, q_dists, p_dists)
                 spec["accepted"] += n_acc
-                per_byte_ms = (time.perf_counter() - t_round) * 1000 / max(n_acc + (1 if fix is not None else 0), 1)
-                for m in range(n_acc):
-                    record(xs[m], float(p_dists[m][xs[m]]), entropy_of(target_logits[m]), bool(bm_seq[m]), float(bp_seq[m]), "mbp", per_byte_ms)
+                n_out = n_acc + (1 if fix is not None else 0)
                 if fix is None:
+                    per_byte_ms = (time.perf_counter() - t_round) * 1000 / max(n_out, 1)
+                    for m in range(n_acc):
+                        record(xs[m], float(p_dists[m][xs[m]]), entropy_of(target_logits[m]), bool(bm_seq[m]), float(bp_seq[m]), "mbp", per_byte_ms)
+                    timing["spec_s"] += time.perf_counter() - t_round
+                    timing["spec_bytes"] += n_out
                     logits = lg_seq[0, -1]
                     draft = new_draft(bool(bm_seq[-1]), None)
                     if len(generated) - last_stats_bytes >= 16:
                         last_stats_bytes = len(generated)
                         emit({"type": "stats", **stats()})
                     continue
-                # rejection at position n_acc: roll back, replay the accepted prefix, step the correction
+                # rejection at position n_acc: roll back and run ONE forward over accepted prefix + correction
                 state = snapshot
-                if n_acc > 0:
-                    spec["replays"] += 1
-                    self.model.forward_from_state(torch.tensor([xs[:n_acc]], device=self.device), state)
                 if fix in STOP_IDS:
+                    for m in range(n_acc):  # accepted bytes are real output; commit them before stopping
+                        record(xs[m], float(p_dists[m][xs[m]]), entropy_of(target_logits[m]), bool(bm_seq[m]), float(bp_seq[m]), "mbp", 0.0)
                     reason = "eos"
                     break
                 spec["fixes"] += 1
-                lg_next, routing, is_b, mbp = self.model.step(torch.tensor([[fix]], device=self.device), state)
-                record(fix, fix_p, entropy_of(target_logits[n_acc]), bool(is_b), float(routing.boundary_prob[0, 1]), "fix", per_byte_ms)
-                logits = lg_next[0, -1]
-                draft = new_draft(bool(is_b), mbp)
+                if n_acc > 0:
+                    spec["replays"] += 1
+                seq = xs[:n_acc] + [fix]
+                lg_fix, bm_fix, bp_fix = self.model.forward_from_state(torch.tensor([seq], device=self.device), state)
+                per_byte_ms = (time.perf_counter() - t_round) * 1000 / n_out
+                for m in range(n_acc):
+                    record(xs[m], float(p_dists[m][xs[m]]), entropy_of(target_logits[m]), bool(bm_fix[m]), float(bp_fix[m]), "mbp", per_byte_ms)
+                record(fix, fix_p, entropy_of(target_logits[n_acc]), bool(bm_fix[n_acc]), float(bp_fix[n_acc]), "fix", per_byte_ms)
+                timing["spec_s"] += time.perf_counter() - t_round
+                timing["spec_bytes"] += n_out
+                logits = lg_fix[0, -1]
+                draft = new_draft(bool(bm_fix[n_acc]), None)
             else:
                 # ---- plain step: one byte from the target
                 byte, p, entropy = _sample(logits, params.temperature, params.top_p)
@@ -387,6 +408,8 @@ class Engine:
                     break
                 lg_next, routing, is_b, mbp = self.model.step(torch.tensor([[byte]], device=self.device), state)
                 record(byte, p, entropy, bool(is_b), float(routing.boundary_prob[0, 1]), "nbp", (time.perf_counter() - t_round) * 1000)
+                timing["plain_s"] += time.perf_counter() - t_round
+                timing["plain_bytes"] += 1
                 logits = lg_next[0, -1]
                 draft = new_draft(bool(is_b), mbp)
             if len(generated) - last_stats_bytes >= 16:

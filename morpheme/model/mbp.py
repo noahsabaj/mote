@@ -140,10 +140,19 @@ class _Layer(nn.Module):
 
 
 class LCAHead(nn.Module):
-    def __init__(self, d_model: int, n_layers: int, n_heads: int, d_ff: int, eps: float = 1e-5, max_offset: int = 64, device=None, dtype=None):
+    def __init__(self, d_model: int, n_layers: int, n_heads: int, d_ff: int, eps: float = 1e-5, max_offset: int = 64, vocab: int = 0, transition: bool = False, device=None, dtype=None):
         super().__init__()
         fk = {"device": device, "dtype": dtype}
         self.max_offset = max_offset
+        # DSpark-style sequential correction: a bias on the logits for byte t+1 given byte t. At the byte
+        # vocabulary the exact V×V table is 70K parameters, so no low-rank factorisation is needed. In
+        # training it is teacher-forced (the real previous byte); at decode it conditions each draft slot
+        # on the draft byte actually sampled before it, which parallel drafting otherwise lacks.
+        self.transition = nn.Embedding(vocab, vocab, device=device, dtype=torch.float32) if (transition and vocab) else None
+        if self.transition is not None:
+            nn.init.zeros_(self.transition.weight)
+            self.transition.weight._no_reinit = True
+            self.transition.weight._no_weight_decay = True
         self.res_proj = nn.Linear(d_model, d_model, bias=False, **fk)  # W_r on the chunk-start encoder state
         self.pos = nn.Embedding(max_offset, d_model, **fk)
         self.layers = nn.ModuleList([_Layer(d_model, n_heads, d_ff, eps, **fk) for _ in range(n_layers)])

@@ -113,10 +113,13 @@ def set_lr(opt, lr: float):
 
 
 # --------------------------------------------------------------------------------------
-def _masked_ce_sum(logits: torch.Tensor, targets: torch.Tensor, loss_mask: Optional[torch.Tensor]):
-    """(sum of per-token CE over counted tokens, number of counted tokens) — both 0-dim tensors."""
+def _masked_ce_sum(logits: torch.Tensor, targets: torch.Tensor, loss_mask: Optional[torch.Tensor], weights: Optional[torch.Tensor] = None):
+    """(sum of per-token CE over counted tokens, number of counted tokens) — both 0-dim tensors.
+    `weights` (same shape as targets) scales each token's loss; the count is unweighted."""
     V = logits.shape[-1]
     per = F.cross_entropy(logits.reshape(-1, V).float(), targets.reshape(-1), reduction="none")
+    if weights is not None:
+        per = per * weights.reshape(-1).float()
     if loss_mask is None:
         return per.sum(), torch.tensor(float(per.numel()), device=per.device)
     w = loss_mask.reshape(-1).float()
@@ -138,7 +141,9 @@ def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: fl
     loss = ce_sum + ratio_weight * lr_ * n_safe
     stats = {"ce_sum": ce_sum.detach(), "n": n.detach(), "ratio": lr_.detach(), "bpic": bytes_per_chunk(out.routing.boundary_mask, mask)}
     if out.mbp_logits is not None and mbp_weight > 0:
-        ce_m_sum, _ = _masked_ce_sum(out.mbp_logits, targets, tmask)
+        gamma = getattr(model.cfg.mbp, "position_gamma", 0.0) if hasattr(model, "cfg") else 0.0
+        pw = torch.exp(-out.offset.float() / gamma) if gamma and gamma > 0 else None  # earlier draft slots matter more
+        ce_m_sum, _ = _masked_ce_sum(out.mbp_logits, targets, tmask, pw)
         loss = loss + mbp_weight * ce_m_sum
         stats["ce_mbp_sum"] = ce_m_sum.detach()
     return loss, n_safe, stats, out
@@ -254,6 +259,9 @@ def main(argv=None):
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
     ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
+    ap.add_argument("--mbp-weight", type=float, default=None, help="λ1 for the multi-byte head loss (preset default 1.0)")
+    ap.add_argument("--mbp-gamma", type=float, default=None, help="position weighting exp(-offset/γ) on the head loss (0 = off)")
+    ap.add_argument("--mbp-transition", action="store_true", help="add the V×V byte-transition bias to the head (DSpark Markov head)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--sft", action="store_true", help="train on an SFT shard (assistant-byte loss mask)")
@@ -280,6 +288,12 @@ def main(argv=None):
         cfg.dc.chunk_bucket = args.bucket
     if args.no_mbp:
         cfg.mbp.enabled = False
+    if args.mbp_weight is not None:
+        cfg.mbp.loss_weight = args.mbp_weight
+    if args.mbp_gamma is not None:
+        cfg.mbp.position_gamma = args.mbp_gamma
+    if args.mbp_transition:
+        cfg.mbp.transition = True
     model = HNetForCausalLM(cfg, device=device)
     if args.ckpt_main:
         model.main_network.grad_checkpoint = True
