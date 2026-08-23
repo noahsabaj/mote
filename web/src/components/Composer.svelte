@@ -158,6 +158,9 @@
       {#if chat.preview?.fold && !chat.busy}
         · {chat.preview.fold.turns} folded
       {/if}
+      {#if chat.preview?.reusable && !chat.busy}
+        · {chat.preview.reusable} already read
+      {/if}
       {#if chat.foldMode === 'off'}
         · folding off
         <button class="quiet inline" onclick={() => chat.refold()}>Fold again</button>

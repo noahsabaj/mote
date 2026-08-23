@@ -110,16 +110,12 @@ async function handle(
 
   if (path === '/api/context' && req.method === 'POST') {
     const body = await readJson(req);
-    return json(
-      res,
-      200,
-      previewContext(
-        (body.messages ?? []) as { role: string; content: string }[],
-        Number(body.max_bytes ?? 512),
-        String(body.fold ?? 'auto'),
-        (body.card ?? null) as string | null
-      )
-    );
+    const msgs = (body.messages ?? []) as { role: string; content: string }[];
+    const preview = previewContext(msgs, Number(body.max_bytes ?? 512), String(body.fold ?? 'auto'), (body.card ?? null) as string | null);
+    // the engine's prefix cache already holds everything before the newest user turn (see mock/generate.ts)
+    const older = msgs.slice(0, -1).map((m) => `${m.role}: ${m.content}`).join('\n');
+    const reusable = msgs.length > 1 ? Math.min(new TextEncoder().encode(older).length, preview.used) : 0;
+    return json(res, 200, { ...preview, reusable });
   }
 
   if (path === '/api/training/runs' && req.method === 'GET') {

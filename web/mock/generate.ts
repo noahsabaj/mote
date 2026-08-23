@@ -122,14 +122,45 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
 
   const bytes = enc.encode(reply).slice(0, Math.max(32, params.max_bytes));
 
+  // The real engine reuses its state for every byte before the newest user turn (docs/context.md);
+  // the mock reports the same accounting so the stats line and the meter can be looked at offline.
+  const older = req.messages.slice(0, -1).map((m) => `${m.role}: ${m.content}`).join('\n');
+  const reused = req.messages.length > 1 ? Math.min(enc.encode(older).length, promptBytes) : 0;
   send(ws, {
     type: 'start',
     prompt_bytes: promptBytes,
     context_bytes: promptBytes,
     context_limit: contextLimit,
     truncated,
-    fold
+    fold,
+    prefix: {
+      reused,
+      prefilled: promptBytes - reused,
+      prefill_ms: 40 + (promptBytes - reused) * 1.5,
+      snapshots: 3,
+      cache_bytes: 3 * 10_485_760,
+      cache_budget: 1_073_741_824,
+      hits: req.messages.length - 1,
+      misses: 1
+    }
   });
+  if (reused > 0 && req.context?.verify_prefix) {
+    send(ws, {
+      type: 'diagnostics',
+      mamba3: { encoder_retention: bars(4, seed, 0.55, 0.98), decoder_retention: bars(4, seed * 3, 0.4, 0.95) },
+      relation: { exchange_mass: bars(6, seed * 7, 0.2, 0.88) },
+      boundary_probs: [],
+      prefix_check: {
+        reused,
+        prefilled: promptBytes - reused,
+        boundary_flips: 0,
+        chunks_cold: Math.round(promptBytes / 5),
+        chunks_warm: Math.round(promptBytes / 5),
+        max_logit_diff: 0.00012,
+        cold_ms: 40 + promptBytes * 1.5
+      }
+    });
+  }
 
   const t0 = Date.now();
   let chunkIndex = 0;

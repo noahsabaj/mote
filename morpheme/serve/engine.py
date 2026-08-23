@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from ..model.relation import FullRelation
 from .context import fold
 from .identity import identity_card, with_system_card
 from ..tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer
+from .prefix_cache import PrefixCache
 
 STOP_IDS = {EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ASSISTANT_ID, BOS_ID}
 
@@ -119,8 +121,12 @@ def _sample(logits: torch.Tensor, temperature: float, top_p: float):
 
 
 class Engine:
-    def __init__(self, ckpt_path: str | Path, device: Optional[str] = None):
+    def __init__(self, ckpt_path: str | Path, device: Optional[str] = None, prefix_cache_mb: Optional[int] = None):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        # Prefix-state cache (morpheme/serve/prefix_cache.py): CPU-resident snapshots under a byte budget.
+        mb = int(os.environ.get("MORPHEME_PREFIX_CACHE_MB", 1024)) if prefix_cache_mb is None else int(prefix_cache_mb)
+        self.prefix_cache = PrefixCache(mb << 20)
+        self.pin = self.device.type == "cuda"
         self.ckpt_path = Path(ckpt_path)
         ck = torch.load(self.ckpt_path, map_location="cpu", weights_only=False)
         self.cfg = MorphemeConfig.from_dict(ck["config"])
@@ -230,7 +236,57 @@ class Engine:
             "defaults": vars(self.defaults),
             "probe": self.probe_results(),
             "identity_card": identity_card(self.model.num_params()),
+            "prefix_cache": self.prefix_cache.report(),
         }
+
+    # ------------------------------------------------------------------------------
+    def _card_ids(self, messages: Sequence[dict]) -> List[int]:
+        """Byte ids of the leading system message alone: the prefix every prompt of this deployment shares."""
+        if messages and messages[0].get("role") == "system":
+            return self.tok.format_chat([ChatMessage("system", messages[0]["content"])], add_generation_prompt=False)
+        return []
+
+    def _snapshot(self, kind: str, ids: Sequence[int], state, logits: torch.Tensor, n_chunks: int) -> None:
+        if self.prefix_cache.budget:
+            self.prefix_cache.put(kind, ids, self.model.move_state(state, "cpu", pin=self.pin),
+                                  logits.detach().float().cpu(), n_chunks)
+
+    @torch.no_grad()
+    def _prefill_with_cache(self, messages: Sequence[dict], prompt_ids: List[int]):
+        """Read the prompt, reusing the longest cached prefix. Returns (state, next-byte logits [V],
+        n_chunks, reused bytes, boundary mask of the freshly read suffix or None)."""
+        P = len(prompt_ids)
+        snap = self.prefix_cache.lookup(prompt_ids)
+        if snap is not None:
+            state = self.model.move_state(snap.state, self.device)
+            if snap.n_ids == P:  # e.g. a regenerate: nothing new to read
+                return state, snap.logits.to(self.device), snap.n_chunks, P, None
+            lg, bm, _ = self.model.forward_from_state(torch.tensor([prompt_ids[snap.n_ids:]], device=self.device), state)
+            return state, lg[0, -1], snap.n_chunks + int(bm.sum()), snap.n_ids, bm
+        state = self.model.allocate_inference_state(self.device)
+        card = self._card_ids(messages)
+        if card and len(card) < P and prompt_ids[:len(card)] == card:
+            # cold start: read the identity card on its own first, so every later conversation starts warm
+            out = self.model.prefill(torch.tensor([card], device=self.device), state)
+            n_card = int(out.chunk_id[0, -1]) + 1
+            self._snapshot("card", card, state, out.logits[0, -1], n_card)
+            lg, bm, _ = self.model.forward_from_state(torch.tensor([prompt_ids[len(card):]], device=self.device), state)
+            return state, lg[0, -1], n_card + int(bm.sum()), 0, bm
+        out = self.model.prefill(torch.tensor([prompt_ids], device=self.device), state)
+        return state, out.logits[0, -1], int(out.chunk_id[0, -1]) + 1, 0, None
+
+    @torch.no_grad()
+    def _verify_prefix(self, prompt_ids: List[int], reused: int, warm_logits: torch.Tensor, warm_bm, warm_chunks: int) -> dict:
+        """Debug toggle: read the whole prompt cold and compare with the warm continuation."""
+        t = time.perf_counter()
+        cold = self.model.allocate_inference_state(self.device)
+        out = self.model.prefill(torch.tensor([prompt_ids], device=self.device), cold)
+        cold_bm = out.routing.boundary_mask[0]
+        flips = int((cold_bm[reused:] != warm_bm.to(cold_bm.device)).sum()) if warm_bm is not None else 0
+        diff = out.logits[0, -1].float() - warm_logits.float()
+        return {"reused": reused, "prefilled": len(prompt_ids) - reused, "boundary_flips": flips,
+                "chunks_cold": int(out.chunk_id[0, -1]) + 1, "chunks_warm": warm_chunks,
+                "max_logit_diff": float(diff.abs().max()), "cold_ms": (time.perf_counter() - t) * 1000}
 
     # ------------------------------------------------------------------------------
     def build_prompt(self, messages: Sequence[dict], limit: int, reserve: int):
@@ -269,17 +325,20 @@ class Engine:
         if limit >= 1024:  # the identity card needs room; tiny test contexts go without
             messages = with_system_card(messages, self.model.num_params())  # Mote knows what it is
         folded = fold(messages, limit, reserve=min(params.max_bytes, limit // 4), tok=self.tok,
-                      mode=context.get("fold", "auto") or "auto", card_override=context.get("card"))
+                      mode=context.get("fold", "auto") or "auto", card_override=context.get("card"),
+                      prev=context.get("prev") if isinstance(context.get("prev"), dict) else None)
         prompt_ids, truncated = folded.ids, folded.truncated
-        ids = torch.tensor([prompt_ids], device=self.device)
-        t0 = time.perf_counter()
-        state = self.model.allocate_inference_state(self.device)
-        out = self.model.prefill(ids, state)
-        logits = out.logits[0, -1]
-        n_chunks = int(out.chunk_id[0, -1]) + 1
         P = len(prompt_ids)
+        t0 = time.perf_counter()
+        state, logits, n_chunks, reused, warm_bm = self._prefill_with_cache(messages, prompt_ids)
+        prefill_ms = (time.perf_counter() - t0) * 1000
         emit({"type": "start", "prompt_bytes": P, "context_bytes": P, "context_limit": limit, "truncated": truncated,
-              "fold": folded.report()})
+              "fold": folded.report(),
+              "prefix": {"reused": reused, "prefilled": P - reused, "prefill_ms": prefill_ms, **self.prefix_cache.report()}})
+        if reused and context.get("verify_prefix"):
+            check = self._verify_prefix(prompt_ids, reused, logits, warm_bm, n_chunks)
+            emit({"type": "diagnostics", **self._diagnostics([]), "prefix_check": check})
+        self._snapshot("prompt", prompt_ids, state, logits, n_chunks)  # S1: this turn's prompt (a regenerate reuses it)
 
         streamer = Utf8Streamer()
         boundary_probs: List[float] = []
@@ -408,6 +467,9 @@ class Engine:
                 if fix in STOP_IDS:
                     for m in range(n_acc):  # accepted bytes are real output; commit them before stopping
                         record(xs[m], float(p_dists[m][xs[m]]), entropy_of(target_logits[m]), bool(bm_seq[m]), float(bp_seq[m]), "mbp", 0.0)
+                    if n_acc > 0:  # the state must have read exactly the recorded bytes (the reply snapshot relies on it)
+                        lg_acc, _, _ = self.model.forward_from_state(torch.tensor([xs[:n_acc]], device=self.device), state)
+                        logits = lg_acc[0, -1]
                     reason = "eos"
                     break
                 spec["fixes"] += 1
@@ -438,6 +500,7 @@ class Engine:
             if len(generated) - last_stats_bytes >= 16:
                 last_stats_bytes = len(generated)
                 emit({"type": "stats", **stats()})
+        self._snapshot("reply", prompt_ids + generated, state, logits, chunk_index + 1)  # S2: the next turn starts here
         emit({"type": "done", "reason": reason, "text": "".join(text_parts), "stats": stats()})
 
 

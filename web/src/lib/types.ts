@@ -159,13 +159,44 @@ export interface ContextPreview {
   reserve: number;
   fold: FoldInfo | null;
   truncated: boolean;
+  /** bytes of the would-be prompt the engine already holds a state for (its prefix cache) */
+  reusable?: number;
+}
+
+/** the client's last fold, sent back so the server keeps the same fold point and card while the prompt fits */
+export interface PrevFold {
+  from: number;
+  card: string;
+}
+
+/** from `start`: how much of the prompt came from the engine's prefix cache (docs/context.md) */
+export interface PrefixInfo {
+  reused: number;
+  prefilled: number;
+  prefill_ms: number;
+  snapshots: number;
+  cache_bytes: number;
+  cache_budget: number;
+  hits: number;
+  misses: number;
+}
+
+/** the "verify prefix cache" toggle: a cold re-read of the prompt compared with the warm continuation */
+export interface PrefixCheck {
+  reused: number;
+  prefilled: number;
+  boundary_flips: number;
+  chunks_cold: number;
+  chunks_warm: number;
+  max_logit_diff: number;
+  cold_ms: number;
 }
 
 export interface ClientGenerate {
   type: 'generate';
   messages: { role: ChatRole; content: string }[];
   params: SamplingParams;
-  context?: { fold: FoldMode; card?: string | null };
+  context?: { fold: FoldMode; card?: string | null; prev?: PrevFold | null; verify_prefix?: boolean };
 }
 
 export interface ClientStop {
@@ -182,6 +213,7 @@ export interface StartEvent {
   /** only when even folding could not fit (a giant message) */
   truncated: boolean;
   fold?: FoldInfo | null;
+  prefix?: PrefixInfo;
 }
 
 export interface ByteEvent {
@@ -233,6 +265,8 @@ export interface DiagnosticsEvent {
   mamba3: { encoder_retention: number[]; decoder_retention: number[] };
   relation: { exchange_mass: number[] };
   boundary_probs: number[];
+  /** only on the event sent right after `start` when the client asked to verify the prefix cache */
+  prefix_check?: PrefixCheck;
 }
 
 export interface DoneEvent {

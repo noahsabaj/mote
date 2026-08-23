@@ -207,6 +207,14 @@
               · {pct(turn.stats.mbp_accept_rate)} multi-byte accepted
             {/if}
             {#if turn.ttfbMs !== undefined}· first byte in {num(turn.ttfbMs, 0)} ms{/if}
+            {#if turn.prefix && turn.prefix.reused > 0}· {turn.prefix.reused} B reused{/if}
+            {#if turn.prefixCheck}
+              · <span class:off={turn.prefixCheck.boundary_flips > 0}
+                >cache check: {turn.prefixCheck.boundary_flips} cut{turn.prefixCheck.boundary_flips === 1
+                  ? ''
+                  : 's'} moved, max Δlogit {num(turn.prefixCheck.max_logit_diff, 4)}</span
+              >
+            {/if}
             {#if reasonNote}· {reasonNote}{/if}
             {#if offDefault}· <span class="off">off default: {offDefault}</span>{/if}
           {/if}

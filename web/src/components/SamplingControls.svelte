@@ -153,6 +153,14 @@
     <button class="quiet" aria-pressed={settings.explain} onclick={() => settings.toggleExplain()}>
       Explain
     </button>
+    <button
+      class="quiet"
+      aria-pressed={settings.verifyPrefix}
+      onclick={() => settings.toggleVerifyPrefix()}
+      use:tip={'Re-read each prompt cold after the cached continuation and report any divergence (slower replies)'}
+    >
+      Verify cache
+    </button>
     <button class="quiet" onclick={() => settings.reset()} disabled={!settings.anyOverridden}>
       Reset all
     </button>

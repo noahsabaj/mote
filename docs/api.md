@@ -42,9 +42,11 @@ shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair
 }
 ```
 
-### `POST /api/context`  body `{ "messages": [...], "max_bytes": 512, "fold": "auto", "card": null }`
+### `POST /api/context`  body `{ "messages": [...], "max_bytes": 512, "fold": "auto", "card": null, "prev": null | { "from", "card" } }`
 What the next prompt would look like, without generating — for the studio's meter and fold line:
-`{ "used": 1830, "limit": 2048, "reserve": 512, "fold": null | { "from", "turns", "card" }, "truncated": false }`.
+`{ "used": 1830, "limit": 2048, "reserve": 512, "fold": null | { "from", "turns", "card" }, "truncated": false, "reusable": 1402 }`.
+`prev` is the client's last fold, kept while the prompt still fits; `reusable` is how many bytes of that prompt the
+engine's prefix cache already holds a state for (docs/context.md).
 
 ### `GET /api/checkpoints`
 `[{ "id": "pilot_1h/last.pt", "step": 3100, "val_bpb": 1.63, "bytes_seen": 101580800, "created_at": "...", "loaded": true }, ...]`
@@ -76,16 +78,23 @@ Client → server
 { "type": "generate",
   "messages": [{"role": "user", "content": "What does dynamic chunking do?"}],
   "params": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "n_candidates": 3 },
-  "context": { "fold": "auto" | "now" | "off", "card": null | "<the user's edited compaction card>" } }   // optional
+  "context": { "fold": "auto" | "now" | "off", "card": null | "<the user's edited compaction card>",
+               "prev": null | { "from": 6, "card": "..." },      // the last reply's fold, kept while it fits
+               "verify_prefix": false } }                           // optional; verify: cold re-read + prefix_check
 { "type": "stop" }
 ```
 
 Server → client (in order)
 ```json
 { "type": "start", "prompt_bytes": 61, "context_bytes": 61, "context_limit": 2048, "truncated": false,
-  "fold": null | { "from": 6, "turns": 6, "card": "(Earlier in this conversation, 6 turns folded. ...)" } }
+  "fold": null | { "from": 6, "turns": 6, "card": "(Earlier in this conversation, 6 turns folded. ...)" },
+  "prefix": { "reused": 1402, "prefilled": 38, "prefill_ms": 310, "snapshots": 5, "cache_bytes": 52428800,
+              "cache_budget": 1073741824, "hits": 12, "misses": 2 } }
   // fold: the first `from` non-system turns were folded into `card`, which rides inside the first kept user
   // turn (docs/context.md); `truncated` is now only true when even folding could not fit (a giant message).
+  // prefix: bytes of the prompt taken from the engine's prefix cache vs read afresh (docs/context.md).
+  // With context.verify_prefix, one diagnostics event follows immediately with
+  //   "prefix_check": { "reused", "prefilled", "boundary_flips", "chunks_cold", "chunks_warm", "max_logit_diff", "cold_ms" }
 
 { "type": "byte", "i": 0, "byte": 84, "text": "T", "pending": 0,
   "p": 0.42, "entropy": 2.31, "boundary": true, "boundary_p": 0.93, "chunk": 0,

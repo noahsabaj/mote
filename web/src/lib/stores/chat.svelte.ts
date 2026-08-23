@@ -19,7 +19,18 @@ import { notices } from './notice.svelte';
 import { queue } from './queue.svelte';
 import { ui } from './ui.svelte';
 import { parseCommand, unescapeCommand } from '../commands';
-import type { ChatRole, ContextPreview, DoneEvent, FoldInfo, SamplingParams, ServerEvent, StatsPayload } from '../types';
+import type {
+  ChatRole,
+  ContextPreview,
+  DoneEvent,
+  FoldInfo,
+  PrefixCheck,
+  PrefixInfo,
+  PrevFold,
+  SamplingParams,
+  ServerEvent,
+  StatsPayload
+} from '../types';
 
 export interface Turn {
   id: string;
@@ -38,6 +49,10 @@ export interface Turn {
   contextLimit?: number;
   /** milliseconds from send to the first byte of the reply */
   ttfbMs?: number;
+  /** from `start`: bytes of the prompt the engine reused from its prefix cache vs read afresh */
+  prefix?: PrefixInfo | null;
+  /** the cold re-read comparison, when "verify prefix cache" was on for this reply */
+  prefixCheck?: PrefixCheck | null;
   /** earlier samples of this reply slot (Retry keeps them); each is a complete Turn */
   samples?: Turn[];
   /** assistant only — what this reply was actually drawn at, captured when it was sent */
@@ -414,12 +429,25 @@ class Chat {
           messages,
           settings.params.max_bytes,
           this.foldNow ? 'now' : this.foldMode,
-          this.card
+          this.card,
+          this.lastFold
         );
       } catch {
         /* offline: the meter falls back to the last reply's numbers */
       }
     }, 250);
+  }
+
+  /** The last reply's fold, sent back with the next prompt so the server keeps the same fold point and
+   *  card while they still fit — the bytes before the newest turn then stay identical, which is what the
+   *  engine's prefix cache reuses (docs/context.md). */
+  get lastFold(): PrevFold | null {
+    for (let i = this.turns.length - 1; i >= 0; i--) {
+      const t = this.turns[i];
+      if (t.role !== 'assistant') continue;
+      return t.fold ? { from: t.fold.from, card: t.fold.card } : null;
+    }
+    return null;
   }
 
   /** The user's version of the compaction card (null = the generated one). */
@@ -482,7 +510,12 @@ class Chat {
     this.awaitingStart = true;
     this.#sentAt = performance.now();
     diagnostics.begin();
-    const context = { fold: this.foldNow ? ('now' as const) : this.foldMode, card: this.card };
+    const context = {
+      fold: this.foldNow ? ('now' as const) : this.foldMode,
+      card: this.card,
+      prev: this.lastFold,
+      verify_prefix: settings.verifyPrefix
+    };
     this.foldNow = false;
     this.#socket.generate(history, settings.params, context);
     this.#save();
@@ -522,6 +555,7 @@ class Chat {
           this.#patch(id, {
             truncated: ev.truncated,
             fold: ev.fold ?? null,
+            prefix: ev.prefix ?? null,
             contextBytes: ev.context_bytes,
             contextLimit: ev.context_limit
           });
@@ -540,6 +574,7 @@ class Chat {
           break;
         case 'diagnostics':
           diag = ev;
+          if (ev.prefix_check) this.#patch(id, { prefixCheck: ev.prefix_check });
           break;
         case 'done':
           finished = ev;

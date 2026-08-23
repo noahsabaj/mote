@@ -22,6 +22,8 @@ from ..tokenizer import ByteTokenizer, ChatMessage
 FIRST_BYTES = 200      # of the first user message
 FACT_BYTES = 80        # per fact sentence
 MAX_FACTS = 6
+FOLD_SLACK = 0.25  # an auto fold frees this fraction of the window, so the prefix holds for several turns
+
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
 _FACT_START = re.compile(r"^(my |i |i'm |i am |i've |i have |we |our |mine )", re.IGNORECASE)
@@ -93,9 +95,14 @@ def _merge(card: Optional[str], m: ChatMessage) -> ChatMessage:
 
 
 def fold(messages: Sequence[dict], limit: int, reserve: int, tok: ByteTokenizer, mode: str = "auto",
-         card_override: Optional[str] = None) -> Fold:
+         card_override: Optional[str] = None, prev: Optional[dict] = None) -> Fold:
     """mode: 'auto' folds only when the prompt would overflow; 'now' folds everything before the last
-    user turn; 'off' is plain truncation (drop oldest), kept for the needle probe's baseline."""
+    user turn; 'off' is plain truncation (drop oldest), kept for the needle probe's baseline.
+
+    Auto folds fold *in batches*: enough to free FOLD_SLACK of the window, and a client that passes
+    `prev` = {"from", "card"} (its last fold) keeps that fold point and card for as long as the prompt
+    still fits — so the bytes before the newest turn stay identical from turn to turn, which is what
+    the engine's prefix cache reuses (decided 2026-08-23)."""
     msgs = [ChatMessage(m["role"], m["content"]) for m in messages]
     system = [m for m in msgs if m.role == "system"]
     rest = [m for m in msgs if m.role != "system"]
@@ -107,6 +114,14 @@ def fold(messages: Sequence[dict], limit: int, reserve: int, tok: ByteTokenizer,
     whole = ids_of(rest)
     if mode != "now" and len(whole) <= budget:
         return Fold(whole, len(whole), limit, None, None, False)
+
+    if mode == "auto" and prev and isinstance(prev.get("from"), int):
+        k = prev["from"]
+        if 1 <= k < len(rest) and rest[k].role == "user":
+            card = card_override if card_override is not None else str(prev.get("card") or "")
+            ids = ids_of([_merge(card, rest[k])] + rest[k + 1:])
+            if len(ids) <= budget:
+                return Fold(ids, len(ids), limit, k, card, False)
 
     if mode == "off":
         kept = list(rest)
@@ -121,16 +136,19 @@ def fold(messages: Sequence[dict], limit: int, reserve: int, tok: ByteTokenizer,
     if mode == "now":
         user_idx = user_idx[-1:]
     # Fold a little more rather than lose the card: every fold point is tried with the card first.
-    for k in user_idx:
-        folded = rest[:k]
-        for max_facts in (MAX_FACTS, 3, 0):
-            card = card_override if card_override is not None else build_card(folded, max_facts)
-            kept = [_merge(card, rest[k])] + rest[k + 1:]
-            ids = ids_of(kept)
-            if len(ids) <= budget:
-                return Fold(ids, len(ids), limit, k, card, False)
-            if card_override is not None:
-                break
+    # Auto mode first tries to leave FOLD_SLACK of the window free (fold in batches, not one turn a time).
+    targets = [max(budget - int(limit * FOLD_SLACK), 8), budget] if mode == "auto" else [budget]
+    for target in targets:
+        for k in user_idx:
+            folded = rest[:k]
+            for max_facts in (MAX_FACTS, 3, 0):
+                card = card_override if card_override is not None else build_card(folded, max_facts)
+                kept = [_merge(card, rest[k])] + rest[k + 1:]
+                ids = ids_of(kept)
+                if len(ids) <= target:
+                    return Fold(ids, len(ids), limit, k, card, False)
+                if card_override is not None:
+                    break
     # no fold point fits with a card (a single huge recent turn): keep what fits without one
     for k in user_idx:
         ids = ids_of(rest[k:])
@@ -144,7 +162,8 @@ def fold(messages: Sequence[dict], limit: int, reserve: int, tok: ByteTokenizer,
 
 
 def context_report(messages: Sequence[dict], limit: int, reserve: int, tok: ByteTokenizer, mode: str = "auto",
-                   card_override: Optional[str] = None) -> dict:
+                   card_override: Optional[str] = None, prev: Optional[dict] = None) -> dict:
     """What the next prompt would look like, for the studio's meter and fold line — no generation."""
-    f = fold(messages, limit, reserve, tok, mode, card_override)
-    return {"used": f.used, "limit": f.limit, "reserve": reserve, "fold": f.report(), "truncated": f.truncated}
+    f = fold(messages, limit, reserve, tok, mode, card_override, prev)
+    return {"used": f.used, "limit": f.limit, "reserve": reserve, "fold": f.report(), "truncated": f.truncated,
+            "ids": f.ids}

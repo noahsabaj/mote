@@ -67,4 +67,21 @@ def test_user_facts_rules():
 
 def test_report_shape():
     r = context_report(convo(30), 1024, 128, TOK)
-    assert set(r) == {"used", "limit", "reserve", "fold", "truncated"} and r["fold"]["from"] == r["fold"]["turns"]
+    assert set(r) == {"used", "limit", "reserve", "fold", "truncated", "ids"} and r["fold"]["from"] == r["fold"]["turns"]
+
+
+def test_auto_fold_frees_slack_and_keeps_the_previous_fold():
+    msgs = convo(30)
+    f = fold(msgs, 1024, 128, TOK)
+    assert f.used <= 1024 - 128 - 256  # a batch fold frees a quarter of the window
+    # the client sends its last fold back; while the prompt still fits, fold point and card are kept verbatim
+    more = msgs + [{"role": "assistant", "content": "Biscuit."}, {"role": "user", "content": "Thanks!"}]
+    f2 = fold(more, 1024, 128, TOK, prev={"from": f.folded_from, "card": f.card})
+    assert f2.folded_from == f.folded_from and f2.card == f.card and f2.used <= 1024 - 128
+    # once the kept prompt no longer fits, it refolds (further, with slack again)
+    big = more + [{"role": "assistant", "content": "y" * 400}, {"role": "user", "content": "More?"}]
+    f3 = fold(big, 1024, 128, TOK, prev={"from": f.folded_from, "card": f.card})
+    assert f3.folded_from > f.folded_from and f3.used <= 1024 - 128 - 256
+    # a stale hint (fold point past the end, or not a user turn) is ignored, never an error
+    f4 = fold(msgs, 1024, 128, TOK, prev={"from": 10_000, "card": "x"})
+    assert f4.used <= 1024 - 128

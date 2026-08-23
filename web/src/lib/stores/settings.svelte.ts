@@ -148,6 +148,8 @@ class Settings {
   #overrides = $state<Partial<SamplingParams>>(persist.read('overrides', {}));
   /** Pin every hint open. Off by default: the explanations are for learning, not for every visit. */
   explain = $state<boolean>(persist.read('sampling.explain', false));
+  /** debug: re-read every prompt cold after the cached continuation and report any divergence */
+  verifyPrefix = $state<boolean>(persist.read('prefix.verify', false));
 
   params = $derived<SamplingParams>({ ...this.defaults, ...this.#overrides });
 
@@ -214,6 +216,11 @@ class Settings {
   toggleExplain(): void {
     this.explain = !this.explain;
     persist.write('sampling.explain', this.explain);
+  }
+
+  toggleVerifyPrefix(): void {
+    this.verifyPrefix = !this.verifyPrefix;
+    persist.write('prefix.verify', this.verifyPrefix);
   }
 
   #write(next: Partial<SamplingParams>): void {

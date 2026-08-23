@@ -186,6 +186,7 @@ class ContextBody(BaseModel):
     max_bytes: Optional[int] = None
     fold: str = "auto"
     card: Optional[str] = None
+    prev: Optional[dict] = None  # the client's last fold {"from", "card"}: kept while the prompt still fits
 
 
 @app.post("/api/context")
@@ -195,7 +196,10 @@ def context_preview(body: ContextBody):
     limit = eng.cfg.max_seq_len
     msgs = with_system_card(body.messages, eng.model.num_params()) if limit >= 1024 else body.messages
     reserve = min(body.max_bytes or eng.defaults.max_bytes, limit // 4)
-    return context_report(msgs, limit, reserve, eng.tok, body.fold or "auto", body.card)
+    rep = context_report(msgs, limit, reserve, eng.tok, body.fold or "auto", body.card, body.prev)
+    snap = eng.prefix_cache.peek(rep.pop("ids"))
+    rep["reusable"] = snap.n_ids if snap is not None else 0  # bytes the engine would not have to re-read
+    return rep
 
 
 def _run_generation(eng: Engine, messages, params: GenParams, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stop: threading.Event,

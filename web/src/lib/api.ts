@@ -1,7 +1,17 @@
 // HTTP client. Same origin in production (the FastAPI app serves web/dist at `/`);
 // in `npm run dev` the same paths are answered by the dev-only mock plugin.
 
-import type { ChatRole, CheckpointListItem, ContextPreview, FoldMode, Health, LogPage, ModelInfo, TrainingRun } from './types';
+import type {
+  ChatRole,
+  CheckpointListItem,
+  ContextPreview,
+  FoldMode,
+  Health,
+  LogPage,
+  ModelInfo,
+  PrevFold,
+  TrainingRun
+} from './types';
 import { auth } from './stores/auth.svelte';
 
 export class ApiError extends Error {
@@ -60,11 +70,17 @@ export const api = {
       body: JSON.stringify({ code })
     }),
   /** what the next prompt would look like: bytes used, fold point, card — no generation */
-  context: (messages: { role: ChatRole; content: string }[], max_bytes: number, fold: FoldMode, card: string | null) =>
+  context: (
+    messages: { role: ChatRole; content: string }[],
+    max_bytes: number,
+    fold: FoldMode,
+    card: string | null,
+    prev: PrevFold | null = null
+  ) =>
     request<ContextPreview>('/api/context', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, max_bytes, fold, card })
+      body: JSON.stringify({ messages, max_bytes, fold, card, prev })
     }),
   runLog: (id: string, since = 0) =>
     request<LogPage>(`/api/training/runs/${encodeURIComponent(id)}/log?since=${since}`)

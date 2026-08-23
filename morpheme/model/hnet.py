@@ -262,11 +262,11 @@ class HNetForCausalLM(nn.Module):
         return logits, routing.boundary_mask[0], routing.boundary_prob[0, :, 1]
 
     @staticmethod
-    def clone_state(state: InferenceState) -> InferenceState:
-        """Deep copy of every tensor in the inference state (snapshot before a speculative round)."""
+    def _map_state(state: InferenceState, fn) -> InferenceState:
+        """Rebuild the state with `fn` applied to every tensor (lists, tuples, NamedTuples, dataclasses)."""
         def cl(o):
             if isinstance(o, torch.Tensor):
-                return o.clone()
+                return fn(o)
             if isinstance(o, list):
                 return [cl(x) for x in o]
             if isinstance(o, tuple):
@@ -277,6 +277,24 @@ class HNetForCausalLM(nn.Module):
                 return type(o)(**{k: cl(getattr(o, k)) for k in o.__dataclass_fields__})
             return copy.deepcopy(o)
         return cl(state)
+
+    @staticmethod
+    def clone_state(state: InferenceState) -> InferenceState:
+        """Deep copy of every tensor in the inference state (snapshot before a speculative round)."""
+        return HNetForCausalLM._map_state(state, lambda t: t.clone())
+
+    @staticmethod
+    def move_state(state: InferenceState, device, pin: bool = False) -> InferenceState:
+        """A copy of the state on `device` — always a copy, so the source stays usable (the serving
+        engine's prefix cache parks snapshots on the CPU; `pin` page-locks them for the trip back)."""
+        dev = torch.device(device)
+        def mv(t: torch.Tensor) -> torch.Tensor:
+            if pin and dev.type == "cpu" and t.is_cuda:
+                out = torch.empty_like(t, device="cpu", pin_memory=True)
+                out.copy_(t)
+                return out
+            return t.to(dev, copy=True)
+        return HNetForCausalLM._map_state(state, mv)
 
     @torch.no_grad()
     def step(self, input_ids: torch.Tensor, state: InferenceState):
