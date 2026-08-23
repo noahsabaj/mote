@@ -144,7 +144,8 @@ On Linux `service install` writes a systemd user unit instead. Manual form, if y
 python -m morpheme.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
 ```
 
-`docs/api.md` is the contract: `/api/model`, `/api/checkpoints` (+ hot-swap), `/api/training/runs`,
+`docs/search.md` is the settled design for web search (learned `<|search|>` call, SearXNG + an offline Wikipedia-intro
+index, snippets only, gated on a measured reading probe); nothing of it is live yet. `docs/api.md` is the contract: `/api/model`, `/api/checkpoints` (+ hot-swap), `/api/training/runs`,
 `/v1/chat/completions` (OpenAI-compatible SSE), and `/ws/generate` streaming per-byte events (probabilities,
 entropy, chunk boundaries, multi-byte acceptances, UTF-8 assembly, live Mamba-3 retention and Relation exchange mass).
 The built frontend (`web/dist`) is served at `/`.
