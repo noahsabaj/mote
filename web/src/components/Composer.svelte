@@ -6,9 +6,12 @@
   import { ui } from '../lib/stores/ui.svelte';
   import { autosize, dismissable, tip } from '../lib/actions';
   import { looksLikeCommand, matching, parseCommand, type Command } from '../lib/commands';
+  import { layout } from '../lib/layout.svelte';
   import SamplingControls from './SamplingControls.svelte';
+  import CheckpointPicker from './CheckpointPicker.svelte';
   import CommandMenu from './CommandMenu.svelte';
   import HelpPanel from './HelpPanel.svelte';
+  import Sheet from './Sheet.svelte';
   import Icon from './Icon.svelte';
 
   let value = $state('');
@@ -216,29 +219,37 @@
       ></textarea>
 
       <div class="tools">
-        <div class="anchor">
-          <button
-            bind:this={panelTrigger}
-            class="quiet"
-            aria-expanded={panelOpen}
-            onclick={() => (panelOpen = !panelOpen)}
-          >
-            <Icon name="sliders" size={14} />
-            Sampling
-            {#if summary}<span class="summary tabular" aria-hidden="true">· {summary}</span>{/if}
-            {#if otherChanged}<span class="dot" aria-hidden="true"></span>{/if}
-            {#if settings.anyOverridden}
-              <span class="sr-only">— next reply off the checkpoint defaults: {spoken}</span>
-            {/if}
-          </button>
-          {#if panelOpen}
-            <div
-              class="panel"
-              use:dismissable={{ onDismiss: () => (panelOpen = false), trigger: panelTrigger }}
+        <!-- What Mote is answering as comes first: it is the more consequential of the two
+             knobs, and on a phone it is the one worth the width. Sampling keeps its dot and
+             its summary on a laptop and falls back to its icon when the row gets tight. -->
+        <div class="left-tools">
+          <CheckpointPicker />
+
+          <div class="anchor">
+            <button
+              bind:this={panelTrigger}
+              class="quiet sampling"
+              aria-expanded={panelOpen}
+              aria-label="Sampling"
+              onclick={() => (panelOpen = !panelOpen)}
             >
-              <SamplingControls />
-            </div>
-          {/if}
+              <Icon name="sliders" size={14} />
+              <span class="sampling-word">Sampling</span>
+              {#if summary}<span class="summary tabular" aria-hidden="true">· {summary}</span>{/if}
+              {#if otherChanged}<span class="dot" aria-hidden="true"></span>{/if}
+              {#if settings.anyOverridden}
+                <span class="sr-only">— next reply off the checkpoint defaults: {spoken}</span>
+              {/if}
+            </button>
+            {#if panelOpen && !layout.phone}
+              <div
+                class="panel"
+                use:dismissable={{ onDismiss: () => (panelOpen = false), trigger: panelTrigger }}
+              >
+                <SamplingControls />
+              </div>
+            {/if}
+          </div>
         </div>
 
         <div class="acts">
@@ -268,6 +279,18 @@
       </div>
     </div>
   </div>
+
+  <!-- On a phone the sliders get a sheet rather than a popover pinned above the keyboard, so
+       both composer controls behave the same way there. -->
+  {#if panelOpen && layout.phone}
+    <Sheet
+      title="Sampling"
+      subtitle="What the next reply is drawn at"
+      onclose={() => (panelOpen = false)}
+    >
+      <SamplingControls />
+    </Sheet>
+  {/if}
 
   <p class="hint" class:visible={focused || chat.busy}>
     {#if chat.busy}
@@ -408,8 +431,16 @@
     padding: 0.3rem 0.4rem 0.4rem;
   }
 
+  .left-tools {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+
   .anchor {
     position: relative;
+    flex: none;
   }
 
   /* The sliders are behind a click, so a reply drawn off-default would otherwise look
@@ -472,6 +503,25 @@
   @media (max-width: 34rem) {
     .hint {
       display: none;
+    }
+    /* The checkpoint name is what the row is for; Sampling gives up its word and its summary
+       so a long run name still fits beside Send at 320px. */
+    .sampling-word,
+    .summary {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .sampling {
+      min-width: 40px;
+      min-height: 40px;
+      justify-content: center;
+      padding: 0 0.4em;
     }
   }
 </style>

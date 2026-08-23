@@ -1,7 +1,8 @@
 <script lang="ts">
   import { model } from '../lib/stores/model.svelte';
-  import { chat } from '../lib/stores/chat.svelte';
   import { prefs } from '../lib/stores/prefs.svelte';
+  import { ui } from '../lib/stores/ui.svelte';
+  import { displayName } from '../lib/checkpoints';
   import Icon from './Icon.svelte';
   import { bytes, count, minutes, num, pct, when } from '../lib/format';
 
@@ -11,11 +12,7 @@
   });
 
   const info = $derived(model.info);
-
-  async function load(id: string) {
-    if (chat.busy) chat.stop();
-    await model.load(id);
-  }
+  const loadedCkpt = $derived(model.checkpoints.find((c) => c.loaded));
 </script>
 
 {#if model.error}
@@ -111,6 +108,8 @@
     </dl>
   </section>
 
+  <!-- The list itself lives in its own sheet, where it has room to be sorted and filtered
+       (docs/checkpoints.md). What stays here is the answer to "what is running right now". -->
   <section>
     <h3>Checkpoints</h3>
     {#if model.checkpointError}
@@ -119,55 +118,23 @@
         {model.checkpointError}
       </p>
     {/if}
-    {#if model.checkpoints.length === 0}
-      <p class="meta">No checkpoints reported.</p>
-    {:else}
-      <ul class="ckpts">
-        {#each model.checkpoints as c (c.id)}
-          <li class:loaded={c.loaded}>
-            <div class="who">
-              <span class="id">{c.id}</span>
-              <span class="meta">
-                step {c.step.toLocaleString()} ·
-                {c.val_bpb === null ? 'not evaluated yet' : `${num(c.val_bpb, 3)} bits/byte`} ·
-                {bytes(c.bytes_seen)} · {when(c.created_at)}
-              </span>
-            </div>
-            {#if c.loaded}
-              <span class="badge">loaded</span>
-            {:else}
-              <button
-                class="btn"
-                onclick={() => load(c.id)}
-                disabled={model.busy}
-                aria-label="Load checkpoint {c.id}"
-              >
-                {model.swapping === c.id ? 'Loading…' : 'Load'}
-              </button>
-            {/if}
-            {#if c.challenger}
-              <span class="badge">challenger</span>
-              <button class="quiet" onclick={() => model.clearChallenger()} aria-label="Clear the challenger">
-                Clear
-              </button>
-            {:else if !c.loaded}
-              <button
-                class="quiet"
-                onclick={() => model.setChallenger(c.id)}
-                disabled={model.busy || model.challengerLoading !== null}
-                aria-label="Load {c.id} as the challenger"
-              >
-                {model.challengerLoading === c.id ? 'Loading…' : 'Challenger'}
-              </button>
-            {/if}
-          </li>
-        {/each}
-      </ul>
-      <p class="meta foot">
-        Loading a checkpoint swaps the served model. Generation is refused while the swap runs. A
-        challenger stays loaded beside it: Compare and arena mode draw their second reply from it, blind.
-      </p>
-    {/if}
+    <dl class="rows">
+      <dt>Serving</dt>
+      <dd>{loadedCkpt ? displayName(loadedCkpt.id) : displayName(info.checkpoint.path)}</dd>
+      <dt>Challenger</dt>
+      <dd>
+        {#if info.challenger}
+          {displayName(info.challenger.id)} · {num(info.challenger.val_bpb, 3)} bits/byte
+          <button class="quiet inline" onclick={() => model.clearChallenger()}>Clear</button>
+        {:else}
+          None. Compare and arena mode need one to draw a blind second reply.
+        {/if}
+      </dd>
+    </dl>
+    <button class="quiet browse" onclick={() => (ui.sheet = 'checkpoints')}>
+      All {model.checkpoints.length} checkpoints
+      <Icon name="chevron" size={13} />
+    </button>
   </section>
 
   <section>
@@ -280,27 +247,30 @@
     font-family: var(--font-mono);
     overflow-wrap: anywhere;
   }
-  .loaded .id {
-    color: var(--accent-ink);
-  }
-
   .who :global(.meta) {
     display: block;
     margin-top: 0.1rem;
     font-size: 0.75rem;
   }
 
-  .badge {
-    flex: none;
-    font-size: 0.6875rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+  .browse {
+    width: 100%;
+    justify-content: space-between;
+    margin-top: 0.5rem;
+    padding: 0 0.55rem;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
+    font-size: 0.875rem;
+  }
+  .browse :global(svg) {
     color: var(--ink-3);
   }
 
-  .foot {
-    margin: 0.75rem 0 0;
+  .inline {
+    min-height: 0;
+    padding: 0 0.2em;
     font-size: 0.75rem;
-    line-height: 1.5;
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
 </style>

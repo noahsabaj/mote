@@ -1,11 +1,18 @@
 // View preferences that outlive a reload but carry no data.
 
 import * as persist from '../persist';
+import type { SheetView } from '../views';
 
 export type Theme = 'system' | 'light' | 'dark';
 const THEMES: Theme[] = ['system', 'light', 'dark'];
 
 class Ui {
+  /**
+   * The open sheet, or null. It lives here rather than in App because the things that open one
+   * are scattered: the header's menu, the Model sheet's own link, and the composer's checkpoint
+   * picker, which is nowhere near the sheet it opens.
+   */
+  sheet = $state<SheetView | null>(null);
   /** Show learned chunk boundaries and parallel acceptances inside replies. */
   structure = $state<boolean>(persist.read('ui.structure', false));
   /** 'system' follows the OS; 'light'/'dark' force a scheme via data-theme on <html>. */

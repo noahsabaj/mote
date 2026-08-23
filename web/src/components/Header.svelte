@@ -26,7 +26,6 @@
 
   const mac = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
   const MOD = mac ? '⌘' : 'Ctrl+';
-  const ALT = mac ? '⌥' : 'Alt+';
 
   $effect(() => {
     if (ui.switcher && field) field.focus();
@@ -78,13 +77,21 @@
     }
   }
 
-  // Below 34rem the labels are hidden and only the icon shows, so the header still fits a
-  // phone without the wordmark and the conversation title fighting over the same pixels.
+  // One menu rather than a row of icons, at every width. The checkpoint list is deliberately
+  // not here: it belongs to the composer's picker, where you are when you want to swap one.
   const SURFACES = [
-    { view: 'model', label: 'Model', icon: 'model' },
-    { view: 'diagnostics', label: 'Diagnostics', icon: 'diagnostics' },
-    { view: 'training', label: 'Training', icon: 'training' }
+    { view: 'model', label: 'Model', hint: 'What is loaded', icon: 'model' },
+    { view: 'diagnostics', label: 'Diagnostics', hint: 'Measured on the running model', icon: 'diagnostics' },
+    { view: 'training', label: 'Training', hint: 'Read from the run logs', icon: 'training' }
   ] as const;
+
+  let surfacesOpen = $state(false);
+  let surfacesTrigger = $state<HTMLElement | null>(null);
+
+  function openSurface(view: (typeof SURFACES)[number]['view']) {
+    surfacesOpen = false;
+    onopen(view);
+  }
 </script>
 
 <header>
@@ -185,7 +192,7 @@
             </span>
           </div>
           <p class="meta keys">
-            {MOD}K conversations · {ALT}1/2/3 panels · Esc to the composer
+            {MOD}K conversations · Esc to the composer
           </p>
         </div>
       {/if}
@@ -193,17 +200,37 @@
   </div>
 
   <nav aria-label="Model surfaces">
-    {#each SURFACES as s (s.view)}
+    <div class="menu-anchor surfaces">
       <button
+        bind:this={surfacesTrigger}
         class="quiet surface"
-        aria-pressed={open === s.view}
-        onclick={() => onopen(s.view)}
-        title={s.label}
+        aria-expanded={surfacesOpen}
+        aria-haspopup="true"
+        onclick={() => (surfacesOpen = !surfacesOpen)}
+        aria-label="Panels"
       >
-        <span class="surface-icon"><Icon name={s.icon} size={15} /></span>
-        <span class="surface-label">{s.label}</span>
+        <Icon name="grip" size={15} />
+        <span class="surface-label">Panels</span>
       </button>
-    {/each}
+
+      {#if surfacesOpen}
+        <div
+          class="menu panels"
+          aria-label="Panels"
+          use:dismissable={{ onDismiss: () => (surfacesOpen = false), trigger: surfacesTrigger }}
+        >
+          {#each SURFACES as s (s.view)}
+            <button class="item" onclick={() => openSurface(s.view)} aria-current={open === s.view}>
+              <Icon name={s.icon} size={15} />
+              <span class="label">
+                <span class="name">{s.label}</span>
+                <span class="meta hint">{s.hint}</span>
+              </span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
     <button
       class="quiet theme"
       onclick={() => ui.cycleTheme()}
@@ -271,9 +298,40 @@
     gap: 0.1rem;
     flex: none;
   }
-  /* Label on a laptop, icon on a phone — never both. */
-  .surface-icon {
-    display: none;
+  .surfaces {
+    flex: none;
+    max-width: none;
+  }
+  /* Anchored right: this menu hangs off the end of the header, not the start of it. Both
+     classes, because `.menu` sets a fixed 23rem further down and would otherwise win on
+     source order and leave half the box empty — this one is as wide as its longest hint. */
+  .menu.panels {
+    left: auto;
+    right: 0;
+    width: max-content;
+    max-width: min(22rem, calc(100vw - 2rem));
+  }
+  .panels .item {
+    width: 100%;
+  }
+  /* These rows are not in <li>s, so they need the hover the conversation list gets from its
+     rows. Every other control in the app answers the pointer; these must too. */
+  .panels .item:hover,
+  .panels .item:focus-visible {
+    background: var(--surface);
+  }
+  .panels .item[aria-current='true'] .name {
+    color: var(--accent-ink);
+  }
+  .panels .label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.05rem;
+    /* The label is the row's only content, so it must not stretch the row past its text. */
+    flex: 0 1 auto;
+  }
+  .hint {
+    font-size: 0.75rem;
   }
   .theme {
     margin-left: 0.35rem;
@@ -442,8 +500,8 @@
     }
   }
 
-  /* Phone: the wordmark gives way to the conversation title, and the three surfaces become
-     icons. Everything still fits at 320px with the longest status word. */
+  /* Phone: the wordmark gives way to the conversation title, and the panels button drops to
+     its icon. Two controls in the nav rather than four, so 320px is no longer tight. */
   @media (max-width: 34rem) {
     .brand,
     .stamp {
@@ -451,9 +509,6 @@
     }
     .menu-anchor {
       max-width: none;
-    }
-    .surface-icon {
-      display: block;
     }
     .surface-label {
       position: absolute;

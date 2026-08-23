@@ -28,47 +28,148 @@ interface CkptSpec {
   /** null mirrors the backend, which reports no bits/byte until a run has an eval record */
   val_bpb: number | null;
   bytes_seen: number;
+  file_size_bytes: number;
   trained_minutes: number;
   created_at: string;
 }
 
+// The mock's runs live under `mock/` rather than `runs/`, so a path on screen still says what
+// it is while the run names keep the real shape — `<family>_<variant>`, which is what the
+// checkpoint sheet's family chips are derived from. The set below deliberately covers what the
+// sorting has to survive: families of several and a family of one, two runs with no eval record
+// yet, several runs tied at the same step, and file sizes that differ from bytes seen by an
+// order of magnitude in the other direction.
 export const CHECKPOINTS: CkptSpec[] = [
   {
-    id: 'mock_pilot_1h/step_1200.pt',
+    id: 'mock/pilot_1h/step_1200.pt',
     step: 1200,
     val_bpb: null,
     bytes_seen: 39321600,
+    file_size_bytes: 152043520,
     trained_minutes: 23.4,
     created_at: '2026-08-21T09:41:02Z'
   },
   {
-    id: 'mock_pilot_1h/step_2400.pt',
+    id: 'mock/pilot_1h/step_2400.pt',
     step: 2400,
     val_bpb: 1.78,
     bytes_seen: 78643200,
+    file_size_bytes: 152043520,
     trained_minutes: 46.9,
     created_at: '2026-08-21T10:05:18Z'
   },
   {
-    id: 'mock_pilot_1h/last.pt',
+    id: 'mock/pilot_1h/last.pt',
     step: 3100,
     val_bpb: 1.63,
     bytes_seen: 101580800,
+    file_size_bytes: 152043520,
     trained_minutes: 60.2,
     created_at: '2026-08-21T10:19:44Z'
   },
   {
-    id: 'mock_pilot_4h/last.pt',
+    id: 'mock/pilot_4h/last.pt',
     step: 11800,
     val_bpb: 1.41,
     bytes_seen: 386662400,
+    file_size_bytes: 152043520,
     trained_minutes: 241.6,
     created_at: '2026-08-22T02:52:07Z'
+  },
+  {
+    id: 'mock/ab_muon_2048/last.pt',
+    step: 2000,
+    val_bpb: 1.761,
+    bytes_seen: 65536000,
+    file_size_bytes: 293601280,
+    trained_minutes: 58.1,
+    created_at: '2026-08-23T09:01:12Z'
+  },
+  {
+    id: 'mock/ab_muon_4096/last.pt',
+    step: 2000,
+    val_bpb: 1.913,
+    bytes_seen: 65536000,
+    file_size_bytes: 293601280,
+    trained_minutes: 61.4,
+    created_at: '2026-08-23T08:01:55Z'
+  },
+  {
+    id: 'mock/ab_muon_nombp/last.pt',
+    step: 2000,
+    val_bpb: 1.797,
+    bytes_seen: 65536000,
+    file_size_bytes: 264241152,
+    trained_minutes: 54.7,
+    created_at: '2026-08-23T09:16:03Z'
+  },
+  {
+    id: 'mock/ab_adamw_4096/last.pt',
+    step: 992,
+    val_bpb: 2.79,
+    bytes_seen: 32505856,
+    file_size_bytes: 424673280,
+    trained_minutes: 29.8,
+    created_at: '2026-08-23T07:27:41Z'
+  },
+  {
+    id: 'mock/ab_b299_2048/last.pt',
+    step: 2000,
+    val_bpb: 2.061,
+    bytes_seen: 65536000,
+    file_size_bytes: 424673280,
+    trained_minutes: 57.2,
+    created_at: '2026-08-23T06:27:19Z'
+  },
+  {
+    id: 'mock/sweep_a0.1_n4/last.pt',
+    step: 1500,
+    val_bpb: 2.14,
+    bytes_seen: 49152000,
+    file_size_bytes: 152043520,
+    trained_minutes: 41.0,
+    created_at: '2026-08-22T18:12:36Z'
+  },
+  {
+    id: 'mock/sweep_a0.3_n6/last.pt',
+    step: 1500,
+    val_bpb: 2.264,
+    bytes_seen: 49152000,
+    file_size_bytes: 152043520,
+    trained_minutes: 42.3,
+    created_at: '2026-08-22T19:04:50Z'
+  },
+  {
+    id: 'mock/overnight_sft2/last.pt',
+    step: 3299,
+    val_bpb: 0.954,
+    bytes_seen: 108068864,
+    file_size_bytes: 424673280,
+    trained_minutes: 188.5,
+    created_at: '2026-08-23T08:31:07Z'
+  },
+  {
+    id: 'mock/overnight_dpo2/last.pt',
+    step: 3349,
+    val_bpb: null,
+    bytes_seen: 109707264,
+    file_size_bytes: 141557760,
+    trained_minutes: 194.2,
+    created_at: '2026-08-23T10:39:28Z'
+  },
+  {
+    id: 'mock/smoke_win/last.pt',
+    step: 400,
+    val_bpb: 3.02,
+    bytes_seen: 13107200,
+    file_size_bytes: 152043520,
+    trained_minutes: 8.6,
+    created_at: '2026-08-20T14:22:09Z'
   }
 ];
 
 export const state = {
-  loadedId: 'mock_pilot_1h/last.pt',
+  loadedId: 'mock/pilot_1h/last.pt',
   swapping: false,
   challengerId: null as string | null
 };
@@ -81,7 +182,7 @@ export function modelPayload(): ModelInfo {
     status: ck.step > 8000 ? 'undertrained' : 'pilot',
     status_note: MOCK_NOTE,
     checkpoint: {
-      path: `runs/${ck.id}`,
+      path: ck.id,
       step: ck.step,
       bytes_seen: ck.bytes_seen,
       val_bpb: ck.val_bpb,
@@ -136,6 +237,7 @@ export function checkpointList(): CheckpointListItem[] {
     step: c.step,
     val_bpb: c.val_bpb,
     bytes_seen: c.bytes_seen,
+    file_size_bytes: c.file_size_bytes,
     created_at: c.created_at,
     loaded: c.id === state.loadedId,
     challenger: c.id === state.challengerId
@@ -156,14 +258,14 @@ export function runs(): TrainingRun[] {
   const live = runningSteps();
   return [
     {
-      id: 'mock_pilot_4h',
+      id: 'pilot_4h',
       steps: live,
       last_val_bpb: valAt(live),
       running: true,
       started_at: new Date(RUNNING_START).toISOString()
     },
     {
-      id: 'mock_pilot_1h',
+      id: 'pilot_1h',
       steps: 3100,
       last_val_bpb: 1.63,
       running: false,
@@ -198,11 +300,11 @@ const EVAL_EVERY = 200;
 
 /** Rebuild the whole JSONL log for a run, then slice from `since` — the real server tails a file. */
 export function runLog(id: string, since: number): { records: LogRecord[]; next: number } {
-  const total = id === 'mock_pilot_4h' ? runningSteps() : 3100;
-  const startedAt = id === 'mock_pilot_4h' ? RUNNING_START : Date.parse('2026-08-21T09:19:31Z');
+  const total = id === 'pilot_4h' ? runningSteps() : 3100;
+  const startedAt = id === 'pilot_4h' ? RUNNING_START : Date.parse('2026-08-21T09:19:31Z');
   const records: LogRecord[] = [];
   for (let step = EVERY; step <= total; step += EVERY) {
-    const elapsed = (step / total) * (id === 'mock_pilot_4h' ? (Date.now() - startedAt) / 60000 : 60.2);
+    const elapsed = (step / total) * (id === 'pilot_4h' ? (Date.now() - startedAt) / 60000 : 60.2);
     const ce = trainBpbAt(step) * Math.LN2;
     records.push({
       step,

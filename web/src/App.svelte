@@ -5,6 +5,7 @@
   import Composer from './components/Composer.svelte';
   import Sheet from './components/Sheet.svelte';
   import ModelSheet from './components/ModelSheet.svelte';
+  import CheckpointsSheet from './components/CheckpointsSheet.svelte';
   import DiagnosticsSheet from './components/DiagnosticsSheet.svelte';
   import TrainingSheet from './components/TrainingSheet.svelte';
   import ByteInspector from './components/ByteInspector.svelte';
@@ -16,8 +17,8 @@
   import { model } from './lib/stores/model.svelte';
   import { ui } from './lib/stores/ui.svelte';
 
-  let sheet = $state<SheetView | null>(null);
   let inspecting = $state<string | null>(null);
+  const sheet = $derived(ui.sheet);
 
   const inspectTrace = $derived(inspecting ? chat.traces[inspecting] : undefined);
   const inspectTurn = $derived(inspecting ? chat.turns.find((t) => t.id === inspecting) : undefined);
@@ -33,27 +34,12 @@
     return () => chat.dispose();
   });
 
-  // Modifier keys only: the composer is a prose field, so a bare letter can never be a
-  // shortcut. Alt+digit rather than Cmd/Ctrl+digit because the browser reserves that one
-  // for switching tabs, and `code` rather than `key` because Option+1 is not "1" on a Mac.
-  const SHEET_BY_CODE: Record<string, SheetView> = {
-    Digit1: 'model',
-    Digit2: 'diagnostics',
-    Digit3: 'training'
-  };
-
   function onkeydown(e: KeyboardEvent) {
     const mod = e.metaKey || e.ctrlKey;
 
     if (mod && !e.altKey && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       ui.switcher = !ui.switcher;
-      return;
-    }
-
-    if (e.altKey && !mod && SHEET_BY_CODE[e.code]) {
-      e.preventDefault();
-      toggle(SHEET_BY_CODE[e.code]);
       return;
     }
 
@@ -74,19 +60,20 @@
   }
 
   function toggle(view: SheetView) {
-    sheet = sheet === view ? null : view;
+    ui.sheet = ui.sheet === view ? null : view;
     inspecting = null;
   }
 
   function inspect(id: string) {
-    sheet = null;
+    ui.sheet = null;
     inspecting = id;
   }
 
   const SHEET_TITLES: Record<SheetView, { title: string; subtitle: string }> = {
     model: { title: 'Model', subtitle: 'What is loaded, and what else could be' },
     diagnostics: { title: 'Diagnostics', subtitle: 'Measured on the running model' },
-    training: { title: 'Training', subtitle: 'Read from the run logs on disk' }
+    training: { title: 'Training', subtitle: 'Read from the run logs on disk' },
+    checkpoints: { title: 'Checkpoints', subtitle: 'Every one on disk, sorted how you like' }
   };
 </script>
 
@@ -107,10 +94,12 @@
   <Sheet
     title={SHEET_TITLES[sheet].title}
     subtitle={SHEET_TITLES[sheet].subtitle}
-    onclose={() => (sheet = null)}
+    onclose={() => (ui.sheet = null)}
   >
     {#if sheet === 'model'}
       <ModelSheet />
+    {:else if sheet === 'checkpoints'}
+      <CheckpointsSheet />
     {:else if sheet === 'diagnostics'}
       <DiagnosticsSheet />
     {:else}

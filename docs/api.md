@@ -62,7 +62,13 @@ Stores a pair of replies and your verdict (`null` keeps the pair unrated); a sou
 "agreement": { "n", "agree", "rate" }, "rubric": "<hash>" }` and `{ "text", "hash" }` (docs/rubric.md).
 
 ### `GET /api/checkpoints`
-`[{ "id": "pilot_1h/last.pt", "step": 3100, "val_bpb": 1.63, "bytes_seen": 101580800, "created_at": "...", "loaded": true }, ...]`
+`[{ "id": "pilot_1h/last.pt", "step": 3100, "val_bpb": 1.63, "bytes_seen": 101580800, "file_size_bytes": 425721856,
+"created_at": "...", "loaded": true, "challenger": false }, ...]`
+
+`bytes_seen` is training data consumed (`step × batch × seq × grad_accum`); `file_size_bytes` is the `.pt` on
+disk. They differ by an order of magnitude and the studio labels both, since one row showing a bare "63 MB"
+was read as the file. The file-derived half of each row is cached on the checkpoint's mtime and size and its
+run log's mtime — the log is what gains `val_bpb` while a run is still going.
 
 ### `POST /api/checkpoints/load`  body `{ "id": "pilot_1h/last.pt" }`
 Hot-swaps the served model. Returns the new `/api/model` payload. Generation requests during a swap get `503`.

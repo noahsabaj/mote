@@ -113,22 +113,49 @@ def model_info():
     return info
 
 
+# Describing a checkpoint costs a torch.load and a full read of its run log, and there are
+# dozens of them; the studio's checkpoint sheet is opened often enough that paying that on
+# every request is the wrong default. Keyed on everything that could change the answer: the
+# file's own mtime and size, and the run log's mtime, since `val_bpb` appears in the log
+# while a run is still going and must not stay frozen at null behind an unchanged .pt.
+_CKPT_ROWS: dict = {}
+
+
+def _checkpoint_row(p: Path) -> dict:
+    """The file-derived half of a checkpoint's listing entry. Loaded/challenger are state, not file."""
+    st = p.stat()
+    log = p.parent / "log.jsonl"
+    key = (st.st_mtime, st.st_size, log.stat().st_mtime if log.exists() else 0.0)
+    hit = _CKPT_ROWS.get(str(p))
+    if hit and hit[0] == key:
+        return hit[1]
+    try:
+        ck = torch.load(p, map_location="cpu", weights_only=False, mmap=True)
+        step = int(ck.get("step", 0))
+    except Exception:
+        step = -1
+    info = STATE["engine"]._describe_checkpoint(p, step, {}) if STATE["engine"] else None
+    row = {
+        "id": ckpt_id(p), "step": step,
+        "val_bpb": info.val_bpb if info else None, "bytes_seen": info.bytes_seen if info else 0,
+        "file_size_bytes": st.st_size,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime)),
+    }
+    # Without an engine there is nothing to describe with, and caching that would keep every
+    # row at null until the file itself changed.
+    if info is not None:
+        _CKPT_ROWS[str(p)] = (key, row)
+    return row
+
+
 @app.get("/api/checkpoints")
 def checkpoints():
     cur = STATE["engine"].ckpt_path.resolve() if STATE["engine"] else None
+    ch = STATE["challenger"].ckpt_path.resolve() if STATE["challenger"] else None
     out = []
     for p in discover_checkpoints(ROOT):
-        try:
-            ck = torch.load(p, map_location="cpu", weights_only=False, mmap=True)
-            step = int(ck.get("step", 0))
-        except Exception:
-            step = -1
-        info = STATE["engine"]._describe_checkpoint(p, step, {}) if STATE["engine"] else None
-        ch = STATE["challenger"].ckpt_path.resolve() if STATE["challenger"] else None
         out.append({
-            "id": ckpt_id(p), "step": step,
-            "val_bpb": info.val_bpb if info else None, "bytes_seen": info.bytes_seen if info else 0,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(p.stat().st_mtime)),
+            **_checkpoint_row(p),
             "loaded": cur is not None and p.resolve() == cur,
             "challenger": ch is not None and p.resolve() == ch,
         })

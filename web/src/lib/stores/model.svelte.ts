@@ -1,6 +1,10 @@
 import { api, ApiError } from '../api';
+import * as persist from '../persist';
 import { settings } from './settings.svelte';
 import type { CheckpointListItem, ModelInfo } from '../types';
+
+const RECENTS_KEY = 'ckpt.recents';
+const RECENTS_MAX = 8;
 
 class ModelStore {
   info = $state<ModelInfo | null>(null);
@@ -12,9 +16,19 @@ class ModelStore {
   swapping = $state<string | null>(null);
   /** id of the checkpoint being loaded as the challenger, if any */
   challengerLoading = $state<string | null>(null);
+  /**
+   * Checkpoints you have actually loaded, newest first — what the composer's picker offers.
+   * A few more are remembered than it shows, so deleting a run does not shorten the list.
+   */
+  recents = $state<string[]>(persist.read<string[]>(RECENTS_KEY, []));
 
   get busy(): boolean {
     return this.swapping !== null;
+  }
+
+  private remember(id: string): void {
+    this.recents = [id, ...this.recents.filter((x) => x !== id)].slice(0, RECENTS_MAX);
+    persist.write(RECENTS_KEY, this.recents);
   }
 
   async refresh(): Promise<void> {
@@ -49,6 +63,7 @@ class ModelStore {
       this.info = info;
       settings.setDefaults(info.defaults);
       this.error = null;
+      this.remember(id); // only a load that succeeded counts as one you have used
       await this.refreshCheckpoints();
     } catch (e) {
       this.checkpointError = e instanceof ApiError ? e.message : String(e);

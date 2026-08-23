@@ -80,7 +80,10 @@ export interface CheckpointListItem {
   id: string;
   step: number;
   val_bpb: number | null;
+  /** training data consumed — step × batch × seq × grad_accum, *not* the file's size */
   bytes_seen: number;
+  /** the .pt on disk; an order of magnitude larger than bytes_seen, so both are labelled */
+  file_size_bytes: number;
   created_at: string;
   loaded: boolean;
   /** loaded as the challenger (docs/prefs.md) */
