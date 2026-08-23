@@ -2,7 +2,7 @@
 
 **Adopted (2026-08-23): `boundary-ring`**, with two changes from the candidate below — the gap is
 turned to half past one (at twelve, with something in it, it is the power glyph), and the stroke,
-dot and gap grow as the tile shrinks (`ring_params` in `build.py`: 6/8/36 design units at ≥64 px,
+dot and gap grow as the tile shrinks (`ring_params` in `build.py`: 7/9/37 design units at ≥64 px,
 8/9.5/38 at 32 px, 11/11/42 at 16 px) instead of scaling the 512 down to a hairline. The mark is
 defined once, in `build.py`; `web/icons/make_icons.py` imports it for the app icons and
 `favicon.svg`, and the header (`Wordmark.svelte`) and pairing page carry the 32-px SVG body.

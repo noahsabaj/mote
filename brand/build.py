@@ -44,7 +44,7 @@ RING_C = 2 * math.pi * RING_R
 def ring_params(px):
     """(stroke width, dot radius, gap arc length) in design units for a tile rendered `px` wide."""
     if px is None or px >= 64:
-        return 6.0, 8.0, 36.0
+        return 7.0, 9.0, 37.0
     if px >= 32:
         return 8.0, 9.5, 38.0
     return 11.0, 11.0, 42.0
