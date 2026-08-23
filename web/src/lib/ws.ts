@@ -128,9 +128,16 @@ export class GenerateSocket {
   generate(
     messages: { role: ChatRole; content: string }[],
     params: SamplingParams,
-    context?: ClientGenerate['context']
+    context?: ClientGenerate['context'],
+    engine?: ClientGenerate['engine']
   ): void {
-    this.#pending = { type: 'generate', messages, params, ...(context ? { context } : {}) };
+    this.#pending = {
+      type: 'generate',
+      messages,
+      params,
+      ...(context ? { context } : {}),
+      ...(engine && engine !== 'current' ? { engine } : {})
+    };
     if (this.#ws?.readyState === WebSocket.OPEN) this.#flush();
     else this.connect();
   }

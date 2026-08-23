@@ -1,11 +1,13 @@
 <script lang="ts">
   import { model } from '../lib/stores/model.svelte';
   import { chat } from '../lib/stores/chat.svelte';
+  import { prefs } from '../lib/stores/prefs.svelte';
   import Icon from './Icon.svelte';
   import { bytes, count, minutes, num, pct, when } from '../lib/format';
 
   $effect(() => {
     void model.refreshCheckpoints();
+    void prefs.refresh();
   });
 
   const info = $derived(model.info);
@@ -143,12 +145,57 @@
                 {model.swapping === c.id ? 'Loading…' : 'Load'}
               </button>
             {/if}
+            {#if c.challenger}
+              <span class="badge">challenger</span>
+              <button class="quiet" onclick={() => model.clearChallenger()} aria-label="Clear the challenger">
+                Clear
+              </button>
+            {:else if !c.loaded}
+              <button
+                class="quiet"
+                onclick={() => model.setChallenger(c.id)}
+                disabled={model.busy || model.challengerLoading !== null}
+                aria-label="Load {c.id} as the challenger"
+              >
+                {model.challengerLoading === c.id ? 'Loading…' : 'Challenger'}
+              </button>
+            {/if}
           </li>
         {/each}
       </ul>
       <p class="meta foot">
-        Loading a checkpoint swaps the served model. Generation is refused while the swap runs.
+        Loading a checkpoint swaps the served model. Generation is refused while the swap runs. A
+        challenger stays loaded beside it: Compare and arena mode draw their second reply from it, blind.
       </p>
+    {/if}
+  </section>
+
+  <section>
+    <h3>Preferences</h3>
+    {#if prefs.error}
+      <p class="fail small"><Icon name="alert" size={13} /> {prefs.error}</p>
+    {:else if !prefs.summary || prefs.summary.pairs === 0}
+      <p class="meta">No votes yet. Retry, Compare, or arena mode put two replies up for a vote.</p>
+    {:else}
+      <p class="meta">
+        {prefs.summary.pairs} pairs · {prefs.summary.votes.user} of your votes · {prefs.summary.votes.claude} rater
+        votes{#if prefs.summary.agreement.n > 0}
+          · agreement {pct(prefs.summary.agreement.rate ?? 0)} on {prefs.summary.agreement.n}{/if}
+      </p>
+      {#if prefs.summary.table.length > 0}
+        <ul class="ckpts">
+          {#each prefs.summary.table as row (row.a + row.b)}
+            <li>
+              <div class="who">
+                <span class="id">{row.a} vs {row.b}</span>
+                <span class="meta">
+                  {row.a_wins} – {row.b_wins} · {row.ties} ties · {row.both_bad} both bad · {row.n} votes
+                </span>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {/if}
   </section>
 {:else}

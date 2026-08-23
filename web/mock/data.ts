@@ -69,7 +69,8 @@ export const CHECKPOINTS: CkptSpec[] = [
 
 export const state = {
   loadedId: 'mock_pilot_1h/last.pt',
-  swapping: false
+  swapping: false,
+  challengerId: null as string | null
 };
 
 export function modelPayload(): ModelInfo {
@@ -121,7 +122,11 @@ export function modelPayload(): ModelInfo {
             n_facts_seen: 8
           }
         : null,
-    identity_card: MOCK_IDENTITY_CARD
+    identity_card: MOCK_IDENTITY_CARD,
+    challenger: (() => {
+      const ch = CHECKPOINTS.find((c) => c.id === state.challengerId);
+      return ch ? { id: ch.id, name: ch.id, step: ch.step, val_bpb: ch.val_bpb, loading: false } : null;
+    })()
   };
 }
 
@@ -132,7 +137,8 @@ export function checkpointList(): CheckpointListItem[] {
     val_bpb: c.val_bpb,
     bytes_seen: c.bytes_seen,
     created_at: c.created_at,
-    loaded: c.id === state.loadedId
+    loaded: c.id === state.loadedId,
+    challenger: c.id === state.challengerId
   }));
 }
 

@@ -161,6 +161,14 @@
     >
       Verify cache
     </button>
+    <button
+      class="quiet"
+      aria-pressed={settings.arena}
+      onclick={() => settings.toggleArena()}
+      use:tip={'Every prompt gets two replies, A and B, and you choose — from the challenger when one is loaded'}
+    >
+      Arena
+    </button>
     <button class="quiet" onclick={() => settings.reset()} disabled={!settings.anyOverridden}>
       Reset all
     </button>

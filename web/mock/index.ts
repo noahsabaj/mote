@@ -3,6 +3,8 @@
 // in production the same paths are served by the Python backend on the same origin.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Plugin, ViteDevServer } from 'vite';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { CHECKPOINTS, checkpointList, modelPayload, runLog, runs, state } from './data';
@@ -27,6 +29,42 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
     return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
   } catch {
     return {};
+  }
+}
+
+// Preference votes (docs/prefs.md): kept in memory for the session, enough for the Model sheet's table.
+const PREF_VOTES: { vote: string | null; a: string; b: string }[] = [];
+
+function prefsSummary() {
+  const table = new Map<string, { a: string; b: string; a_wins: number; b_wins: number; ties: number; both_bad: number; n: number }>();
+  for (const v of PREF_VOTES) {
+    if (!v.vote) continue;
+    const [x, y] = v.a <= v.b ? [v.a, v.b] : [v.b, v.a];
+    const flipped = x !== v.a;
+    const row = table.get(`${x}|${y}`) ?? { a: x, b: y, a_wins: 0, b_wins: 0, ties: 0, both_bad: 0, n: 0 };
+    row.n += 1;
+    if (v.vote === 'tie') row.ties += 1;
+    else if (v.vote === 'both_bad') row.both_bad += 1;
+    else if ((v.vote === 'a') !== flipped) row.a_wins += 1;
+    else row.b_wins += 1;
+    table.set(`${x}|${y}`, row);
+  }
+  const user = PREF_VOTES.filter((v) => v.vote).length;
+  return {
+    pairs: PREF_VOTES.length,
+    votes: { user, claude: 0 },
+    unrated_by_claude: PREF_VOTES.length,
+    table: [...table.values()],
+    agreement: { n: 0, agree: 0, rate: null },
+    rubric: 'mock00000000'
+  };
+}
+
+function rubricText(): string {
+  try {
+    return readFileSync(resolve(__dirname, '../../docs/rubric.md'), 'utf-8');
+  } catch {
+    return '# Rubric\n\n(docs/rubric.md could not be read by the mock)';
   }
 }
 
@@ -92,6 +130,36 @@ async function handle(
 
   if (path === '/api/checkpoints' && req.method === 'GET') {
     return json(res, 200, checkpointList());
+  }
+
+  if (path === '/api/challenger/load' && req.method === 'POST') {
+    const body = await readJson(req);
+    const id = String(body.id ?? '');
+    if (!CHECKPOINTS.some((c) => c.id === id)) return json(res, 404, { detail: `No checkpoint ${id}` });
+    await new Promise((r) => setTimeout(r, 300));
+    state.challengerId = id;
+    return json(res, 200, modelPayload());
+  }
+
+  if (path === '/api/challenger' && req.method === 'DELETE') {
+    state.challengerId = null;
+    return json(res, 200, modelPayload());
+  }
+
+  if (path === '/api/prefs/vote' && req.method === 'POST') {
+    const body = await readJson(req);
+    const vote = body.vote as string | null;
+    const pair = body.pair as { a_source?: { checkpoint?: string; step?: number }; b_source?: { checkpoint?: string; step?: number } };
+    PREF_VOTES.push({ vote, a: `${pair.a_source?.checkpoint}@${pair.a_source?.step}`, b: `${pair.b_source?.checkpoint}@${pair.b_source?.step}` });
+    return json(res, 200, { pair: `p${PREF_VOTES.length}`, ...prefsSummary() });
+  }
+
+  if (path === '/api/prefs/summary' && req.method === 'GET') {
+    return json(res, 200, prefsSummary());
+  }
+
+  if (path === '/api/prefs/rubric' && req.method === 'GET') {
+    return json(res, 200, { text: rubricText(), hash: 'mock00000000' });
   }
 
   if (path === '/api/checkpoints/load' && req.method === 'POST') {

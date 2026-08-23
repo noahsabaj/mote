@@ -5,6 +5,7 @@
   import { clock } from '../lib/clock.svelte';
   import { autosize, tip } from '../lib/actions';
   import ChunkedText from './ChunkedText.svelte';
+  import CompareCard from './CompareCard.svelte';
   import Icon from './Icon.svelte';
   import { ago, num, pct } from '../lib/format';
   import { showParam } from '../lib/stores/settings.svelte';
@@ -24,6 +25,19 @@
   const hasBytes = $derived(!!trace && trace.count > 0);
   const hasText = $derived((turn.content || text).length > 0);
   const stamp = $derived(ago(new Date(turn.at).toISOString(), clock.now));
+  // a vote is pending on this reply slot: show both candidates instead of the reply
+  const voting = $derived(!!turn.compare && !turn.compare.vote && !turn.compare.skipped && !streaming);
+  const verdict = $derived.by(() => {
+    const c = turn.compare;
+    if (!c?.vote) return null;
+    const all = [...(turn.samples ?? []), turn];
+    const name = (id: string) => {
+      const s = all.find((t) => t.id === id)?.source;
+      return s ? `${s.checkpoint} step ${s.step.toLocaleString()}${s.engine === 'challenger' ? ' (challenger)' : ''}` : 'unknown';
+    };
+    const label = c.vote === 'a' ? 'A' : c.vote === 'b' ? 'B' : c.vote === 'tie' ? 'a tie' : 'both bad';
+    return { label, a: name(c.aId), b: name(c.bId) };
+  });
 
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -179,14 +193,18 @@
       </p>
     {/if}
 
-    <div class="body" class:awaiting={empty}>
-      {#if trace && (streaming || ui.structure)}
-        <ChunkedText {trace} structure={ui.structure} {streaming} />
-      {:else}
-        <span class="prose">{text}</span>
-      {/if}
-      {#if empty}<span class="waiting" aria-hidden="true"></span>{/if}
-    </div>
+    {#if voting}
+      <CompareCard {turn} />
+    {:else}
+      <div class="body" class:awaiting={empty}>
+        {#if trace && (streaming || ui.structure)}
+          <ChunkedText {trace} structure={ui.structure} {streaming} />
+        {:else}
+          <span class="prose">{text}</span>
+        {/if}
+        {#if empty}<span class="waiting" aria-hidden="true"></span>{/if}
+      </div>
+    {/if}
 
     {#if turn.error}
       <p class="notice error">
@@ -195,7 +213,7 @@
       </p>
     {/if}
 
-    {#if !streaming}
+    {#if !streaming && !voting}
       <footer class:pinned={isLast}>
         <p class="stats meta">
           {#if turn.stats}
@@ -217,6 +235,9 @@
             {/if}
             {#if reasonNote}· {reasonNote}{/if}
             {#if offDefault}· <span class="off">off default: {offDefault}</span>{/if}
+          {/if}
+          {#if verdict}
+            · you chose {verdict.label} — A was {verdict.a}, B was {verdict.b}
           {/if}
         </p>
         <div class="actions">
@@ -257,6 +278,17 @@
             <button class="quiet" onclick={copy}>
               <Icon name={copied ? 'check' : 'copy'} size={14} />
               {copied ? 'Copied' : 'Copy'}
+            </button>
+          {/if}
+          {#if isLast && hasText && !turn.error}
+            <button
+              class="quiet"
+              disabled={chat.busy}
+              onclick={() => chat.compare(turn.id)}
+              use:tip={'Draw a second reply to this prompt and choose between the two'}
+            >
+              <Icon name="redo" size={14} />
+              Compare
             </button>
           {/if}
         </div>

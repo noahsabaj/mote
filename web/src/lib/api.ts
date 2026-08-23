@@ -9,8 +9,11 @@ import type {
   Health,
   LogPage,
   ModelInfo,
+  PrefsSummary,
   PrevFold,
-  TrainingRun
+  Rubric,
+  TrainingRun,
+  VoteBody
 } from './types';
 import { auth } from './stores/auth.svelte';
 
@@ -70,6 +73,21 @@ export const api = {
       body: JSON.stringify({ code })
     }),
   /** what the next prompt would look like: bytes used, fold point, card — no generation */
+  loadChallenger: (id: string) =>
+    request<ModelInfo>('/api/challenger/load', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    }),
+  dropChallenger: () => request<ModelInfo>('/api/challenger', { method: 'DELETE' }),
+  prefsVote: (body: VoteBody) =>
+    request<PrefsSummary>('/api/prefs/vote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }),
+  prefsSummary: () => request<PrefsSummary>('/api/prefs/summary'),
+  prefsRubric: () => request<Rubric>('/api/prefs/rubric'),
   context: (
     messages: { role: ChatRole; content: string }[],
     max_bytes: number,

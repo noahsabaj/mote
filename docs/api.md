@@ -48,6 +48,19 @@ What the next prompt would look like, without generating — for the studio's me
 `prev` is the client's last fold, kept while the prompt still fits; `reusable` is how many bytes of that prompt the
 engine's prefix cache already holds a state for (docs/context.md).
 
+### `POST /api/challenger/load`  body `{ "id": "runs/overnight_sft2/last.pt" }` · `DELETE /api/challenger`
+Loads (or drops) a second engine beside the served one for blind side-by-side comparisons (docs/prefs.md);
+`/api/model.challenger` is `null | { "id", "name", "step", "val_bpb", "loading" }` and `/api/checkpoints` rows carry
+`"challenger": bool`. The WebSocket `generate` frame takes `"engine": "current" | "challenger"`.
+
+### `POST /api/prefs/vote`  body `{ "pair": { "messages", "a", "b", "a_source", "b_source", "origin" }, "vote": "a" | "b" | "tie" | "both_bad" | null, "reason": "" }`
+Stores a pair of replies and your verdict (`null` keeps the pair unrated); a source is `{ "checkpoint", "step", "engine",
+"params" }`. Returns the summary below plus `"pair": "<id>"`. Identical replies are refused (400).
+
+### `GET /api/prefs/summary` · `GET /api/prefs/rubric`
+`{ "pairs", "votes": { "user", "claude" }, "unrated_by_claude", "table": [{ "a", "b", "a_wins", "b_wins", "ties", "both_bad", "n" }],
+"agreement": { "n", "agree", "rate" }, "rubric": "<hash>" }` and `{ "text", "hash" }` (docs/rubric.md).
+
 ### `GET /api/checkpoints`
 `[{ "id": "pilot_1h/last.pt", "step": 3100, "val_bpb": 1.63, "bytes_seen": 101580800, "created_at": "...", "loaded": true }, ...]`
 
@@ -89,7 +102,8 @@ Server → client (in order)
 { "type": "start", "prompt_bytes": 61, "context_bytes": 61, "context_limit": 2048, "truncated": false,
   "fold": null | { "from": 6, "turns": 6, "card": "(Earlier in this conversation, 6 turns folded. ...)" },
   "prefix": { "reused": 1402, "prefilled": 38, "prefill_ms": 310, "snapshots": 5, "cache_bytes": 52428800,
-              "cache_budget": 1073741824, "hits": 12, "misses": 2 } }
+              "cache_budget": 1073741824, "hits": 12, "misses": 2 },
+  "checkpoint": { "name": "overnight_sft/last.pt", "step": 3666 } }
   // fold: the first `from` non-system turns were folded into `card`, which rides inside the first kept user
   // turn (docs/context.md); `truncated` is now only true when even folding could not fit (a giant message).
   // prefix: bytes of the prompt taken from the engine's prefix cache vs read afresh (docs/context.md).

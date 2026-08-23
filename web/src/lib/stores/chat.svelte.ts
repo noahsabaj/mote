@@ -17,6 +17,7 @@ import { diagnostics } from './diagnostics.svelte';
 import { model } from './model.svelte';
 import { notices } from './notice.svelte';
 import { queue } from './queue.svelte';
+import { prefs } from './prefs.svelte';
 import { ui } from './ui.svelte';
 import { parseCommand, unescapeCommand } from '../commands';
 import type {
@@ -24,6 +25,11 @@ import type {
   ContextPreview,
   DoneEvent,
   FoldInfo,
+  ReplySource,
+  PairVote,
+  PairOrigin,
+  EngineRole,
+  ComparePair,
   PrefixCheck,
   PrefixInfo,
   PrevFold,
@@ -53,6 +59,10 @@ export interface Turn {
   prefix?: PrefixInfo | null;
   /** the cold re-read comparison, when "verify prefix cache" was on for this reply */
   prefixCheck?: PrefixCheck | null;
+  /** assistant only — which engine and checkpoint wrote it, with the params it was drawn at */
+  source?: ReplySource;
+  /** this reply slot had two candidates up for a vote (docs/prefs.md) */
+  compare?: ComparePair | null;
   /** earlier samples of this reply slot (Retry keeps them); each is a complete Turn */
   samples?: Turn[];
   /** assistant only — what this reply was actually drawn at, captured when it was sent */
@@ -138,6 +148,10 @@ class Chat {
   streamingId = $state<string | null>(null);
   /** true between "send" and the backend's `start` */
   awaitingStart = $state(false);
+  /** when the running generation finishes, draw one more reply for the same prompt (arena / compare) */
+  #thenGenerate: { engine: EngineRole; origin: PairOrigin } | null = null;
+  /** when the running generation finishes, open a vote between it and this earlier sample */
+  #pairNext: { withId: string; origin: PairOrigin } | null = null;
   link = $state<LinkState>('offline');
 
   /** folding for the next reply: 'auto' folds when the prompt would overflow, 'off' is plain truncation */
@@ -330,7 +344,73 @@ class Chat {
     const content = text.trim();
     if (!content || this.busy) return;
     this.turns = [...this.turns, { id: newId(), role: 'user', content, at: Date.now() }];
+    // Arena mode: a second reply follows the first, from the challenger when one is loaded, and the
+    // two go up for a vote (docs/prefs.md).
+    this.#thenGenerate = settings.arena ? { engine: this.#secondEngine, origin: 'arena' } : null;
     this.#dispatch();
+  }
+
+  /** The engine a comparison draws its second reply from. */
+  get #secondEngine(): EngineRole {
+    return model.info?.challenger && !model.info.challenger.loading ? 'challenger' : 'current';
+  }
+
+  /**
+   * Draw one more reply to the newest prompt — from the challenger if one is loaded — and put the
+   * two up for a blind vote. Only the newest reply slot: an earlier one cannot keep its continuation.
+   */
+  compare(turnId: string): void {
+    const idx = this.turns.findIndex((t) => t.id === turnId);
+    const t = this.turns[idx];
+    if (!t || t.role !== 'assistant' || idx !== this.turns.length - 1 || this.busy || !t.content) return;
+    const samples: Turn[] = [...(t.samples ?? []), { ...t, samples: undefined, compare: undefined }];
+    this.turns = this.turns.slice(0, idx);
+    this.#pairNext = { withId: t.id, origin: 'compare' };
+    this.#dispatch(samples, this.#secondEngine);
+  }
+
+  /** Your verdict on a compare card; null keeps the pair unrated. The preferred reply becomes the shown one. */
+  async vote(turnId: string, vote: PairVote | null, reason = ''): Promise<void> {
+    const idx = this.turns.findIndex((t) => t.id === turnId);
+    const turn = this.turns[idx];
+    const pair = turn?.compare;
+    if (!turn || !pair || pair.vote || pair.skipped) return;
+    const pool = [...(turn.samples ?? []), turn];
+    const a = pool.find((s) => s.id === pair.aId);
+    const b = pool.find((s) => s.id === pair.bId);
+    if (!a || !b) return;
+    const messages = this.turns.slice(0, idx).map((t) => ({ role: t.role, content: t.content }));
+    await prefs.vote(
+      {
+        messages,
+        a: a.content,
+        b: b.content,
+        a_source: a.source ?? this.#fallbackSource(a),
+        b_source: b.source ?? this.#fallbackSource(b),
+        origin: pair.origin
+      },
+      vote,
+      reason
+    );
+    const done: ComparePair = vote ? { ...pair, vote, reason } : { ...pair, vote: null, skipped: true };
+    const winnerId = vote === 'a' ? a.id : vote === 'b' ? b.id : null;
+    if (winnerId && winnerId !== turn.id) {
+      const rest = pool.filter((s) => s.id !== winnerId).map((s) => ({ ...s, samples: undefined, compare: undefined }));
+      const winner = pool.find((s) => s.id === winnerId)!;
+      this.turns = this.turns.map((t) => (t.id === turnId ? { ...winner, samples: rest, compare: done } : t));
+    } else {
+      this.#patch(turnId, { compare: done });
+    }
+    this.#save();
+  }
+
+  #fallbackSource(t: Turn): ReplySource {
+    return {
+      checkpoint: model.info?.name ?? 'unknown',
+      step: t.checkpointStep ?? model.info?.checkpoint.step ?? 0,
+      engine: 'current',
+      params: t.params ?? { ...settings.params }
+    };
   }
 
   /**
@@ -346,8 +426,11 @@ class Chat {
 
     if (tail.every((t) => t.role === 'assistant')) {
       const samples: Turn[] = [];
-      for (const t of tail) samples.push(...(t.samples ?? []), { ...t, samples: undefined });
+      for (const t of tail) samples.push(...(t.samples ?? []), { ...t, samples: undefined, compare: undefined });
+      const shown = tail[tail.length - 1];
       this.turns = this.turns.slice(0, idx + 1);
+      // the retry goes up against the reply you had (docs/prefs.md) — not blind, but free
+      this.#pairNext = shown?.content && !shown.error ? { withId: shown.id, origin: 'retry' } : null;
       this.#dispatch(samples);
       return;
     }
@@ -402,8 +485,8 @@ class Chat {
     if (idx < 0) return;
     const pool = turn.samples.slice();
     const chosen = pool[idx];
-    pool[idx] = { ...turn, samples: undefined };
-    this.turns = this.turns.map((t) => (t.id === turnId ? { ...chosen, samples: pool } : t));
+    pool[idx] = { ...turn, samples: undefined, compare: undefined };
+    this.turns = this.turns.map((t) => (t.id === turnId ? { ...chosen, samples: pool, compare: turn.compare } : t));
     this.#save();
   }
 
@@ -481,7 +564,7 @@ class Chat {
     this.preview = null;
   }
 
-  #dispatch(samples?: Turn[]): void {
+  #dispatch(samples?: Turn[], engine: EngineRole = 'current'): void {
     const history: { role: ChatRole; content: string }[] = this.turns.map((t) => ({
       role: t.role,
       content: t.content
@@ -502,7 +585,13 @@ class Chat {
       samples: samples?.length ? samples : undefined,
       params,
       offDefault: offDefault.length ? offDefault : undefined,
-      checkpointStep: model.info?.checkpoint.step
+      checkpointStep: model.info?.checkpoint.step,
+      source: {
+        checkpoint: (engine === 'challenger' ? model.info?.challenger?.name : model.info?.name) ?? 'unknown',
+        step: (engine === 'challenger' ? model.info?.challenger?.step : model.info?.checkpoint.step) ?? 0,
+        engine,
+        params
+      }
     };
     this.traces = { ...this.traces, [reply.id]: new ByteTrace() };
     this.turns = [...this.turns, reply];
@@ -517,7 +606,7 @@ class Chat {
       verify_prefix: settings.verifyPrefix
     };
     this.foldNow = false;
-    this.#socket.generate(history, settings.params, context);
+    this.#socket.generate(history, settings.params, context, engine);
     this.#save();
   }
 
@@ -557,7 +646,16 @@ class Chat {
             fold: ev.fold ?? null,
             prefix: ev.prefix ?? null,
             contextBytes: ev.context_bytes,
-            contextLimit: ev.context_limit
+            contextLimit: ev.context_limit,
+            ...(ev.checkpoint && id
+              ? {
+                  source: {
+                    ...(this.turns.find((t) => t.id === id)?.source ?? this.#fallbackSource({ id } as Turn)),
+                    checkpoint: ev.checkpoint.name,
+                    step: ev.checkpoint.step
+                  }
+                }
+              : {})
           });
           break;
         case 'byte':
@@ -602,6 +700,23 @@ class Chat {
       this.awaitingStart = false;
       diagnostics.end(finished.stats);
       this.#save();
+      if (id && this.#thenGenerate) {
+        // arena: the second reply follows at once, and the two go up for a vote when it lands
+        const { engine, origin } = this.#thenGenerate;
+        this.#thenGenerate = null;
+        const last = this.turns[this.turns.length - 1];
+        if (last?.id === id && last.content && !last.error) {
+          this.#pairNext = { withId: id, origin };
+          this.turns = this.turns.slice(0, -1);
+          this.#dispatch([...(last.samples ?? []), { ...last, samples: undefined, compare: undefined }], engine);
+          return;
+        }
+      }
+      if (id && this.#pairNext) {
+        const { withId, origin } = this.#pairNext;
+        this.#pairNext = null;
+        this.#openCompare(id, withId, origin);
+      }
       this.#pump();
     }
 
@@ -613,6 +728,18 @@ class Chat {
   #patch(id: string | null, patch: Partial<Turn>): void {
     if (!id) return;
     this.turns = this.turns.map((t) => (t.id === id ? { ...t, ...patch } : t));
+  }
+
+  /** Put the finished reply and an earlier sample of the same slot up for a vote, sides shuffled. */
+  #openCompare(shownId: string, otherId: string, origin: PairOrigin): void {
+    const turn = this.turns.find((t) => t.id === shownId);
+    const other = turn?.samples?.find((s) => s.id === otherId);
+    if (!turn || !other || !turn.content || turn.error || !other.content || turn.content === other.content) return;
+    const flip = Math.random() < 0.5;
+    this.#patch(shownId, {
+      compare: { aId: flip ? otherId : shownId, bId: flip ? shownId : otherId, origin }
+    });
+    this.#save();
   }
 
   /** The request never reached the backend, so there is nothing to keep. */

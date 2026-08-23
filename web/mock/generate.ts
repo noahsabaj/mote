@@ -9,6 +9,8 @@ import type { WebSocket } from 'ws';
 import type { ClientGenerate, ContextPreview, FoldInfo, SamplingParams, StatsPayload } from '../src/lib/types';
 import { state } from './data';
 
+let generation = 0;
+
 const REPLIES = [
   'The router looks at each byte next to the one before it. Where they stop resembling ' +
     'each other it opens a chunk — so the boundaries land near word edges without anyone ' +
@@ -115,8 +117,10 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
   const promptBytes = Math.min(promptBytesTotal, contextLimit);
 
   const last = req.messages.filter((m) => m.role === 'user').pop();
-  const seed = hash((last?.content ?? '') + String(req.messages.length));
-  let reply = REPLIES[seed % REPLIES.length];
+  // A running count keeps two samples of the same prompt apart, as temperature does in the real engine.
+  const seed = hash((last?.content ?? '') + String(req.messages.length) + String((generation += 1)));
+  const challenger = req.engine === 'challenger';
+  let reply = REPLIES[(seed + (challenger ? 3 : 0)) % REPLIES.length];
   // Long-form prompts get a longer answer, so the byte inspector has something to virtualize.
   if ((last?.content.length ?? 0) > 120) reply = `${reply} ${REPLIES[(seed + 2) % REPLIES.length]}`;
 
@@ -142,7 +146,10 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
       cache_budget: 1_073_741_824,
       hits: req.messages.length - 1,
       misses: 1
-    }
+    },
+    checkpoint: challenger
+      ? { name: state.challengerId ?? 'challenger', step: 9000 }
+      : { name: state.loadedId, step: 3100 }
   });
   if (reused > 0 && req.context?.verify_prefix) {
     send(ws, {

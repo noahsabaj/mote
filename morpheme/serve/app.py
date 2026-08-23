@@ -26,12 +26,15 @@ from pydantic import BaseModel
 from .context import context_report
 from .identity import with_system_card
 from .engine import Engine, GenParams, discover_checkpoints
+from .prefs import PrefStore, rubric as rubric_info
 from .pairing import Pairing, router as pairing_router
 
 ROOT = Path(__file__).resolve().parents[2]
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 app = FastAPI(title="Morpheme Studio")
-STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "token": None}
+STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "token": None,
+               "challenger": None, "challenger_loading": False}  # challenger: a second Engine for blind A/B (docs/prefs.md)
+PREFS = PrefStore()
 
 # --- access token -----------------------------------------------------------------
 # Optional shared secret (`--token` / MORPHEME_TOKEN). When set, every /api and /v1 route
@@ -71,6 +74,25 @@ def engine() -> Engine:
     return e
 
 
+def engine_for(role: Optional[str]) -> Engine:
+    """'current' (default) or 'challenger' — the second engine the studio compares against."""
+    if role == "challenger":
+        ch = STATE["challenger"]
+        if ch is None or STATE["challenger_loading"]:
+            raise HTTPException(status_code=503, detail="no challenger loaded")
+        return ch
+    return engine()
+
+
+def challenger_info() -> Optional[dict]:
+    ch = STATE["challenger"]
+    if ch is None:
+        return None
+    c = ch.info_ckpt
+    return {"id": ckpt_id(ch.ckpt_path), "name": ch.ckpt_name, "step": c.step, "val_bpb": c.val_bpb,
+            "loading": STATE["challenger_loading"]}
+
+
 def ckpt_id(p: Path) -> str:
     try:
         return str(p.relative_to(ROOT)).replace("\\", "/")
@@ -86,7 +108,9 @@ def health():
 
 @app.get("/api/model")
 def model_info():
-    return engine().info()
+    info = engine().info()
+    info["challenger"] = challenger_info()
+    return info
 
 
 @app.get("/api/checkpoints")
@@ -100,11 +124,13 @@ def checkpoints():
         except Exception:
             step = -1
         info = STATE["engine"]._describe_checkpoint(p, step, {}) if STATE["engine"] else None
+        ch = STATE["challenger"].ckpt_path.resolve() if STATE["challenger"] else None
         out.append({
             "id": ckpt_id(p), "step": step,
             "val_bpb": info.val_bpb if info else None, "bytes_seen": info.bytes_seen if info else 0,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(p.stat().st_mtime)),
             "loaded": cur is not None and p.resolve() == cur,
+            "challenger": ch is not None and p.resolve() == ch,
         })
     return out
 
@@ -179,6 +205,72 @@ class ChatBody(BaseModel):
     max_tokens: Optional[int] = None
     stream: bool = False
     model: Optional[str] = None
+
+
+@app.post("/api/challenger/load")
+def load_challenger(body: LoadBody):
+    """Load a second engine next to the served one, for blind side-by-side comparisons (docs/prefs.md)."""
+    path = (ROOT / body.id).resolve()
+    if not path.exists():
+        raise HTTPException(404, "checkpoint not found")
+    with STATE["lock"]:
+        STATE["challenger_loading"] = True
+        try:
+            STATE["challenger"] = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            eng = Engine(path, device=STATE.get("device"))
+            eng.warmup()
+            STATE["challenger"] = eng
+        finally:
+            STATE["challenger_loading"] = False
+    return model_info()
+
+
+@app.delete("/api/challenger")
+def drop_challenger():
+    with STATE["lock"]:
+        STATE["challenger"] = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    return model_info()
+
+
+# --- preference votes (docs/prefs.md) ---------------------------------------------------
+class PairBody(BaseModel):
+    messages: list
+    a: str
+    b: str
+    a_source: dict
+    b_source: dict
+    origin: str = "compare"  # retry | compare | arena
+
+
+class VoteBody(BaseModel):
+    pair: PairBody
+    vote: Optional[str] = None  # a | b | tie | both_bad; None records the pair unrated (skipped)
+    reason: str = ""
+
+
+@app.post("/api/prefs/vote")
+def prefs_vote(body: VoteBody):
+    try:
+        rec = PREFS.add_pair(body.pair.messages, body.pair.a, body.pair.b, body.pair.a_source, body.pair.b_source, body.pair.origin)
+        if body.vote:
+            PREFS.add_vote(rec["id"], "user", body.vote, body.reason)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"pair": rec["id"], **PREFS.summary()}
+
+
+@app.get("/api/prefs/summary")
+def prefs_summary():
+    return PREFS.summary()
+
+
+@app.get("/api/prefs/rubric")
+def prefs_rubric():
+    return rubric_info()
 
 
 class ContextBody(BaseModel):
@@ -286,7 +378,7 @@ async def ws_generate(ws: WebSocket):
             if msg.get("type") != "generate":
                 continue
             try:
-                eng = engine()
+                eng = engine_for(msg.get("engine") or "current")
             except HTTPException as e:
                 await ws.send_json({"type": "error", "message": e.detail})
                 continue
@@ -294,6 +386,8 @@ async def ws_generate(ws: WebSocket):
             queue: asyncio.Queue = asyncio.Queue()
             stop.clear()
             threading.Thread(target=_run_generation, args=(eng, msg.get("messages", []), params, loop, queue, stop, msg.get("context")), daemon=True).start()
+
+            gone = asyncio.Event()  # the client left mid-reply: no more receives on this socket
 
             async def pump_client():
                 # listen for a stop message while generating
@@ -304,6 +398,7 @@ async def ws_generate(ws: WebSocket):
                             stop.set()
                 except Exception:
                     stop.set()
+                    gone.set()
 
             listener = asyncio.create_task(pump_client())
             try:
@@ -311,9 +406,13 @@ async def ws_generate(ws: WebSocket):
                     ev = await queue.get()
                     if ev["type"] == "__end__":
                         break
+                    if gone.is_set():
+                        continue  # drain the engine's events; the socket is closed
                     await ws.send_json(ev)
             finally:
                 listener.cancel()
+            if gone.is_set():
+                break
     except WebSocketDisconnect:
         stop.set()
 

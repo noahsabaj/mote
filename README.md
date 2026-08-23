@@ -145,7 +145,7 @@ On Linux `service install` writes a systemd user unit instead. Manual form, if y
 python -m morpheme.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
 ```
 
-`docs/context.md` is context management: the engine keeps a prefix cache so each turn reads only the new bytes
+`docs/prefs.md` is the preference loop: Retry / Compare / arena votes in the studio, a challenger checkpoint for blind A/B, the rubric (`docs/rubric.md`) and the export/import round trip with Claude as the second rater. `docs/context.md` is context management: the engine keeps a prefix cache so each turn reads only the new bytes
 (`morpheme/serve/prefix_cache.py`, verified by `morpheme.eval.prefix_probe`), and the studio folds the oldest turns into an editable compaction card when a
 conversation outgrows the window (`POST /api/context` previews it), and the flagship window is 16384 bytes gated on a
 memory profile. `docs/search.md` is the settled design for web search (learned `<|search|>` call, SearXNG + an offline Wikipedia-intro

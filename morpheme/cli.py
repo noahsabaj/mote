@@ -324,6 +324,35 @@ def config_cmd(args) -> int:
     return 0
 
 
+def prefs_cmd(args) -> int:
+    """Preference votes (docs/prefs.md): hand unrated pairs to the rater, take verdicts back, read the numbers."""
+    from morpheme.serve.prefs import PrefStore, rubric
+
+    store = PrefStore()
+    if args.action == "export":
+        n = store.export_for_rating(Path(args.out), args.limit)
+        print(f"{n} pairs -> {args.out}  (rubric {rubric()['hash']})")
+    elif args.action == "import":
+        if not args.file:
+            print("usage: morpheme prefs import <verdicts.jsonl>")
+            return 2
+        print(f"{store.import_verdicts(Path(args.file))} verdicts imported")
+    elif args.action == "summary":
+        print(json.dumps(store.summary(), indent=1, ensure_ascii=False))
+    elif args.action == "disagreements":
+        rows = store.disagreements()
+        if not rows:
+            print("no disagreements")
+        for d in rows:
+            kind = "HARD" if d["hard"] else "soft"
+            last = d["messages"][-1]["content"] if d["messages"] else ""
+            print(f"[{kind}] {d['id']}  user={d['user']} ({d['user_reason']})  claude={d['claude']} ({d['claude_reason']})")
+            print(f"    prompt: {last[:160]}")
+            print(f"    A: {d['a'][:200]}")
+            print(f"    B: {d['b'][:200]}")
+    return 0
+
+
 # ---- entry ---------------------------------------------------------------------------------------
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="morpheme", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -343,6 +372,11 @@ def main(argv=None) -> int:
     c.add_argument("--device", choices=["cpu", "cuda"])
     c.add_argument("--port", type=int)
     c.add_argument("--host")
+    pr = sub.add_parser("prefs", help="preference votes: export | import | summary | disagreements (docs/prefs.md)")
+    pr.add_argument("action", choices=["export", "import", "summary", "disagreements"])
+    pr.add_argument("file", nargs="?", help="verdicts JSONL for `import`")
+    pr.add_argument("--out", default="data/prefs/to_rate.jsonl")
+    pr.add_argument("--limit", type=int, default=None)
     args = ap.parse_args(argv)
 
     if args.cmd == "service":
@@ -360,6 +394,8 @@ def main(argv=None) -> int:
         return logs(args.n)
     if args.cmd == "config":
         return config_cmd(args)
+    if args.cmd == "prefs":
+        return prefs_cmd(args)
     return 1
 
 

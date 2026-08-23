@@ -64,6 +64,16 @@ export interface ModelInfo {
   } | null;
   /** the system message the engine prepends so the model knows what it is */
   identity_card?: string;
+  /** a second engine loaded for blind side-by-side comparisons (docs/prefs.md), or null */
+  challenger?: ChallengerInfo | null;
+}
+
+export interface ChallengerInfo {
+  id: string;
+  name: string;
+  step: number;
+  val_bpb: number | null;
+  loading: boolean;
 }
 
 export interface CheckpointListItem {
@@ -73,6 +83,72 @@ export interface CheckpointListItem {
   bytes_seen: number;
   created_at: string;
   loaded: boolean;
+  /** loaded as the challenger (docs/prefs.md) */
+  challenger?: boolean;
+}
+
+// ------------------------------------------------------------------- preferences (docs/prefs.md)
+
+export type EngineRole = 'current' | 'challenger';
+
+/** where a reply came from, captured when it was requested */
+export interface ReplySource {
+  checkpoint: string;
+  step: number;
+  engine: EngineRole;
+  params: SamplingParams;
+}
+
+export type PairVote = 'a' | 'b' | 'tie' | 'both_bad';
+export type PairOrigin = 'retry' | 'compare' | 'arena';
+
+/** a reply slot with two candidates up for a vote; ids point into the slot's sample pool */
+export interface ComparePair {
+  aId: string;
+  bId: string;
+  origin: PairOrigin;
+  vote?: PairVote | null;
+  reason?: string;
+  skipped?: boolean;
+}
+
+export interface VoteBody {
+  pair: {
+    messages: { role: ChatRole; content: string }[];
+    a: string;
+    b: string;
+    a_source: ReplySource;
+    b_source: ReplySource;
+    origin: PairOrigin;
+  };
+  vote: PairVote | null;
+  reason: string;
+}
+
+export interface PrefsTableRow {
+  a: string;
+  b: string;
+  a_wins: number;
+  b_wins: number;
+  ties: number;
+  both_bad: number;
+  n: number;
+}
+
+export interface PrefsSummary {
+  pairs: number;
+  votes: { user: number; claude: number };
+  unrated_by_claude: number;
+  table: PrefsTableRow[];
+  agreement: { n: number; agree: number; rate: number | null };
+  rubric: string | null;
+  /** the id of the pair just stored (POST /api/prefs/vote only) */
+  pair?: string;
+}
+
+export interface Rubric {
+  text: string;
+  hash: string | null;
 }
 
 export interface TrainingRun {
@@ -197,6 +273,8 @@ export interface ClientGenerate {
   messages: { role: ChatRole; content: string }[];
   params: SamplingParams;
   context?: { fold: FoldMode; card?: string | null; prev?: PrevFold | null; verify_prefix?: boolean };
+  /** which loaded engine answers: the served one (default) or the challenger */
+  engine?: EngineRole;
 }
 
 export interface ClientStop {
@@ -214,6 +292,8 @@ export interface StartEvent {
   truncated: boolean;
   fold?: FoldInfo | null;
   prefix?: PrefixInfo;
+  /** the checkpoint that is answering */
+  checkpoint?: { name: string; step: number };
 }
 
 export interface ByteEvent {

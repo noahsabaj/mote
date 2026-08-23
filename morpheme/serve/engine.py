@@ -211,6 +211,12 @@ class Engine:
         except Exception:
             return None
 
+    @property
+    def ckpt_name(self) -> str:
+        """run/file, the name the studio shows: overnight_sft/last.pt"""
+        c = Path(self.info_ckpt.path)
+        return f"{c.parent.name}/{c.name}"
+
     def info(self) -> dict:
         dev = {"name": "cpu", "vram_total_mb": 0, "vram_used_mb": 0}
         if self.device.type == "cuda":
@@ -218,7 +224,7 @@ class Engine:
             dev = {"name": props.name, "vram_total_mb": props.total_memory // 2**20, "vram_used_mb": torch.cuda.memory_allocated(self.device) // 2**20}
         c = self.info_ckpt
         return {
-            "name": f"{Path(c.path).parent.name}/{Path(c.path).name}",
+            "name": self.ckpt_name,
             "params": self.model.num_params(),
             "status": c.status,
             "status_note": c.status_note,
@@ -334,7 +340,8 @@ class Engine:
         prefill_ms = (time.perf_counter() - t0) * 1000
         emit({"type": "start", "prompt_bytes": P, "context_bytes": P, "context_limit": limit, "truncated": truncated,
               "fold": folded.report(),
-              "prefix": {"reused": reused, "prefilled": P - reused, "prefill_ms": prefill_ms, **self.prefix_cache.report()}})
+              "prefix": {"reused": reused, "prefilled": P - reused, "prefill_ms": prefill_ms, **self.prefix_cache.report()},
+              "checkpoint": {"name": self.ckpt_name, "step": self.info_ckpt.step}})
         if reused and context.get("verify_prefix"):
             check = self._verify_prefix(prompt_ids, reused, logits, warm_bm, n_chunks)
             emit({"type": "diagnostics", **self._diagnostics([]), "prefix_check": check})

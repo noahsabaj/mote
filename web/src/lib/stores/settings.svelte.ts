@@ -150,6 +150,8 @@ class Settings {
   explain = $state<boolean>(persist.read('sampling.explain', false));
   /** debug: re-read every prompt cold after the cached continuation and report any divergence */
   verifyPrefix = $state<boolean>(persist.read('prefix.verify', false));
+  /** arena mode: every prompt gets two replies, A and B, and you choose (docs/prefs.md) */
+  arena = $state<boolean>(persist.read('prefs.arena', false));
 
   params = $derived<SamplingParams>({ ...this.defaults, ...this.#overrides });
 
@@ -221,6 +223,11 @@ class Settings {
   toggleVerifyPrefix(): void {
     this.verifyPrefix = !this.verifyPrefix;
     persist.write('prefix.verify', this.verifyPrefix);
+  }
+
+  toggleArena(): void {
+    this.arena = !this.arena;
+    persist.write('prefs.arena', this.arena);
   }
 
   #write(next: Partial<SamplingParams>): void {
