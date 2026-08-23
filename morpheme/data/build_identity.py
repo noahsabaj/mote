@@ -37,6 +37,8 @@ IDENTITY_Q = [
     "What can't you do?", "Are you smart?", "Do you know everything?", "Where do you run?",
     "Who built you and why?", "What data were you trained on?", "Introduce yourself in one sentence.",
     "Are you a large language model?", "How do you read text?", "What's your size?",
+    "Describe yourself.", "Describe yourself in a sentence.", "Say who you are.", "Give me a short description of yourself.",
+    "Explain what you are.", "Who am I talking to?", "Which model is answering?", "State your name and what you are.",
 ]
 
 CHALLENGES = [

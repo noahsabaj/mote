@@ -73,6 +73,7 @@ def main(argv=None):
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--lr", type=float, default=2e-6)
     ap.add_argument("--beta", type=float, default=0.1)
+    ap.add_argument("--sft-weight", type=float, default=0.0, help="add this much of the chosen replies' mean NLL per byte to the DPO loss (the first attempt, 3 epochs at 2e-6 without it, reached margin 8.9 and degraded the text)")
     ap.add_argument("--max-len", type=int, default=1024)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -119,6 +120,9 @@ def main(argv=None):
                 rlp_r = batch_logps(ref, rejected)
             margin = args.beta * ((lp_c - rlp_c) - (lp_r - rlp_r))
             loss = -F.logsigmoid(margin).mean()
+            if args.sft_weight > 0:
+                n_c = torch.tensor([float(sum(m)) for _, m in chosen], device=device)
+                loss = loss + args.sft_weight * (-(lp_c / n_c.clamp_min(1)).mean())
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
@@ -131,7 +135,7 @@ def main(argv=None):
             if step % 5 == 0:
                 print(json.dumps(rec), flush=True)
     ck_out = {"model": policy.state_dict(), "optimizer": None, "step": int(ck.get("step", 0)) + step, "config": cfg.to_dict(),
-              "extra": {**ck.get("extra", {}), "dpo": {"pairs": len(pairs), "epochs": args.epochs, "beta": args.beta, "lr": args.lr, "init_from": args.init_from}}}
+              "extra": {**ck.get("extra", {}), "dpo": {"pairs": len(pairs), "epochs": args.epochs, "beta": args.beta, "lr": args.lr, "sft_weight": args.sft_weight, "init_from": args.init_from}}}
     tmp = out / "last.tmp"
     torch.save(ck_out, tmp)
     os.replace(tmp, out / "last.pt")
