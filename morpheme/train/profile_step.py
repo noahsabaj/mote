@@ -42,6 +42,8 @@ def main(argv=None):
     ap.add_argument("--bucket", type=int, default=None, help="override chunk-count bucket (1 = off)")
     ap.add_argument("--trace", default=None, help="write a Chrome trace json here")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--chunk-bytes", type=float, default=None, help="profiling only: force a boundary every N bytes (trained routers land near 5-6), so a preset with no checkpoint is profiled at a realistic chunk count")
+    ap.add_argument("--init-from", default=None, help="profile a trained checkpoint: a random router makes ~9 chunks per 2048 bytes, a trained one ~370, and the main network and dechunk costs scale with that")
     args = ap.parse_args(argv)
 
     device = torch.device(args.device)
@@ -60,6 +62,32 @@ def main(argv=None):
         cfg.mbp.enabled = False
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg, device=device)  # fp32 parameters under autocast, exactly like the trainer
+    if args.init_from:
+        ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        cfg = MorphemeConfig.from_dict(ck["config"])
+        if args.bucket is not None:
+            cfg.dc.chunk_bucket = args.bucket
+        if args.no_mbp:
+            cfg.mbp.enabled = False
+        model = HNetForCausalLM(cfg, device=device)
+        model.load_state_dict(ck["model"], strict=False)
+    if args.chunk_bytes:
+        # The router's own p still flows (its parameters get gradients as in training); only the
+        # selection is forced to a fixed period, which is what sets the main-network and dechunk cost.
+        from morpheme.model.dc import RoutingOutput
+
+        router = model.routing_module
+        real_forward = router.forward
+        period = float(args.chunk_bytes)
+
+        def forced_forward(hidden, mask, state=None):
+            out = real_forward(hidden, mask, state)
+            pos = torch.arange(hidden.shape[1], device=hidden.device, dtype=torch.float32)
+            forced = ((pos / period).floor() != ((pos - 1) / period).floor())[None, :] & mask
+            sel = forced.long()
+            return RoutingOutput(out.boundary_prob, forced, out.boundary_prob.gather(-1, sel.unsqueeze(-1)))
+
+        router.forward = forced_forward
     if args.ckpt_main:
         model.main_network.grad_checkpoint = True
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, betas=(0.9, 0.95), fused=device.type == "cuda")
