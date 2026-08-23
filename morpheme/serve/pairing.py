@@ -3,9 +3,9 @@
 * ``GET /pair`` (loopback clients only) renders a page with a QR of ``<public_url>/#token=<token>``
   and a fresh 6-digit code. The token travels in the URL *fragment*: the browser never sends a
   fragment to the server, so it appears in no request log; the UI stores it and scrubs the hash.
-* ``POST /api/pair {"code": "123456"}`` redeems a code for the token. Codes live 120 s, work once,
-  and redemption is rate-limited (10 attempts per minute), which makes guessing a 6-digit code
-  hopeless within a code's lifetime.
+* ``POST /api/pair {"code": "123456"}`` redeems a code for the token. Codes live 10 minutes, work
+  once, and redemption is rate-limited (10 attempts per minute): at most 100 guesses per code
+  lifetime against a million codes.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-CODE_TTL_S = 120.0
+CODE_TTL_S = 600.0  # ten minutes: read on one device, typed on another
 MAX_ATTEMPTS_PER_MIN = 10
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
@@ -134,7 +134,7 @@ def router(pairing: Pairing) -> APIRouter:
             raise HTTPException(404, "no token configured")
         token = pairing.redeem(code)
         if token is None:
-            return JSONResponse({"detail": "wrong or expired code"}, status_code=400)
+            return JSONResponse({"detail": "wrong or expired code — use the code the PC's /pair page shows right now"}, status_code=400)
         return {"token": token}
 
     return r
@@ -161,21 +161,24 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Pair
 <div class="grid">
   <div class="qr">{qr}</div>
   <div>
-    <div class="meta">Pairing code · valid <span id="ttl">{ttl}</span> s · single use</div>
+    <div class="meta">Pairing code · valid for <span id="ttl">{ttl}</span> · single use · a new one appears when it expires</div>
     <div class="code" id="code">{code}</div>
     <div class="meta">Studio address: <code>{base}</code></div>
     <p class="meta" style="margin-top:1.2rem">Link in the QR: <code>{link}</code></p>
   </div>
 </div>
 <script>
+  // The code stays put until it expires; only then is it replaced (and the page says so).
   let ttl = {ttl};
   const el = document.getElementById('ttl');
+  const fmt = (s) => (s >= 60 ? Math.floor(s / 60) + ' min ' + (s % 60) + ' s' : s + ' s');
+  el.textContent = fmt(ttl);
   setInterval(async () => {{
     ttl -= 1;
-    if (ttl <= 5) {{
-      try {{ const r = await fetch('/pair/code'); const j = await r.json(); document.getElementById('code').textContent = j.code; ttl = j.ttl; }} catch (e) {{}}
+    if (ttl <= 0) {{
+      try {{ const r = await fetch('/pair/code'); const j = await r.json(); document.getElementById('code').textContent = j.code; ttl = j.ttl; }} catch (e) {{ ttl = 0; }}
     }}
-    el.textContent = ttl;
+    el.textContent = fmt(ttl);
   }}, 1000);
 </script>
 </main></body></html>"""
