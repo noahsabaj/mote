@@ -10,6 +10,12 @@ class Ui {
   structure = $state<boolean>(persist.read('ui.structure', false));
   /** 'system' follows the OS; 'light'/'dark' force a scheme via data-theme on <html>. */
   theme = $state<Theme>(persist.read('ui.theme', 'system'));
+  /**
+   * Id of the user turn open for editing, or null. It lives here rather than inside the
+   * message so that only one box can be open at a time and so the composer's Up-arrow can
+   * reach back into the transcript to open the last prompt.
+   */
+  editing = $state<string | null>(null);
 
   toggleStructure(): void {
     this.structure = !this.structure;

@@ -1,55 +1,59 @@
-"""Render the app icons: a cream tile with a rust serif lowercase m (the studio's mark).
+"""Render the app icons: the Mote mark (the boundary ring, turned) in rust on a cream tile, plus favicon.svg.
 
-    python web/icons/make_icons.py      # writes web/public/icons/*.png
+    python web/icons/make_icons.py      # writes web/public/icons/*.png and web/public/favicon.svg
 
-Georgia from the Windows font directory; falls back to DejaVu Serif / Pillow's default if absent.
+The mark is defined once, in brand/build.py (`draw_boundary_ring`, `ring_svg`, `ring_params`); this
+script only lays it on tiles at the sizes web/index.html and the manifest link. Opaque square tiles:
+iOS rounds the corners itself, and maskable icons keep the mark inside the safe zone.
 """
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-CREAM = (250, 249, 247)
-RUST = (163, 74, 31)
-OUT = Path(__file__).resolve().parents[1] / "public" / "icons"
-FONTS = [
-    r"C:\Windows\Fonts\georgia.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-    "/System/Library/Fonts/Supplemental/Georgia.ttf",
-]
+ROOT = Path(__file__).resolve().parents[2]
+OUT = ROOT / "web" / "public" / "icons"
+FAVICON = ROOT / "web" / "public" / "favicon.svg"
 
+_spec = importlib.util.spec_from_file_location("brand_build", ROOT / "brand" / "build.py")
+brand = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(brand)
 
-def font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for path in FONTS:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default(size)
+CREAM, RUST = brand.LIGHT["bg"], brand.LIGHT["fg"]
+PEACH = brand.DARK["fg"]
 
 
-def tile(px: int, glyph_frac: float = 0.62) -> Image.Image:
-    """Opaque square: iOS rounds the corners itself; maskable icons keep the glyph in the safe zone."""
-    img = Image.new("RGB", (px, px), CREAM)
-    draw = ImageDraw.Draw(img)
-    f = font(int(px * 0.9))
-    # Scale the glyph by its ink box so the lowercase m fills `glyph_frac` of the tile width.
-    l, t, r, b = draw.textbbox((0, 0), "m", font=f, anchor="ls")
-    scale = (px * glyph_frac) / (r - l)
-    f = font(max(8, int(px * 0.9 * scale)))
-    l, t, r, b = draw.textbbox((0, 0), "m", font=f, anchor="ls")
-    x = (px - (r - l)) / 2 - l
-    y = (px - (b - t)) / 2 - t
-    draw.text((x, y), "m", font=f, fill=RUST, anchor="ls")
-    return img
+def tile(px: int, ss: int = 4) -> Image.Image:
+    """Supersample, draw at the optical weights for `px`, downsample."""
+    P = px * ss
+    img = Image.new("RGB", (P, P), CREAM)
+    brand.draw_boundary_ring(ImageDraw.Draw(img), P, RUST, CREAM, px=px)
+    return img.resize((px, px), Image.LANCZOS)
+
+
+def favicon_svg() -> str:
+    """Transparent, the 16-px weights; rust in light tabs, peach in dark ones where the browser honours it."""
+    stroke, dot_r, gap = brand.ring_params(16)
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Mote">'
+        "<style>svg{color:%s}@media(prefers-color-scheme:dark){svg{color:%s}}</style>"
+        % (brand.hex_of(RUST), brand.hex_of(PEACH))
+        + brand.ring_svg(stroke, dot_r, gap)
+        + "</svg>\n"
+    )
 
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     for name, px in [("apple-touch-icon.png", 180), ("icon-192.png", 192), ("icon-512.png", 512),
-                     ("favicon-32.png", 32), ("favicon-64.png", 64)]:
+                     ("favicon-16.png", 16), ("favicon-32.png", 32), ("favicon-64.png", 64)]:
         tile(px).save(OUT / name, optimize=True)
         print("wrote", OUT / name)
+    FAVICON.write_text(favicon_svg(), encoding="utf-8")
+    print("wrote", FAVICON)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Morpheme",
-  "short_name": "Morpheme",
+  "name": "Mote",
+  "short_name": "Mote",
   "description": "Chat with, and look inside, a byte-level language model.",
   "start_url": "/",
   "scope": "/",

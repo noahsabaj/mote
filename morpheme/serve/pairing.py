@@ -115,7 +115,7 @@ def router(pairing: Pairing) -> APIRouter:
         code, ttl = pairing.new_code()
         svg = qr_svg(link)
         qr_block = svg if svg else "<p class='warn'>QR unavailable: <code>pip install qrcode</code>. Use the code below or the link.</p>"
-        return PAGE.format(qr=qr_block, code=html.escape(code), ttl=int(ttl), base=html.escape(base), link=html.escape(link))
+        return PAGE.format(mark=MARK_SVG, qr=qr_block, code=html.escape(code), ttl=int(ttl), base=html.escape(base), link=html.escape(link))
 
     @r.get("/pair/code")
     def pair_code(request: Request):
@@ -140,7 +140,12 @@ def router(pairing: Pairing) -> APIRouter:
     return r
 
 
-PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Pair a device · Morpheme</title>
+# the mark (brand/build.py: the boundary ring, turned) at the 32-px weights; no braces, so safe in PAGE.format
+MARK_SVG = ('<svg viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="27" fill="none" stroke="currentColor"'
+            ' stroke-width="8" stroke-dasharray="131.65 38" stroke-dashoffset="150.65" transform="rotate(-45 50 50)"/>'
+            '<circle cx="69.09" cy="30.91" r="9.5" fill="currentColor"/></svg>')
+
+PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Pair a device · Mote</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   body {{ margin:0; background:#faf9f7; color:#1c1a17; font-family:system-ui,-apple-system,'Segoe UI',sans-serif; }}
@@ -153,9 +158,12 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Pair
   .meta {{ font-size:.85rem; color:#6f6960; }}
   code {{ font-family:ui-monospace,Consolas,monospace; font-size:.9em; word-break:break-all; }}
   .warn {{ color:#8f3f18; }}
+  .brand {{ display:flex; align-items:center; gap:.45rem; font-weight:600; margin-bottom:1.6rem; }}
+  .brand svg {{ width:1.3rem; height:1.3rem; color:#a34a1f; }}
   @media (max-width:40rem) {{ .grid {{ grid-template-columns:1fr; }} }}
-  @media (prefers-color-scheme: dark) {{ body {{ background:#131211; color:#ece8e2; }} p,.meta {{ color:#a7a099; }} .code {{ color:#eab183; }} }}
+  @media (prefers-color-scheme: dark) {{ body {{ background:#131211; color:#ece8e2; }} p,.meta {{ color:#a7a099; }} .code {{ color:#eab183; }} .brand svg {{ color:#e0a070; }} }}
 </style></head><body><main>
+<div class="brand">{mark}Mote</div>
 <h1>Pair a device</h1>
 <p>This page is only served to this machine. Scan the QR with the phone's camera — the token rides in the link's fragment, which browsers never send to a server — or type the six digits into the studio's unlock sheet.</p>
 <div class="grid">

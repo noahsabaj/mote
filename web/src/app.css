@@ -262,3 +262,26 @@ button {
     scroll-behavior: auto !important;
   }
 }
+
+/* Tooltip — parented to <body> by `use:tip`, so it lives here rather than in a component. */
+.tip {
+  position: fixed;
+  z-index: 100;
+  max-width: 16rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  box-shadow: var(--shadow);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  pointer-events: none;
+  animation: tip-in 90ms ease;
+}
+
+@keyframes tip-in {
+  from {
+    opacity: 0;
+  }
+}

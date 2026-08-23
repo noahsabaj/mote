@@ -18,7 +18,11 @@
     | 'auto'
     | 'model'
     | 'diagnostics'
-    | 'training';
+    | 'training'
+    | 'pencil'
+    | 'info'
+    | 'search'
+    | 'download';
 
   let { name, size = 16 }: { name: Name; size?: number } = $props();
 
@@ -40,7 +44,11 @@
     auto: '',
     model: 'M8 1.9 13.7 5v6L8 14.1 2.3 11V5ZM2.5 5.1 8 8.1l5.5-3M8 8.1V14',
     diagnostics: 'M1.7 8.6h2.6l1.7-4.9 2.7 7.6 1.5-2.7h4.1',
-    training: 'M2.6 2.2v11.2h11.2M5 10.9l2.9-3.4 2.3 1.9 3.2-4.6'
+    training: 'M2.6 2.2v11.2h11.2M5 10.9l2.9-3.4 2.3 1.9 3.2-4.6',
+    pencil: 'M11.9 2.5a1.6 1.6 0 0 1 2.3 2.3l-7.8 7.8-3 .7.7-3ZM10.3 4.1l2.3 2.3',
+    info: '',
+    search: '',
+    download: 'M8 2.6v7.2M8 9.8 5.1 6.9M8 9.8l2.9-2.9M2.9 12.8h10.2'
   };
 </script>
 
@@ -62,6 +70,12 @@
     <path d={PATHS.sliders} />
     <circle cx="6" cy="4.5" r="1.9" fill="var(--bg)" />
     <circle cx="10.5" cy="11.5" r="1.9" fill="var(--bg)" />
+  {:else if name === 'info'}
+    <circle cx="8" cy="8" r="5.6" />
+    <path d="M8 7.3v3.5M8 5.1h.01" />
+  {:else if name === 'search'}
+    <circle cx="7" cy="7" r="4.5" />
+    <path d="M10.4 10.4 13.7 13.7" />
   {:else if name === 'sun'}
     <circle cx="8" cy="8" r="2.9" />
     <path d={PATHS.sun} />

@@ -69,3 +69,21 @@ export function byteGlyph(b: number): string {
   if (b < 127) return String.fromCharCode(b);
   return `·${hex(b)}`; // continuation / lead byte of a multi-byte character
 }
+
+/**
+ * Relative while it is still a useful thing to say ("15 hours ago"), absolute beyond that.
+ * A reply from this morning is easiest to place by how long ago it was; a reply from last
+ * week is easiest to place by its date, and `when` is what the lab records use.
+ */
+export function ago(iso: string, now = Date.now()): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const s = Math.floor((now - d.getTime()) / 1000);
+  if (s < 0) return when(iso); // clock skew — do not claim the future
+  if (s < 45) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m <= 1 ? 'a minute ago' : `${m} minutes ago`;
+  const h = Math.floor(s / 3600);
+  if (h < 24) return h === 1 ? 'an hour ago' : `${h} hours ago`;
+  return when(iso);
+}

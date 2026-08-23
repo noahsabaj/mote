@@ -2,6 +2,8 @@
   import { chat } from '../lib/stores/chat.svelte';
   import { model } from '../lib/stores/model.svelte';
   import { diagnostics } from '../lib/stores/diagnostics.svelte';
+  import { settings } from '../lib/stores/settings.svelte';
+  import { ui } from '../lib/stores/ui.svelte';
   import { autosize, dismissable } from '../lib/actions';
   import SamplingControls from './SamplingControls.svelte';
   import Icon from './Icon.svelte';
@@ -32,6 +34,16 @@
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       submit();
+      return;
+    }
+    // Up on an empty composer reaches back for the last prompt, the way a shell does. It
+    // opens the edit box on that turn rather than pulling the text down here, so the edit
+    // happens where the text lives.
+    if (e.key === 'ArrowUp' && value === '' && !chat.busy && !e.isComposing) {
+      const last = [...chat.turns].reverse().find((t) => t.role === 'user');
+      if (!last) return;
+      e.preventDefault();
+      ui.editing = last.id;
     }
   }
 
@@ -66,14 +78,14 @@
   {/if}
 
   <div class="field" class:focused>
-    <label class="sr-only" for="composer">Message Morpheme</label>
+    <label class="sr-only" for="composer">Message Mote</label>
     <textarea
       id="composer"
       bind:this={area}
       bind:value
       use:autosize={220}
       rows="1"
-      placeholder={disabled ? 'Swapping checkpoint…' : 'Ask Morpheme something'}
+      placeholder={disabled ? 'Swapping checkpoint…' : 'Ask Mote something'}
       {disabled}
       onkeydown={onkeydown}
       onfocus={() => (focused = true)}
@@ -90,6 +102,10 @@
         >
           <Icon name="sliders" size={14} />
           Sampling
+          {#if settings.anyOverridden}
+            <span class="dot" aria-hidden="true"></span>
+            <span class="sr-only">(changed from the checkpoint defaults)</span>
+          {/if}
         </button>
         {#if panelOpen}
           <div
@@ -115,7 +131,7 @@
   </div>
 
   <p class="hint" class:visible={focused || chat.busy}>
-    Enter sends · Shift+Enter starts a line · Esc stops
+    Enter sends · Shift+Enter starts a line · ↑ edits the last prompt · Esc stops
   </p>
 </div>
 
@@ -204,6 +220,16 @@
 
   .anchor {
     position: relative;
+  }
+
+  /* The sliders are behind a click, so a reply drawn off-default would otherwise look
+     exactly like one drawn at the checkpoint's recommendation. */
+  .dot {
+    width: 5px;
+    height: 5px;
+    margin-left: 0.05rem;
+    border-radius: 50%;
+    background: var(--accent);
   }
 
   .panel {

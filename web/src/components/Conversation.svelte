@@ -1,5 +1,6 @@
 <script lang="ts">
   import { chat } from '../lib/stores/chat.svelte';
+  import { notices } from '../lib/stores/notice.svelte';
   import Message from './Message.svelte';
   import Icon from './Icon.svelte';
 
@@ -7,6 +8,25 @@
 
   let scroller = $state<HTMLElement | null>(null);
   let pinned = $state(true);
+
+  // A checkpoint can be hot-swapped mid-conversation, and two replies from two different
+  // models look identical in a transcript. The break is a fact about the thread, so it is
+  // drawn between the turns rather than tucked into one of them.
+  const rows = $derived.by(() => {
+    let prev: number | undefined;
+    return chat.turns.map((turn, i) => {
+      let rule: number | null = null;
+      if (turn.role === 'assistant' && turn.checkpointStep !== undefined) {
+        if (prev !== undefined && prev !== turn.checkpointStep) rule = turn.checkpointStep;
+        prev = turn.checkpointStep;
+      }
+      return {
+        turn,
+        rule,
+        isLast: i === chat.turns.length - 1 && turn.role === 'assistant'
+      };
+    });
+  });
 
   function onscroll() {
     if (!scroller) return;
@@ -38,7 +58,7 @@
     {#if chat.isEmpty}
       <div class="opening">
         <p class="lede">
-          Morpheme reads and writes raw UTF-8 bytes, and works out its own chunks as it goes.
+          Mote reads and writes raw UTF-8 bytes, and works out its own chunks as it goes.
         </p>
         <p class="sub">
           Ask it something. Turn on <em>Structure</em> under a reply to see where it drew the
@@ -46,19 +66,20 @@
         </p>
       </div>
     {:else}
-      {#each chat.turns as turn, i (turn.id)}
-        <Message
-          {turn}
-          isLast={i === chat.turns.length - 1 && turn.role === 'assistant'}
-          {oninspect}
-        />
+      {#each rows as row (row.turn.id)}
+        {#if row.rule !== null}
+          <div class="swap" role="separator">
+            <span>checkpoint step {row.rule} loaded</span>
+          </div>
+        {/if}
+        <Message turn={row.turn} isLast={row.isLast} {oninspect} />
       {/each}
     {/if}
   </div>
 </div>
 
 {#if !pinned && !chat.isEmpty}
-  <button class="jump" onclick={() => toBottom()}>
+  <button class="jump" class:lifted={!!notices.current} onclick={() => toBottom()}>
     <Icon name="chevron" size={13} />
     {chat.busy ? 'Follow the reply' : 'Jump to latest'}
   </button>
@@ -132,5 +153,26 @@
   }
   .jump :global(svg) {
     transform: rotate(90deg);
+  }
+  /* The undo bar owns this slot while it is up. */
+  .jump.lifted {
+    bottom: 3.3rem;
+  }
+
+  .swap {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    margin: 0 0 1.9rem;
+    font-size: 0.75rem;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .swap::before,
+  .swap::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--rule);
   }
 </style>

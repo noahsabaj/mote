@@ -9,9 +9,12 @@ import { GenerateSocket, type LinkState } from '../ws';
 import { auth } from './auth.svelte';
 import { ByteTrace, type SerializedTrace } from '../trace.svelte';
 import * as persist from '../persist';
+import { download } from '../download';
 import { settings } from './settings.svelte';
 import { diagnostics } from './diagnostics.svelte';
-import type { ChatRole, DoneEvent, ServerEvent, StatsPayload } from '../types';
+import { model } from './model.svelte';
+import { notices } from './notice.svelte';
+import type { ChatRole, DoneEvent, SamplingParams, ServerEvent, StatsPayload } from '../types';
 
 export interface Turn {
   id: string;
@@ -28,8 +31,14 @@ export interface Turn {
   contextLimit?: number;
   /** milliseconds from send to the first byte of the reply */
   ttfbMs?: number;
-  /** earlier samples of this reply slot ("Again" keeps them); each is a complete Turn */
+  /** earlier samples of this reply slot (Retry keeps them); each is a complete Turn */
   samples?: Turn[];
+  /** assistant only — what this reply was actually drawn at, captured when it was sent */
+  params?: SamplingParams;
+  /** the params above that differed from the checkpoint's own defaults at that moment */
+  offDefault?: (keyof SamplingParams)[];
+  /** assistant only — step of the checkpoint that produced it, for the swap rule */
+  checkpointStep?: number;
 }
 
 interface StoredConversation {
@@ -37,6 +46,8 @@ interface StoredConversation {
   title: string;
   turns: Turn[];
   updatedAt: number;
+  /** the title was typed rather than derived, so saving must not overwrite it */
+  titleLocked?: boolean;
 }
 
 export interface ConversationSummary {
@@ -57,6 +68,34 @@ function newId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 }
 
+/** A conversation as prose, with each reply's counters and provenance under it as a quote. */
+function toMarkdown(title: string, turns: Turn[], modelName: string): string {
+  const out: string[] = [`# ${title}`, ''];
+  for (const t of turns) {
+    if (t.role === 'user') {
+      out.push('## You', '', t.content, '');
+      continue;
+    }
+    out.push(`## ${modelName}`, '', t.content || '_(no reply)_', '');
+    const meta: string[] = [];
+    if (t.stats) {
+      meta.push(
+        `${t.stats.bytes} bytes`,
+        `${t.stats.chunks} chunks`,
+        `${t.stats.bytes_per_sec.toFixed(0)} B/s`
+      );
+    }
+    if (t.params) {
+      const p = t.params;
+      meta.push(`T ${p.temperature} · top-p ${p.top_p} · n ${p.n_candidates}`);
+    }
+    if (t.checkpointStep !== undefined) meta.push(`step ${t.checkpointStep}`);
+    if (t.error) meta.push(`error: ${t.error}`);
+    if (meta.length) out.push(`> ${meta.join(' · ')}`, '');
+  }
+  return out.join('\n');
+}
+
 function titleFor(turns: Turn[]): string {
   const first = turns.find((t) => t.role === 'user');
   if (!first) return 'New conversation';
@@ -67,9 +106,11 @@ function titleFor(turns: Turn[]): string {
 
 class Chat {
   id = $state<string>(newId());
+  title = $state<string>('New conversation');
   turns = $state<Turn[]>([]);
   index = $state<ConversationSummary[]>([]);
   traces = $state<Record<string, ByteTrace>>({});
+  #titleLocked = $state(false);
 
   /** id of the assistant turn being streamed, or null */
   streamingId = $state<string | null>(null);
@@ -130,6 +171,8 @@ class Chat {
     const stored = persist.read<StoredConversation | null>(convKey(id), null);
     if (!stored) return;
     this.id = stored.id;
+    this.title = stored.title;
+    this.#titleLocked = !!stored.titleLocked;
     this.turns = stored.turns;
     const saved = persist.read<Record<string, SerializedTrace>>(tracesKey(id), {});
     const traces: Record<string, ByteTrace> = {};
@@ -147,17 +190,50 @@ class Chat {
   newConversation(): void {
     if (this.busy) this.stop();
     this.id = newId();
+    this.title = 'New conversation';
+    this.#titleLocked = false;
     this.turns = [];
     this.traces = {};
     persist.write(CURRENT_KEY, this.id);
   }
 
+  /** A typed title survives saving; the derived one keeps tracking the first prompt. */
+  rename(id: string, next: string): void {
+    const clean = next.replace(/\s+/g, ' ').trim().slice(0, 80);
+    if (!clean) return;
+    if (id === this.id) {
+      this.title = clean;
+      this.#titleLocked = true;
+      this.#saveNow();
+      return;
+    }
+    const stored = persist.read<StoredConversation | null>(convKey(id), null);
+    if (stored) persist.write(convKey(id), { ...stored, title: clean, titleLocked: true });
+    this.index = this.index.map((c) => (c.id === id ? { ...c, title: clean } : c));
+    persist.write(INDEX_KEY, this.index);
+  }
+
+  /** Deletes at once and hands the undo bar everything needed to put it back verbatim. */
   deleteConversation(id: string): void {
+    const stored = persist.read<StoredConversation | null>(convKey(id), null);
+    const storedTraces = persist.read<Record<string, SerializedTrace>>(tracesKey(id), {});
+    const before = this.index;
+    const wasCurrent = id === this.id;
+    const label = this.index.find((c) => c.id === id)?.title ?? 'conversation';
+
     persist.drop(convKey(id));
     persist.drop(tracesKey(id));
     this.index = this.index.filter((c) => c.id !== id);
     persist.write(INDEX_KEY, this.index);
-    if (id === this.id) this.newConversation();
+    if (wasCurrent) this.newConversation();
+
+    notices.show(`Deleted “${label}”.`, () => {
+      if (stored) persist.write(convKey(id), stored);
+      persist.write(tracesKey(id), storedTraces);
+      this.index = before;
+      persist.write(INDEX_KEY, before);
+      if (wasCurrent) this.open(id);
+    });
   }
 
   // ------------------------------------------------------------------ sending
@@ -169,18 +245,64 @@ class Chat {
     this.#dispatch();
   }
 
-  /** Sample the last reply again. The previous sample(s) are kept and can be flipped back to. */
-  regenerate(): void {
-    if (this.busy) return;
-    let cut = this.turns.length;
-    while (cut > 0 && this.turns[cut - 1].role === 'assistant') cut -= 1;
-    if (cut === this.turns.length) return;
-    const samples: Turn[] = [];
-    for (const t of this.turns.slice(cut)) {
-      samples.push(...(t.samples ?? []), { ...t, samples: undefined });
+  /**
+   * Draw the reply to this prompt again. On the newest prompt nothing is lost: the old
+   * reply is kept as a sample you can flip back to, which is the whole point of being able
+   * to re-roll at a different temperature. On an earlier prompt the replies that followed
+   * cannot survive a different continuation, so they go and the undo bar holds them.
+   */
+  retryFrom(turnId: string): void {
+    const idx = this.turns.findIndex((t) => t.id === turnId);
+    if (idx < 0 || this.turns[idx].role !== 'user' || this.busy) return;
+    const tail = this.turns.slice(idx + 1);
+
+    if (tail.every((t) => t.role === 'assistant')) {
+      const samples: Turn[] = [];
+      for (const t of tail) samples.push(...(t.samples ?? []), { ...t, samples: undefined });
+      this.turns = this.turns.slice(0, idx + 1);
+      this.#dispatch(samples);
+      return;
     }
-    this.turns = this.turns.slice(0, cut);
-    this.#dispatch(samples);
+
+    const restore = this.#snapshot();
+    this.turns = this.turns.slice(0, idx + 1);
+    this.#dispatch();
+    notices.show(`Replaced ${tail.length} turns after that prompt.`, restore);
+  }
+
+  /** Rewrite a prompt and run it again. Everything after it is replaced; undo restores it. */
+  editAndResend(turnId: string, text: string): void {
+    const content = text.trim();
+    const idx = this.turns.findIndex((t) => t.id === turnId);
+    if (!content || idx < 0 || this.turns[idx].role !== 'user' || this.busy) return;
+    if (content === this.turns[idx].content) {
+      this.retryFrom(turnId);
+      return;
+    }
+    const dropped = this.turns.length - idx - 1;
+    const restore = this.#snapshot();
+    this.turns = [...this.turns.slice(0, idx), { ...this.turns[idx], content, at: Date.now() }];
+    this.#dispatch();
+    if (dropped > 0) {
+      notices.show(
+        `Replaced ${dropped} ${dropped === 1 ? 'reply' : 'turns'} after that prompt.`,
+        restore
+      );
+    }
+  }
+
+  /** The transcript as it stands, as a closure that puts it back verbatim. */
+  #snapshot(): () => void {
+    const turns = this.turns;
+    const traces = this.traces;
+    const title = this.title;
+    return () => {
+      if (this.busy) this.stop();
+      this.turns = turns;
+      this.traces = traces;
+      this.title = title;
+      this.#save();
+    };
   }
 
   /** Show another sample of a reply slot; it becomes the one the next turn is conditioned on. */
@@ -207,6 +329,12 @@ class Chat {
       role: t.role,
       content: t.content
     }));
+    // Provenance is captured here, not read back later: by the time you compare two samples
+    // the sliders have moved and the checkpoint may have been swapped underneath them.
+    const params = { ...settings.params };
+    const offDefault = (Object.keys(params) as (keyof SamplingParams)[]).filter(
+      (k) => params[k] !== settings.defaults[k]
+    );
     const reply: Turn = {
       id: newId(),
       role: 'assistant',
@@ -214,7 +342,10 @@ class Chat {
       at: Date.now(),
       stats: null,
       error: null,
-      samples: samples?.length ? samples : undefined
+      samples: samples?.length ? samples : undefined,
+      params,
+      offDefault: offDefault.length ? offDefault : undefined,
+      checkpointStep: model.info?.checkpoint.step
     };
     this.traces = { ...this.traces, [reply.id]: new ByteTrace() };
     this.turns = [...this.turns, reply];
@@ -347,24 +478,60 @@ class Chat {
   #saveNow(): void {
     this.#saveTimer = null;
     if (this.turns.length === 0) return;
-    const title = titleFor(this.turns);
+    const title = this.#titleLocked ? this.title : titleFor(this.turns);
+    this.title = title;
     const record: StoredConversation = {
       id: this.id,
       title,
       turns: this.turns,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
+      titleLocked: this.#titleLocked || undefined
     };
     persist.write(convKey(this.id), record);
     persist.write(tracesKey(this.id), this.#serializeTraces());
     const rest = this.index.filter((c) => c.id !== this.id);
     const next = [{ id: this.id, title, updatedAt: record.updatedAt }, ...rest];
-    for (const stale of next.slice(MAX_CONVERSATIONS)) {
+    const evicted = next.slice(MAX_CONVERSATIONS);
+    for (const stale of evicted) {
       persist.drop(convKey(stale.id));
       persist.drop(tracesKey(stale.id));
     }
     this.index = next.slice(0, MAX_CONVERSATIONS);
     persist.write(INDEX_KEY, this.index);
     persist.write(CURRENT_KEY, this.id);
+    // Their storage is already gone so there is nothing to undo, but they should not
+    // vanish in silence either.
+    if (evicted.length === 1) {
+      notices.show(`“${evicted[0].title}” dropped — only ${MAX_CONVERSATIONS} are kept.`);
+    } else if (evicted.length > 1) {
+      notices.show(`${evicted.length} old conversations dropped — only ${MAX_CONVERSATIONS} are kept.`);
+    }
+  }
+
+  // ------------------------------------------------------------------- export
+
+  /** The open conversation comes from live state; any other is read back from storage. */
+  #materialise(id: string): { title: string; turns: Turn[] } | null {
+    if (id === this.id) return { title: this.title, turns: this.turns };
+    const stored = persist.read<StoredConversation | null>(convKey(id), null);
+    return stored ? { title: stored.title, turns: stored.turns } : null;
+  }
+
+  /** Markdown to read, JSON to analyse — the JSON carries provenance and counters. */
+  exportAs(id: string, format: 'md' | 'json'): void {
+    const conv = this.#materialise(id);
+    if (!conv) return;
+    const slug = conv.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const name = `${slug || 'conversation'}.${format}`;
+    const text =
+      format === 'json'
+        ? JSON.stringify(
+            { id, title: conv.title, model: model.info?.name ?? null, turns: conv.turns },
+            null,
+            2
+          )
+        : toMarkdown(conv.title, conv.turns, model.info?.name ?? 'Mote');
+    download(name, format === 'json' ? 'application/json' : 'text/markdown', text);
   }
 
   /** Traces of the newest replies (samples included), newest first, capped; a reply still streaming is skipped. */
