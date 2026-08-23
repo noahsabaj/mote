@@ -15,11 +15,13 @@ python -m mote.train.profile_step --data data/local_mix --preset flagship --chun
 echo "== 2. where the time and memory go"
 if command -v nsys >/dev/null; then
   nsys profile -o "$OUT/nsys_local_2048" --force-overwrite true --stats=true \
-    python -m mote.train.profile_step --data data/local_mix --preset local --init-from runs/overnight/last.pt --batch-size 4 --grad-accum 4 --bucket 64 --steps 20 > "$OUT/nsys_local_2048.txt" 2>&1
+    python -m mote.train.profile_step --data data/local_mix --preset local --init-from runs/overnight/last.pt --batch-size 4 --grad-accum 4 --bucket 64 --warmup 2 --timed 20 > "$OUT/nsys_local_2048.txt" 2>&1
   nsys profile -o "$OUT/nsys_flagship_16384" --force-overwrite true --stats=true \
-    python -m mote.train.profile_step --data data/local_mix --preset flagship --chunk-bytes 6 --seq-len 16384 --batch-size 1 --ckpt-main --steps 20 > "$OUT/nsys_flagship_16384.txt" 2>&1
+    python -m mote.train.profile_step --data data/local_mix --preset flagship --chunk-bytes 6 --seq-len 16384 --batch-size 1 --ckpt-main --warmup 2 --timed 20 > "$OUT/nsys_flagship_16384.txt" 2>&1
 else
-  echo "nsys not installed (sudo dnf install nsight-systems from the NVIDIA repo); skipping the trace"
+  echo "nsys not installed (sudo dnf install nsight-systems from the NVIDIA repo); writing Chrome traces instead"
+  python -m mote.train.profile_step --data data/local_mix --preset local --init-from runs/overnight/last.pt --batch-size 4 --grad-accum 4 --bucket 64 --trace "$OUT/trace_local_2048.json" > /dev/null
+  python -m mote.train.profile_step --data data/local_mix --preset flagship --chunk-bytes 6 --seq-len 16384 --batch-size 1 --ckpt-main --trace "$OUT/trace_flagship_16384.json" > /dev/null
 fi
 python - "$OUT" <<'EOF'
 # peak-memory snapshot of one flagship step, grouped by allocation site (torch's own recorder)
@@ -27,9 +29,9 @@ import sys, torch, pickle, collections
 from mote.train import profile_step
 out = sys.argv[1]
 torch.cuda.memory._record_memory_history(max_entries=200000)
-sys.argv = ["profile_step", "--data", "data/local_mix", "--preset", "flagship", "--chunk-bytes", "6", "--seq-len", "16384", "--batch-size", "1", "--ckpt-main", "--steps", "3"]
 try:
-    profile_step.main()
+    profile_step.main(["--data", "data/local_mix", "--preset", "flagship", "--chunk-bytes", "6", "--seq-len", "16384",
+                       "--batch-size", "1", "--ckpt-main", "--warmup", "1", "--timed", "2"])
 finally:
     snap = torch.cuda.memory._snapshot()
     pickle.dump(snap, open(f"{out}/memory_flagship_16384.pickle", "wb"))
@@ -56,7 +58,7 @@ echo "== 5. sharing the card today: start a training run, then time replies"
 echo "   (manual: 'mote service start' on cuda, a 2048 profile in another shell, then the timing script in docs/results/2026-08-23-prefix-cache.md)"
 
 echo "== 6. disk: memmap read throughput of one shard (WSL2 came through 9P)"
-SHARD=$(ls data/local_mix/*.bin 2>/dev/null | head -1)
+SHARD=data/local_mix.train.bin
 if [ -n "$SHARD" ]; then
   sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
   dd if="$SHARD" of=/dev/null bs=16M 2>&1 | tail -1
