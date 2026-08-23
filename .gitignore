@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
-data/
+/data/
 runs/
 checkpoints/
 web/node_modules/
