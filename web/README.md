@@ -33,8 +33,10 @@ itself contains no placeholder values: a field the backend has not sent renders 
 as a zero.
 
 The mock streams at 26–57 bytes/s, opens chunks on word-like units, accepts runs of bytes from
-the multi-byte head, includes a multi-byte UTF-8 character in every reply so the `pending` path
-is exercised, and emits `stats` every 16 bytes and `diagnostics` at each chunk boundary. One
+the multi-byte head — cutting a draft short sometimes, so the `fix` source and the
+`spec_rounds` / `spec_fixes` / `spec_replays` counters are exercised the way the engine reports
+them — includes a multi-byte UTF-8 character in every reply so the `pending` path is exercised,
+and emits `stats` every 16 bytes and `diagnostics` at each chunk boundary. One
 training run reports `running: true` and its log genuinely grows while the dev server is up, so
 the polling path is real. One checkpoint reports `val_bpb: null`, which the backend does for any
 run whose log has no eval record yet, so the "not measured" rendering is visible in dev too.

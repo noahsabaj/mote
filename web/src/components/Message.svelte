@@ -16,6 +16,10 @@
   const streaming = $derived(chat.streamingId === turn.id);
   const text = $derived(streaming && trace ? trace.text : turn.content);
   const empty = $derived(streaming && text.length === 0);
+  // A turn that failed before its first byte has a trace object but nothing in it, so the
+  // byte-level tools and Copy would open on an empty reply. Only "Again" is any use there.
+  const hasBytes = $derived(!!trace && trace.count > 0);
+  const hasText = $derived((turn.content || text).length > 0);
 
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -110,7 +114,7 @@
               </button>
             </span>
           {/if}
-          {#if trace}
+          {#if hasBytes}
             <button
               class="quiet"
               aria-pressed={ui.structure}
@@ -122,10 +126,12 @@
             </button>
             <button class="quiet" onclick={() => oninspect(turn.id)}>Bytes</button>
           {/if}
-          <button class="quiet" onclick={copy}>
-            <Icon name={copied ? 'check' : 'copy'} size={14} />
-            {copied ? 'Copied' : 'Copy'}
-          </button>
+          {#if hasText}
+            <button class="quiet" onclick={copy}>
+              <Icon name={copied ? 'check' : 'copy'} size={14} />
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          {/if}
           {#if isLast}
             <button class="quiet" onclick={() => chat.regenerate()} disabled={chat.busy}>
               <Icon name="redo" size={14} />

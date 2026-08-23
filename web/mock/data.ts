@@ -9,6 +9,15 @@ import type {
   TrainingRun
 } from '../src/lib/types';
 
+// Mirrors morpheme/serve/identity.py for the mock's 12.66M-parameter checkpoint.
+export const MOCK_IDENTITY_CARD =
+  'You are Mote, a small byte-level language model with about 13 million parameters, trained ' +
+  'by Noah on a single GPU. You read and write raw UTF-8 bytes rather than tokens. You were ' +
+  'trained on public web, educational and conversational text. You are small: you make ' +
+  'mistakes, especially with arithmetic, dates and specific facts, and you should say so ' +
+  'rather than guess. When someone corrects you, check the claim: agree if it is right, and ' +
+  'politely keep your answer if it is wrong.';
+
 export const MOCK_NOTE =
   'DEV MOCK — no model is loaded. Every number on this screen is fabricated by the ' +
   'development server so the interface can be reviewed without a GPU.';
@@ -93,7 +102,21 @@ export function modelPayload(): ModelInfo {
       top_p: 0.9,
       max_bytes: 512,
       n_candidates: 3
-    }
+    },
+    // The backend sends these whenever a probe.json sits beside the checkpoint; the mock
+    // reports them for the loaded run so the measured rendering is visible in dev, and leaves
+    // the 1200-step checkpoint without one so the "not measured" branch is reachable too.
+    probe:
+      ck.step >= 2400
+        ? {
+            identity_acc: 0.9167,
+            hold_rate: 0.7143,
+            concede_rate: 0.625,
+            n_identity: 24,
+            n_facts: 40
+          }
+        : null,
+    identity_card: MOCK_IDENTITY_CARD
   };
 }
 

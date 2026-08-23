@@ -28,7 +28,11 @@
 
   $effect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    queueMicrotask(() => focusables()[0]?.focus());
+    // A sheet with something to fill in says so; the rest open on Close, which is the first
+    // control in the header.
+    queueMicrotask(() =>
+      (panel?.querySelector<HTMLElement>('[data-autofocus]') ?? focusables()[0])?.focus()
+    );
     return () => previous?.focus?.();
   });
 

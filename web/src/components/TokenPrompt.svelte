@@ -64,6 +64,7 @@
           maxlength="6"
           autocomplete="one-time-code"
           placeholder="000000"
+          data-autofocus
         />
       </label>
       <button type="submit" disabled={busy || code.replace(/\D/g, '').length !== 6}>Pair</button>
@@ -144,7 +145,6 @@
     outline-offset: 1px;
   }
   button {
-    align-self: flex-start;
     font: inherit;
     font-size: 0.875rem;
     padding: 0.5rem 1rem;

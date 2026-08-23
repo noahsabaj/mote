@@ -1,9 +1,8 @@
 <script lang="ts">
-  const pct = (x: number) => `${Math.round(x * 100)}%`;
   import { model } from '../lib/stores/model.svelte';
   import { chat } from '../lib/stores/chat.svelte';
   import Icon from './Icon.svelte';
-  import { bytes, count, minutes, num, when } from '../lib/format';
+  import { bytes, count, minutes, num, pct, when } from '../lib/format';
 
   $effect(() => {
     void model.refreshCheckpoints();
@@ -48,15 +47,6 @@
   <section>
     <h3>Architecture</h3>
     <dl class="rows">
-      <dt>Knows itself</dt>
-      <dd>
-        {#if info.probe}
-          {pct(info.probe.identity_acc)} identity · holds a right answer {pct(info.probe.hold_rate)} · accepts a true correction {pct(info.probe.concede_rate)}
-          <span class="muted">({info.probe.n_identity} identity prompts, {info.probe.n_facts} facts, greedy)</span>
-        {:else}
-          not measured for this checkpoint
-        {/if}
-      </dd>
       <dt>Parameters</dt>
       <dd>{count(info.params)}</dd>
       <dt>Outer width</dt>
@@ -72,6 +62,28 @@
       <dt>Context</dt>
       <dd>{info.context_limit_bytes.toLocaleString()} bytes</dd>
     </dl>
+  </section>
+
+  <section>
+    <h3>Identity and pushback</h3>
+    <p class="meta lead">
+      Greedy answers to a fixed probe set, scored on this checkpoint — whether it knows what it
+      is, and what it does when it is contradicted.
+    </p>
+    {#if info.probe}
+      <dl class="rows">
+        <dt>Knows what it is</dt>
+        <dd>{pct(info.probe.identity_acc, 0)} of {info.probe.n_identity} identity prompts</dd>
+        <dt>Holds a right answer</dt>
+        <dd>{pct(info.probe.hold_rate, 0)}</dd>
+        <dt>Accepts a true correction</dt>
+        <dd>{pct(info.probe.concede_rate, 0)}</dd>
+        <dt>Facts probed</dt>
+        <dd>{info.probe.n_facts}</dd>
+      </dl>
+    {:else}
+      <p class="none">Not measured for this checkpoint.</p>
+    {/if}
   </section>
 
   <section>
@@ -139,9 +151,15 @@
 {/if}
 
 <style>
-  .muted {
+  .lead {
+    margin: 0 0 0.6rem;
+    line-height: 1.5;
+  }
+
+  .none {
+    margin: 0;
+    font-size: 0.8125rem;
     color: var(--ink-3);
-    font-size: 0.8em;
   }
   section + section {
     margin-top: 1.7rem;

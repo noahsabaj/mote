@@ -105,6 +105,13 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
   let chunksClosed = 0;
   let mbpProposed = 0;
   let mbpAccepted = 0;
+  // Speculative accounting, same three counters morpheme/serve/engine.py keeps: one round per
+  // draft, one fix when verification rejects a draft byte, one replay when a prefix was
+  // already accepted and the state has to be rolled back.
+  let specRounds = 0;
+  let specFixes = 0;
+  let specReplays = 0;
+  let pendingFix = false;
   let pendingBuf: number[] = [];
   let decoded = '';
   const boundaryHistory: number[] = [];
@@ -120,6 +127,9 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
       mbp_proposed: mbpProposed,
       mbp_accepted: mbpAccepted,
       mbp_accept_rate: mbpProposed ? mbpAccepted / mbpProposed : 0,
+      spec_rounds: specRounds,
+      spec_fixes: specFixes,
+      spec_replays: specReplays,
       context_bytes: promptBytes + emitted,
       context_limit: contextLimit
     };
@@ -171,14 +181,24 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
     }
 
     // Multi-byte head: once in a while it proposes ahead and the proposal is accepted.
-    let source: 'nbp' | 'mbp' = 'nbp';
+    let source: 'nbp' | 'mbp' | 'fix' = 'nbp';
     if (mbpRun > 0) {
       mbpRun -= 1;
       source = 'mbp';
       mbpAccepted += 1;
+    } else if (pendingFix) {
+      // The draft was cut short: this byte is the correction verification drew instead.
+      pendingFix = false;
+      source = 'fix';
     } else if (boundary && Math.random() < 0.42) {
       mbpProposed += params.n_candidates;
-      const take = 1 + Math.floor(Math.random() * Math.max(1, params.n_candidates - 1));
+      const take = 1 + Math.floor(Math.random() * Math.max(1, params.n_candidates));
+      specRounds += 1;
+      if (take < params.n_candidates) {
+        specFixes += 1;
+        specReplays += 1; // take >= 1 here, so a prefix was always committed first
+        pendingFix = true;
+      }
       mbpAccepted += 1;
       mbpRun = take - 1;
       source = 'mbp';
