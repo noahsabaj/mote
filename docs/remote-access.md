@@ -10,11 +10,11 @@ public, TLS is handled for you, and no router or firewall changes are needed.
    Install the Tailscale app on the phone and sign in with the same account.
 2. In the admin console (https://login.tailscale.com/admin/dns) make sure **MagicDNS** and
    **HTTPS certificates** are enabled (both are one click; MagicDNS is on by default).
-3. Generate a token and start the studio with it (PowerShell, repo root):
+3. Generate a token and start the studio with it (PowerShell, repo root — the project venv's Python, not the global `python`, which has no torch):
    ```powershell
-   $env:MORPHEME_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(24))"
+   $env:MORPHEME_TOKEN = .\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(24))"
    $env:MORPHEME_TOKEN                      # copy this to the phone once
-   python -m morpheme.serve.app --checkpoint runs/pilot_sft/last.pt --device cpu --port 7861
+   .\.venv\Scripts\python.exe -m morpheme.serve.app --checkpoint runs/pilot_sft/last.pt --device cpu --port 7861
    ```
    The server keeps listening on `127.0.0.1` only — Tailscale does the exposure.
    Without a token the server refuses to bind anything but loopback (`--no-auth` overrides).
@@ -37,7 +37,7 @@ public internet, and the studio is not hardened for it.
 ## Home Wi-Fi only (no install)
 
 ```powershell
-python -m morpheme.serve.app --checkpoint runs/pilot_sft/last.pt --device cpu --port 7861 --host 0.0.0.0 --token <token>
+.\.venv\Scripts\python.exe -m morpheme.serve.app --checkpoint runs/pilot_sft/last.pt --device cpu --port 7861 --host 0.0.0.0 --token <token>
 ```
 then `http://192.168.1.135:7861` from any device on the LAN (Windows Firewall already allows
 Python inbound; the IP is the PC's current Ethernet address). WSL2 servers are NAT'd and are
