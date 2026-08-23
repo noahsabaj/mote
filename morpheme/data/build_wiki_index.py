@@ -52,7 +52,7 @@ def open_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=OFF")
-    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS intros USING fts5(title, body, url UNINDEXED, tokenize='porter unicode61')")
+    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS intros USING fts5(title, body, url UNINDEXED, file UNINDEXED, tokenize='porter unicode61')")
     conn.execute("CREATE TABLE IF NOT EXISTS done(file TEXT PRIMARY KEY, rows INTEGER, seconds REAL)")
     return conn
 
@@ -108,23 +108,27 @@ def build(out: Path, files: int, max_bytes: int, keep: bool, cache_dir: Path) ->
         if name in finished:
             continue
         t0 = time.time()
+        # a killed run may have left part of this file behind: drop it rather than duplicate it
+        conn.execute("DELETE FROM intros WHERE file = ?", (name,))
+        conn.commit()
         local = hf_hub_download(REPO, name, repo_type="dataset", local_dir=cache_dir)
-        pf = pq.ParquetFile(local)
         n = 0
         batch_rows: List[tuple] = []
-        for batch in pf.iter_batches(batch_size=4000, columns=["title", "text", "url"]):
-            for title, text, url in zip(batch.column("title").to_pylist(), batch.column("text").to_pylist(), batch.column("url").to_pylist()):
-                body = intro_of(text or "", max_bytes)
-                if len(body.encode("utf-8")) < 40:
-                    continue
-                batch_rows.append((title or "", body, url or ""))
-            if len(batch_rows) >= 20000:
-                conn.executemany("INSERT INTO intros(title, body, url) VALUES (?, ?, ?)", batch_rows)
-                conn.commit()
-                n += len(batch_rows)
-                batch_rows = []
+        with open(local, "rb") as fh:  # closed before the delete below: Windows refuses to remove open files
+            pf = pq.ParquetFile(fh)
+            for batch in pf.iter_batches(batch_size=4000, columns=["title", "text", "url"]):
+                for title, text, url in zip(batch.column("title").to_pylist(), batch.column("text").to_pylist(), batch.column("url").to_pylist()):
+                    body = intro_of(text or "", max_bytes)
+                    if len(body.encode("utf-8")) < 40:
+                        continue
+                    batch_rows.append((title or "", body, url or "", name))
+                if len(batch_rows) >= 20000:
+                    conn.executemany("INSERT INTO intros(title, body, url, file) VALUES (?, ?, ?, ?)", batch_rows)
+                    conn.commit()
+                    n += len(batch_rows)
+                    batch_rows = []
         if batch_rows:
-            conn.executemany("INSERT INTO intros(title, body, url) VALUES (?, ?, ?)", batch_rows)
+            conn.executemany("INSERT INTO intros(title, body, url, file) VALUES (?, ?, ?, ?)", batch_rows)
             n += len(batch_rows)
         conn.execute("INSERT INTO done(file, rows, seconds) VALUES (?, ?, ?)", (name, n, time.time() - t0))
         conn.commit()
