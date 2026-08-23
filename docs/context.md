@@ -33,9 +33,9 @@ meter in the studio, `morpheme.eval.needle_probe`), and how long the window is a
 
 * **16384 bytes from the first step** (decided; ~1.94× per-byte cost, so ≈2 weeks local instead of
   ≈1 at the same MFU). ~3000 chunks in the main network; positions trained to that length.
-* **Gate**: `profile_step --seq-len 16384 --batch-size 1 --ckpt-main` on the 4060 Ti once the chain
-  frees it (estimate: ~2–3 GB activations + 1.6 GB weights/optimizer, should fit). **Fallback**:
-  8192 locally.
+* **Gate — passed 2026-08-23**: `profile_step --preset flagship --chunk-bytes 6 --seq-len 16384 --batch-size 1
+  --ckpt-main` on the 4060 Ti: **6.34 GB peak**, 42 KB/s, 19.3 TFLOPS (≈ 44 % MFU) — 8192 was 4.17 GB at the
+  same 42 KB/s, 4096 3.06 GB at 29 KB/s. The preset now says 16384. (Fallback 8192 stays on paper.)
 * **Long documents**: a ~10 % shard of documents ≥ 8 KB (full Wikipedia articles, Project Gutenberg
   books, long fineweb-edu pages; code when an ungated source is picked) mixed in with `--mix`; SFT
   packs multi-turn conversations to the window.

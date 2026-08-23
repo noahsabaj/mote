@@ -142,12 +142,12 @@ class MorphemeConfig:
 
     @classmethod
     def flagship(cls) -> "MorphemeConfig":
-        """~100M params target for the H100 run; final dims set after the pilot measures throughput."""
+        """~105M params, 16384-byte window; trains locally on the 4060 Ti (42 KB/s, ~44% MFU at batch 1 in the forced-6-bytes/chunk profile)."""
         return cls(
             d_model_outer=512,
             encoder_layers=3,
             decoder_layers=3,
             main=RelationCfg(n_layers=12, d_model=768, n_heads=8, d_ff=2048),
             mbp=MBPCfg(n_layers=2, n_heads=8, d_ff=2048),
-            max_seq_len=4096,
+            max_seq_len=16384,  # decided 2026-08-23 (docs/context.md); profiled at batch 1 + ckpt: 6.34 GB peak on the 4060 Ti
         )
