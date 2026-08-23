@@ -109,29 +109,35 @@ def set_lr(opt, lr: float):
 
 
 # --------------------------------------------------------------------------------------
-def _masked_ce(logits: torch.Tensor, targets: torch.Tensor, loss_mask: Optional[torch.Tensor]) -> torch.Tensor:
+def _masked_ce_sum(logits: torch.Tensor, targets: torch.Tensor, loss_mask: Optional[torch.Tensor]):
+    """(sum of per-token CE over counted tokens, number of counted tokens) — both 0-dim tensors."""
     V = logits.shape[-1]
-    if loss_mask is None:
-        return F.cross_entropy(logits.reshape(-1, V).float(), targets.reshape(-1))
     per = F.cross_entropy(logits.reshape(-1, V).float(), targets.reshape(-1), reduction="none")
+    if loss_mask is None:
+        return per.sum(), torch.tensor(float(per.numel()), device=per.device)
     w = loss_mask.reshape(-1).float()
-    return (per * w).sum() / w.sum().clamp(min=1.0)
+    return (per * w).sum(), w.sum()
 
 
 def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: float, mbp_weight: float, ratio_weight: float, loss_mask: Optional[torch.Tensor] = None):
+    """Returns (loss_unnormalised, n_tokens, stats, out). The loss is a SUM over counted tokens (plus the
+    ratio loss scaled by the token count), so that gradient accumulation normalises ONCE by the total
+    token count across micro-batches — a mean of per-micro-batch means would up-weight windows with few
+    assistant bytes (SFT). Every stat is a 0-dim device tensor: nothing here synchronises."""
     inputs, targets = batch[:, :-1], batch[:, 1:]
     tmask = loss_mask[:, 1:] if loss_mask is not None else None  # mask is per target position
     out = model(inputs)
-    ce = _masked_ce(out.logits, targets, tmask)
+    ce_sum, n = _masked_ce_sum(out.logits, targets, tmask)
     mask = torch.ones_like(inputs, dtype=torch.bool)
     lr_ = ratio_loss(out.routing.boundary_prob, out.routing.boundary_mask, mask, target_ratio)
-    loss = ce + ratio_weight * lr_
-    stats = {"ce": ce.item(), "ratio": lr_.item(), "bpic": bytes_per_chunk(out.routing.boundary_mask, mask)}
+    n_safe = n.clamp(min=1.0)
+    loss = ce_sum + ratio_weight * lr_ * n_safe
+    stats = {"ce_sum": ce_sum.detach(), "n": n.detach(), "ratio": lr_.detach(), "bpic": bytes_per_chunk(out.routing.boundary_mask, mask)}
     if out.mbp_logits is not None and mbp_weight > 0:
-        ce_m = _masked_ce(out.mbp_logits, targets, tmask)
-        loss = loss + mbp_weight * ce_m
-        stats["ce_mbp"] = ce_m.item()
-    return loss, stats, out
+        ce_m_sum, _ = _masked_ce_sum(out.mbp_logits, targets, tmask)
+        loss = loss + mbp_weight * ce_m_sum
+        stats["ce_mbp_sum"] = ce_m_sum.detach()
+    return loss, n_safe, stats, out
 
 
 @torch.no_grad()
@@ -243,6 +249,7 @@ def main(argv=None):
     ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"], help="muon: Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest")
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
+    ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--sft", action="store_true", help="train on an SFT shard (assistant-byte loss mask)")
@@ -267,6 +274,8 @@ def main(argv=None):
 
     if args.bucket is not None:
         cfg.dc.chunk_bucket = args.bucket
+    if args.no_mbp:
+        cfg.mbp.enabled = False
     model = HNetForCausalLM(cfg, device=device)
     if args.ckpt_main:
         model.main_network.grad_checkpoint = True
@@ -307,21 +316,29 @@ def main(argv=None):
     model.train()
 
     def train_step(target_ratio: float):
+        """One optimizer step. Returns a dict of 0-dim device tensors; call float() on them only when
+        logging — every .item() here would drain the launch queue (40 syncs/step before this)."""
         opt.zero_grad(set_to_none=True)
         agg = {}
+        total_n = None
         for _ in range(args.grad_accum):
             batch, lmask = train_shard.sample_batch(args.batch_size, args.seq_len, gen)
             batch = batch.to(device, non_blocking=True)
             lmask = lmask.to(device, non_blocking=True) if lmask is not None else None
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                loss, stats, _ = compute_losses(fwd, batch, target_ratio, cfg.mbp.loss_weight, cfg.dc.ratio_loss_weight, lmask)
-            (loss / args.grad_accum).backward()
+                loss, n, stats, _ = compute_losses(fwd, batch, target_ratio, cfg.mbp.loss_weight, cfg.dc.ratio_loss_weight, lmask)
+            loss.backward()  # unnormalised sum; normalised once below
+            total_n = n if total_n is None else total_n + n
             for k, v in stats.items():
-                agg[k] = agg.get(k, 0.0) + v / args.grad_accum
-        gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip).item()
+                agg[k] = v if k not in agg else agg[k] + v
+        grads = [p.grad for p in model.parameters() if p.grad is not None]
+        torch._foreach_div_(grads, total_n)
+        gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
         opt.step()
-        agg["grad_norm"] = gnorm
-        return agg
+        out = {"ce": agg["ce_sum"] / total_n, "ratio": agg["ratio"] / args.grad_accum, "bpic": agg["bpic"] / args.grad_accum, "grad_norm": gnorm}
+        if "ce_mbp_sum" in agg:
+            out["ce_mbp"] = agg["ce_mbp_sum"] / total_n
+        return out
 
     if total_steps == 0:
         probe_steps = 5
@@ -358,6 +375,7 @@ def main(argv=None):
         if step % args.log_every == 0:
             dt = time.time() - t_log
             t_log = time.time()
+            stats = {k: float(v) for k, v in stats.items()}  # the one sync per logging interval
             rec = {"lr": lr, "target_ratio": target_ratio, "bytes_per_sec": tokens_per_step * args.log_every / dt, "train_bpb": stats["ce"] / LN2}
             rec.update(stats)
             rec["tflops"] = flops_per_byte(model, args.seq_len, stats.get("bpic", 1.0)) * rec["bytes_per_sec"] / 1e12

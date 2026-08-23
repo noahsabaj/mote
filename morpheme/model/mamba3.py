@@ -165,7 +165,7 @@ class Mamba3Mixer(nn.Module):
             out = mamba3_siso_combined(
                 Q=Cn, K=Bn, V=x, ADT=ADT, DT=DT, Trap=trap,
                 Q_bias=self.C_bias.squeeze(1), K_bias=self.B_bias.squeeze(1),
-                Angles=angles, D=self.D, Z=z, chunk_size=self.chunk_size,
+                Angles=angles, D=self.D if torch.is_grad_enabled() else self.D.detach(), Z=z, chunk_size=self.chunk_size,
                 Input_States=None, return_final_states=return_final_states, cu_seqlens=None,
             )
             if return_final_states:

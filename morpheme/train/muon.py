@@ -13,8 +13,8 @@ import torch
 def newton_schulz(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
     """Quintic Newton-Schulz iteration approximating the orthogonal factor of G (bf16, as in the reference)."""
     a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.to(torch.bfloat16)
-    X = X / (X.norm() + eps)
+    X = G.to(torch.float32)
+    X = (X / (X.norm() + eps)).to(torch.bfloat16)  # normalise in fp32, iterate in bf16 (reference practice)
     transposed = X.shape[0] > X.shape[1]
     if transposed:
         X = X.T
@@ -57,16 +57,23 @@ class Muon(torch.optim.Optimizer):
 
 
 def split_muon_params(model) -> tuple[list, list]:
-    """(muon_params, other_params): hidden 2-D matrices go to Muon; embeddings / tied head and everything
-    with ndim != 2 go to AdamW."""
-    emb_ids = {id(model.embeddings.weight), id(model.lm_head.weight)}
+    """(muon_params, other_params): hidden 2-D matrices go to Muon; embeddings / tied head, everything
+    with ndim != 2, and Mamba-3's `in_proj` go to AdamW. `in_proj` row-stacks eight unrelated
+    sub-projections (z, x, B, C, dt, A, trap, angles); orthogonalising it as one matrix is measured to
+    be worse than AdamW on Mamba (2608.03941), while `out_proj` carries Muon's gain."""
+    from ..model.mamba3 import Mamba3Mixer
+
+    skip = {id(model.embeddings.weight), id(model.lm_head.weight)}
+    for m in model.modules():
+        if isinstance(m, Mamba3Mixer):
+            skip.add(id(m.in_proj.weight))
     muon, other = [], []
     seen = set()
     for p in model.parameters():
         if id(p) in seen:
             continue
         seen.add(id(p))
-        if p.ndim == 2 and id(p) not in emb_ids:
+        if p.ndim == 2 and id(p) not in skip:
             muon.append(p)
         else:
             other.append(p)

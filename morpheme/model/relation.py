@@ -39,6 +39,22 @@ def _rope_cos_sin(positions: torch.Tensor, dim: int, theta: float, dtype: torch.
     return emb.cos().to(dtype), emb.sin().to(dtype)
 
 
+_ROPE_CACHE: dict = {}
+
+
+def rope_tables(S: int, T: int, dim: int, theta: float, dtype: torch.dtype, device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """cos/sin for absolute positions S..S+T-1, memoised: the same table is needed by every layer
+    of every forward, and with chunk-count bucketing only a handful of (S, T) pairs ever occur."""
+    key = (S, T, dim, theta, dtype, str(device))
+    hit = _ROPE_CACHE.get(key)
+    if hit is None:
+        if len(_ROPE_CACHE) >= 32:
+            _ROPE_CACHE.clear()
+        hit = _rope_cos_sin(torch.arange(S, S + T, device=device), dim, theta, dtype)
+        _ROPE_CACHE[key] = hit
+    return hit
+
+
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1, x2 = x.chunk(2, dim=-1)
     return torch.cat([-x2, x1], dim=-1)
@@ -100,14 +116,17 @@ class FullRelation(nn.Module):
         """Rotate information states across adjacent head pairs. info: [B, H, T, dh]."""
         if not self.use_givens:
             return info
+        B, H, T, dh = info.shape
         c = torch.cos(self.theta).to(info.dtype)[None, :, None, None]
         s = torch.sin(self.theta).to(info.dtype)[None, :, None, None]
-        ia = info[:, self.pair_a]
-        ib = info[:, self.pair_b]
-        out = info.clone()
-        out[:, self.pair_a] = c * ia - s * ib
-        out[:, self.pair_b] = s * ia + c * ib
-        return out
+        # even layers pair (0,1),(2,3),...; odd layers pair (1,2),...,(H-1,0): roll the head axis so
+        # both are the same adjacent-pair view. Same arithmetic as the index/scatter form, no clone.
+        odd = self.layer_idx % 2 == 1
+        x = torch.roll(info, -1, dims=1) if odd else info
+        x = x.view(B, H // 2, 2, T, dh)
+        ia, ib = x[:, :, 0], x[:, :, 1]
+        out = torch.stack([c * ia - s * ib, s * ia + c * ib], dim=2).view(B, H, T, dh)
+        return torch.roll(out, 1, dims=1) if odd else out
 
     def forward(
         self,
@@ -129,8 +148,7 @@ class FullRelation(nn.Module):
         p2 = self.w2(x).view(B, T, H, dh).transpose(1, 2)
         info = self.wi(x).view(B, T, H, dh).transpose(1, 2)
 
-        pos = torch.arange(S, S + T, device=x.device)
-        cos, sin = _rope_cos_sin(pos, dh, self.rope_theta, x.dtype)
+        cos, sin = rope_tables(S, T, dh, self.rope_theta, x.dtype, x.device)
         p1 = _apply_rope(p1, cos, sin)
         p2 = _apply_rope(p2, cos, sin)
         info = self._givens(info)

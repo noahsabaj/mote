@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from ..config import MorphemeConfig
 from .blocks import Isotropic, make_mamba3_stack, make_relation_stack
 from .dc import ChunkLayer, DeChunkLayer, DeChunkState, RoutingModule, RoutingOutput, RoutingState, ste_ones
-from .mbp import LCAHead, lca_mask
+from .mbp import LCAHead
 
 
 @dataclass
@@ -146,7 +146,7 @@ class HNetForCausalLM(nn.Module):
         if self.mbp_head is not None:
             start_state = torch.gather(h, 1, start[:, :, None].expand(-1, -1, D0))
             x = self.mbp_head.build_inputs(z, start_state, offset)
-            x = self.mbp_head(x, lca_mask(chunk_id, mask))
+            x = self.mbp_head(x, chunk_id, mask)
             mbp_logits = self.lm_head(x)
         return HNetOutput(logits, mbp_logits, routing, chunk_id, offset)
 
@@ -261,5 +261,5 @@ class HNetForCausalLM(nn.Module):
         x = torch.cat(parts, dim=1)
         cid = torch.cat(ids, dim=1)
         valid = torch.ones_like(cid, dtype=torch.bool)
-        y = self.mbp_head(x, lca_mask(cid, valid))
+        y = self.mbp_head(x, cid, valid)
         return self.lm_head(y[:, -n:])

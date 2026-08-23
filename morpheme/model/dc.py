@@ -271,7 +271,7 @@ def atdc_target_ratio(step: int, total_steps: int, n_init: float, n_final: float
     return n_init + rho * (n_final - n_init)
 
 
-def bytes_per_chunk(boundary_mask: torch.Tensor, mask: torch.Tensor) -> float:
-    """Empirical compression: valid bytes / boundaries (BPIC)."""
-    nb = (boundary_mask & mask).sum().item()
-    return float(mask.sum().item()) / max(nb, 1)
+def bytes_per_chunk(boundary_mask: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Empirical compression: valid bytes / boundaries (BPIC), as a 0-dim tensor so the training
+    loop never synchronises on it (call float() at logging time)."""
+    return mask.sum() / (boundary_mask & mask).sum().clamp(min=1)

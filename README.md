@@ -75,7 +75,9 @@ wall-clock progress toward `--max-minutes`.
 
 Notes learned the hard way: on the 8 GB card under WSL2 use **batch 2 × accum 8** at 2048 bytes — batch 4 sits at the
 memory ceiling and the default allocator fragments across the ever-changing chunk counts (13 kB/s vs 80 kB/s measured);
-`expandable_segments` would fix the fragmentation but crashes the WSL2 driver. At initialization the router fires on
+`expandable_segments` would fix the fragmentation but crashed mid-run under WSL2: the error is WDDM refusing residency
+below the apparent free memory (WSL issue #41176), not the VMM bug of pytorch#192330 (this card reports attribute 110 = 0),
+so a retry with `per_process_memory_fraction` headroom is a legitimate experiment; native Linux has neither limit. At initialization the router fires on
 ~50% of bytes, so the materialized Relation attention is ~6× larger than after convergence. The Triton SSD kernel
 re-autotunes for every new chunk count, so the EMA dechunk uses a chunked pure-PyTorch scan instead.
 
@@ -96,6 +98,18 @@ Measured on the RTX 4060 Ti before this work: ~9 % MFU (42 kB/s on the 35M model
   same LR applies. An A/B, not a default.
 * `python -m morpheme.train.profile_step --preset local --data ~/data/local_mix` prints TFLOPS/MFU, per-module forward
   time, backward/optimizer time and the top CUDA kernels for one step.
+* **No per-step GPU syncs**: losses and stats stay on the device and are materialised once per logging interval
+  (the old loop had ~40 `.item()` syncs per optimizer step, each draining the launch queue).
+* **Block-local multi-byte head**: the LCA mask is exactly a contiguous causal window (own chunk + previous chunk),
+  so the head attends over two 64-byte blocks per query block instead of the whole sequence — identical result, O(L·W)
+  instead of O(L²) (`morpheme/model/mbp.py`, dense path kept as the reference; `--dense-mbp` in the profiler).
+* **Gradient accumulation normalises once** over the total token count (sum-of-losses / sum-of-tokens); the old
+  mean-of-means silently up-weighted SFT windows with few assistant bytes. Pretraining is unchanged.
+* Muon leaves Mamba-3's stacked `in_proj` on AdamW (measured worse under Muon on Mamba, 2608.03941); `out_proj`,
+  Relation and head matrices get Muon.
+* `TRITON_CACHE_AUTOTUNING=1` persists Triton autotune choices across processes (never on before; ~3 s → 0.3 s per
+  kernel per process). The benchmark chain sets it; put it in `~/.bashrc` on the training box.
+* Research log with the 2026 evidence behind these: `docs/research/efficiency-campaign-2026-08-23.md`.
 
 ## Serve
 

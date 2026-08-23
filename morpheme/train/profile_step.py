@@ -32,7 +32,9 @@ def main(argv=None):
     ap.add_argument("--data", required=True)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--seq-len", type=int, default=2048)
-    ap.add_argument("--grad-accum", type=int, default=1)
+    ap.add_argument("--grad-accum", type=int, default=8)
+    ap.add_argument("--dense-mbp", action="store_true", help="dense masked attention in the multi-byte head (reference path)")
+    ap.add_argument("--no-mbp", action="store_true", help="build the model without the multi-byte head")
     ap.add_argument("--warmup", type=int, default=4)
     ap.add_argument("--timed", type=int, default=6, help="unprofiled steps used for the throughput number")
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks")
@@ -50,8 +52,14 @@ def main(argv=None):
         import morpheme.model.relation as R
 
         R.USE_FLASH = False
+    if args.dense_mbp:
+        import morpheme.model.mbp as MBP
+
+        MBP.USE_BLOCK_LOCAL = False
+    if args.no_mbp:
+        cfg.mbp.enabled = False
     torch.manual_seed(0)
-    model = HNetForCausalLM(cfg, device=device, dtype=torch.bfloat16 if device.type == "cuda" else torch.float32)
+    model = HNetForCausalLM(cfg, device=device)  # fp32 parameters under autocast, exactly like the trainer
     if args.ckpt_main:
         model.main_network.grad_checkpoint = True
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, betas=(0.9, 0.95), fused=device.type == "cuda")
@@ -87,10 +95,10 @@ def main(argv=None):
             batch = batch.to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 with record_function("forward+loss"):
-                    loss, stats, _ = compute_losses(model, batch, cfg.dc.target_ratio_init, cfg.mbp.loss_weight, cfg.dc.ratio_loss_weight, None)
+                    loss, n, stats, _ = compute_losses(model, batch, cfg.dc.target_ratio_init, cfg.mbp.loss_weight, cfg.dc.ratio_loss_weight, None)
             with record_function("backward"):
-                (loss / args.grad_accum).backward()
-            bpic += stats.get("bpic", 0.0) / args.grad_accum
+                (loss / (n * args.grad_accum)).backward()
+            bpic = bpic + stats["bpic"] / args.grad_accum
         with record_function("optimizer"):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -106,6 +114,7 @@ def main(argv=None):
         bpic += step() / args.timed
     sync()
     sec = (time.time() - t0) / args.timed
+    bpic = float(bpic)
     bytes_per_step = args.batch_size * args.seq_len * args.grad_accum
     fl = flops_per_byte(model, args.seq_len, bpic)
     tflops = fl * bytes_per_step / sec / 1e12
@@ -113,6 +122,7 @@ def main(argv=None):
     print(json.dumps({
         "preset": args.preset, "params": model.num_params(), "batch": args.batch_size, "seq_len": args.seq_len,
         "grad_accum": args.grad_accum, "bucket": cfg.dc.chunk_bucket, "flash": not args.no_flash, "ckpt_main": args.ckpt_main,
+        "block_local_mbp": not args.dense_mbp, "mbp": not args.no_mbp,
         "sec_per_step": round(sec, 4), "bytes_per_sec": round(bytes_per_step / sec), "bytes_per_chunk": round(bpic, 2),
         "flops_per_byte_M": round(fl / 1e6, 1), "tflops": round(tflops, 2), "mfu": round(tflops / peak, 3) if peak else None,
         "peak_mem_GB": round(torch.cuda.max_memory_allocated() / 1e9, 2) if device.type == "cuda" else None,
