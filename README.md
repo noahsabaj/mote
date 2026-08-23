@@ -3,7 +3,8 @@
 A byte-level language model that learns its own tokenizer, and a studio for chatting with it and
 looking inside. Working name; the package is `morpheme/`.
 
-**Architecture** — a one-stage H-Net (Hwang, Wang & Gu, 2025) over raw UTF-8 bytes:
+**Architecture** — a Mamba/Relation hybrid: a one-stage H-Net (Hwang, Wang & Gu, 2025) over raw UTF-8 bytes, Mamba-3 at byte
+resolution outside, Transformer-style blocks with the Relation mixer (in place of attention) at chunk resolution inside:
 
 ```
 bytes ─▶ Mamba-3 encoder ─▶ dynamic chunking ─▶ Relation main network ─▶ dechunk (EMA) ─▶ Mamba-3 decoder ─▶ next byte
