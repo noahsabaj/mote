@@ -2,10 +2,19 @@
   // Every byte of one reply, windowed: only the rows on screen exist in the DOM, so a
   // 4096-byte reply costs ~30 nodes rather than 4096.
   import type { ByteTrace } from '../lib/trace.svelte';
+  import type { Turn } from '../lib/stores/chat.svelte';
   import Sparkline from './Sparkline.svelte';
   import { byteGlyph, hex, num, pct } from '../lib/format';
 
-  let { trace }: { trace: ByteTrace } = $props();
+  let { trace, turn }: { trace: ByteTrace; turn?: Turn } = $props();
+
+  // The stats line under a reply only flags the knobs that were off default. This is the
+  // place that states all of them, because this is where you come to compare two draws.
+  const drawnAt = $derived.by(() => {
+    const p = turn?.params;
+    if (!p) return null;
+    return `T ${p.temperature} · top-p ${p.top_p} · n ${p.n_candidates} · max ${p.max_bytes} B`;
+  });
 
   const ROW = 26;
   const OVERSCAN = 8;
@@ -63,6 +72,14 @@
     <dd>{trace.chunkCount}{trace.chunkCount ? ` · ${num(total / trace.chunkCount, 1)} B each` : ''}</dd>
     <dt>Parallel</dt>
     <dd>{pct(trace.mbpFraction(), 1)} of bytes came from the multi-byte head</dd>
+    {#if drawnAt}
+      <dt>Drawn at</dt>
+      <dd>{drawnAt}</dd>
+    {/if}
+    {#if turn?.checkpointStep !== undefined}
+      <dt>Checkpoint</dt>
+      <dd>step {turn.checkpointStep}</dd>
+    {/if}
   </dl>
   <button class="quiet" onclick={copyJson} title="Copy every row of this trace as JSON, for sharing or a notebook">
     {copied ? 'Copied' : 'Copy trace as JSON'}

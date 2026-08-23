@@ -79,7 +79,9 @@ export function ago(iso: string, now = Date.now()): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   const s = Math.floor((now - d.getTime()) / 1000);
-  if (s < 0) return when(iso); // clock skew — do not claim the future
+  // `now` comes from a coarse shared clock, so anything created since its last tick reads
+  // as slightly in the future. Only a real skew is worth falling back to a date for.
+  if (s < -60) return when(iso);
   if (s < 45) return 'just now';
   const m = Math.floor(s / 60);
   if (m < 60) return m <= 1 ? 'a minute ago' : `${m} minutes ago`;

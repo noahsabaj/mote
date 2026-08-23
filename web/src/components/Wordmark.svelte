@@ -2,6 +2,7 @@
   // The mark beside the name. The mark is the boundary ring from brand/build.py (a continuous
   // stream with one break, and the mote sitting in the break), at the 32-px optical weights since
   // it renders at about 20 px here; currentColor carries the accent in both themes.
+  import { MODEL_NAME } from '../lib/brand';
 </script>
 
 <span class="wordmark">
@@ -19,7 +20,7 @@
     />
     <circle cx="69.09" cy="30.91" r="9.5" fill="currentColor" />
   </svg>
-  Mote
+  {MODEL_NAME}
 </span>
 
 <style>

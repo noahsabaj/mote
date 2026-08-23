@@ -10,6 +10,7 @@ import { auth } from './auth.svelte';
 import { ByteTrace, type SerializedTrace } from '../trace.svelte';
 import * as persist from '../persist';
 import { download } from '../download';
+import { MODEL_NAME } from '../brand';
 import { settings } from './settings.svelte';
 import { diagnostics } from './diagnostics.svelte';
 import { model } from './model.svelte';
@@ -526,11 +527,19 @@ class Chat {
     const text =
       format === 'json'
         ? JSON.stringify(
-            { id, title: conv.title, model: model.info?.name ?? null, turns: conv.turns },
+            {
+              id,
+              title: conv.title,
+              model: MODEL_NAME,
+              // What is loaded right now, which is not necessarily what drew every turn —
+              // each reply carries its own checkpointStep for that.
+              loadedCheckpoint: model.info?.name ?? null,
+              turns: conv.turns
+            },
             null,
             2
           )
-        : toMarkdown(conv.title, conv.turns, model.info?.name ?? 'Mote');
+        : toMarkdown(conv.title, conv.turns, MODEL_NAME);
     download(name, format === 'json' ? 'application/json' : 'text/markdown', text);
   }
 

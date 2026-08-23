@@ -47,6 +47,12 @@
     }
   }
 
+  // Escape from anywhere hands the keyboard back to the composer.
+  $effect(() => {
+    if (ui.focusComposer === 0) return;
+    area?.focus();
+  });
+
   // Context is only worth a line when it is actually filling up.
   const context = $derived.by(() => {
     const live = diagnostics.stats;

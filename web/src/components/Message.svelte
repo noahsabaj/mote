@@ -42,6 +42,8 @@
   // ------------------------------------------------------------------ editing
 
   const editing = $derived(ui.editing === turn.id);
+  const EDIT_NOTE = 'Saving replaces every reply after this one.';
+  let noteOpen = $state(false);
   let draft = $state('');
   let editArea = $state<HTMLTextAreaElement | null>(null);
   const changed = $derived(draft.trim().length > 0 && draft.trim() !== turn.content);
@@ -117,18 +119,24 @@
           onkeydown={onEditKey}
         ></textarea>
         <div class="edit-foot">
-          <span
+          <!-- A tooltip on its own would say nothing on a phone, where there is no hover;
+               clicking pins the same sentence under the row instead. -->
+          <button
+            type="button"
             class="note"
-            tabindex="0"
-            role="note"
-            aria-label="Saving replaces every reply after this one"
-            use:tip={'Saving replaces every reply after this one.'}
+            aria-expanded={noteOpen}
+            aria-label="What saving does"
+            onclick={() => (noteOpen = !noteOpen)}
+            use:tip={EDIT_NOTE}
           >
             <Icon name="info" size={14} />
-          </span>
+          </button>
           <button class="btn" onclick={() => (ui.editing = null)}>Cancel</button>
           <button class="btn accent" onclick={saveEdit} disabled={!changed}>Save</button>
         </div>
+        {#if noteOpen}
+          <p class="note-text meta">{EDIT_NOTE}</p>
+        {/if}
       </div>
     {:else}
       <div class="said">{turn.content}</div>
@@ -338,9 +346,23 @@
     width: var(--tap);
     height: var(--tap);
     margin-right: auto;
+    padding: 0;
+    border: 0;
     border-radius: var(--radius-sm);
+    background: transparent;
     color: var(--ink-3);
     cursor: help;
+  }
+  .note:hover,
+  .note[aria-expanded='true'] {
+    color: var(--ink);
+    background: var(--surface);
+  }
+
+  .note-text {
+    margin: 0.35rem 0 0;
+    font-size: 0.75rem;
+    text-align: right;
   }
 
   /* -------------------------------------------------------------------- model */

@@ -172,6 +172,13 @@ button {
 .btn.accent:hover:not(:disabled) {
   background: var(--accent-ink);
 }
+/* A dimmed accent still reads as the thing to press. A disabled primary has to stop
+   looking primary — `.btn:disabled` alone cannot say so, because `.accent` outranks it. */
+.btn.accent:disabled {
+  background: var(--surface-2);
+  color: var(--ink-3);
+  opacity: 1;
+}
 
 /* Text-only control: recedes until hovered or focused. */
 .quiet {

@@ -16,6 +16,10 @@ class Ui {
    * reach back into the transcript to open the last prompt.
    */
   editing = $state<string | null>(null);
+  /** The header's conversation menu. Here so a keyboard shortcut can reach it. */
+  switcher = $state(false);
+  /** Bumped to ask the composer for focus; it is a signal, not a value. */
+  focusComposer = $state(0);
 
   toggleStructure(): void {
     this.structure = !this.structure;

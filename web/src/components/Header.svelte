@@ -3,26 +3,79 @@
   import Icon from './Icon.svelte';
   import { chat } from '../lib/stores/chat.svelte';
   import { ui } from '../lib/stores/ui.svelte';
-  import { dismissable } from '../lib/actions';
-  import { when } from '../lib/format';
+  import { clock } from '../lib/clock.svelte';
+  import { dismissable, tip } from '../lib/actions';
+  import { ago } from '../lib/format';
   import type { SheetView } from '../lib/views';
 
   let { open, onopen }: { open: SheetView | null; onopen: (v: SheetView) => void } = $props();
 
-  let menuOpen = $state(false);
   let trigger = $state<HTMLElement | null>(null);
+  let field = $state<HTMLInputElement | null>(null);
+  let query = $state('');
+  let renaming = $state<string | null>(null);
+  let draft = $state('');
+  let cancelled = false;
 
-  const current = $derived(chat.index.find((c) => c.id === chat.id));
-  const title = $derived(current?.title ?? 'New conversation');
+  // The filter only earns its place once the list is long enough to scroll past.
+  const showFilter = $derived(chat.index.length > 6);
+  const listed = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    return q ? chat.index.filter((c) => c.title.toLowerCase().includes(q)) : chat.index;
+  });
+
+  const mac = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
+  const MOD = mac ? '⌘' : 'Ctrl+';
+  const ALT = mac ? '⌥' : 'Alt+';
+
+  $effect(() => {
+    if (ui.switcher && field) field.focus();
+  });
+  $effect(() => {
+    if (!ui.switcher) {
+      query = '';
+      renaming = null;
+    }
+  });
 
   function pick(id: string) {
-    menuOpen = false;
+    ui.switcher = false;
     chat.open(id);
   }
 
   function fresh() {
-    menuOpen = false;
+    ui.switcher = false;
     chat.newConversation();
+  }
+
+  function startRename(id: string, title: string) {
+    draft = title;
+    renaming = id;
+  }
+
+  const takeField = (node: HTMLInputElement) => {
+    node.focus();
+    node.select();
+  };
+
+  // Enter and clicking away both commit; only Escape throws the edit away. Blur fires again
+  // as the field unmounts, so the guard keeps it to one commit.
+  function endRename(id: string) {
+    if (renaming !== id) return;
+    renaming = null;
+    if (!cancelled) chat.rename(id, draft);
+    cancelled = false;
+  }
+
+  function onRenameKey(e: KeyboardEvent, id: string) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      endRename(id);
+    } else if (e.key === 'Escape') {
+      e.stopPropagation(); // do not close the whole menu
+      cancelled = true;
+      endRename(id);
+    }
   }
 
   // Below 34rem the labels are hidden and only the icon shows, so the header still fits a
@@ -41,44 +94,99 @@
       <button
         bind:this={trigger}
         class="quiet convo"
-        aria-expanded={menuOpen}
+        aria-expanded={ui.switcher}
         aria-haspopup="true"
-        onclick={() => (menuOpen = !menuOpen)}
+        onclick={() => (ui.switcher = !ui.switcher)}
       >
-        <span class="convo-title">{title}</span>
+        <span class="convo-title">{chat.title}</span>
         <Icon name="chevron" size={13} />
       </button>
 
-      {#if menuOpen}
+      {#if ui.switcher}
         <div
           class="menu"
           aria-label="Conversations"
-          use:dismissable={{ onDismiss: () => (menuOpen = false), trigger }}
+          use:dismissable={{ onDismiss: () => (ui.switcher = false), trigger }}
         >
           <button class="item new" onclick={fresh}>
             <Icon name="plus" size={14} />
             New conversation
           </button>
+
+          {#if showFilter}
+            <div class="find">
+              <Icon name="search" size={14} />
+              <input
+                bind:this={field}
+                bind:value={query}
+                type="search"
+                placeholder="Filter by title"
+                aria-label="Filter conversations by title"
+              />
+            </div>
+          {/if}
+
           {#if chat.index.length}
             <div class="rule"></div>
+            {#if listed.length === 0}
+              <p class="meta none">Nothing matches “{query.trim()}”.</p>
+            {/if}
             <ul>
-              {#each chat.index as c (c.id)}
+              {#each listed as c (c.id)}
                 <li class:current={c.id === chat.id}>
-                  <button class="item" onclick={() => pick(c.id)} aria-current={c.id === chat.id}>
-                    <span class="label">{c.title}</span>
-                    <span class="meta stamp">{when(new Date(c.updatedAt).toISOString())}</span>
-                  </button>
-                  <button
-                    class="quiet del"
-                    aria-label="Delete conversation “{c.title}”"
-                    onclick={() => chat.deleteConversation(c.id)}
-                  >
-                    <Icon name="trash" size={14} />
-                  </button>
+                  {#if renaming === c.id}
+                    <input
+                      class="rename"
+                      bind:value={draft}
+                      use:takeField
+                      aria-label="Rename conversation"
+                      onkeydown={(e) => onRenameKey(e, c.id)}
+                      onblur={() => endRename(c.id)}
+                    />
+                  {:else}
+                    <button class="item" onclick={() => pick(c.id)} aria-current={c.id === chat.id}>
+                      <span class="label">{c.title}</span>
+                      <span class="meta stamp">{ago(new Date(c.updatedAt).toISOString(), clock.now)}</span>
+                    </button>
+                    <button
+                      class="quiet act"
+                      aria-label="Rename conversation “{c.title}”"
+                      onclick={() => startRename(c.id, c.title)}
+                      use:tip={'Rename'}
+                    >
+                      <Icon name="pencil" size={14} />
+                    </button>
+                    <button
+                      class="quiet act"
+                      aria-label="Delete conversation “{c.title}”"
+                      onclick={() => chat.deleteConversation(c.id)}
+                      use:tip={'Delete'}
+                    >
+                      <Icon name="trash" size={14} />
+                    </button>
+                  {/if}
                 </li>
               {/each}
             </ul>
           {/if}
+
+          <div class="rule"></div>
+          <div class="foot">
+            <span class="meta">Export this one</span>
+            <span class="formats">
+              <button class="quiet" disabled={chat.isEmpty} onclick={() => chat.exportAs(chat.id, 'md')}>
+                <Icon name="download" size={13} />
+                Markdown
+              </button>
+              <button class="quiet" disabled={chat.isEmpty} onclick={() => chat.exportAs(chat.id, 'json')}>
+                <Icon name="download" size={13} />
+                JSON
+              </button>
+            </span>
+          </div>
+          <p class="meta keys">
+            {MOD}K conversations · {ALT}1/2/3 panels · Esc to the composer
+          </p>
         </div>
       {/if}
     </div>
@@ -177,8 +285,8 @@
     top: calc(100% + 0.4rem);
     left: 0;
     z-index: 30;
-    width: min(21rem, calc(100vw - 2rem));
-    max-height: min(24rem, 70vh);
+    width: min(23rem, calc(100vw - 2rem));
+    max-height: min(28rem, 70vh);
     overflow-y: auto;
     padding: 0.3rem;
     background: var(--bg);
@@ -192,6 +300,39 @@
     height: 1px;
     background: var(--rule);
     margin: 0.3rem 0.15rem;
+  }
+
+  .find {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.25rem 0.15rem 0;
+    padding: 0 0.5rem;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-sm);
+    color: var(--ink-3);
+  }
+  .find:focus-within {
+    border-color: var(--accent-line);
+  }
+  .find input {
+    flex: 1;
+    min-width: 0;
+    min-height: 32px;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.875rem;
+  }
+  .find input::-webkit-search-cancel-button {
+    filter: grayscale(1);
+  }
+
+  .none {
+    margin: 0.4rem 0.65rem 0.5rem;
+    font-size: 0.8125rem;
   }
 
   ul {
@@ -236,6 +377,21 @@
     background: var(--surface);
   }
 
+  .rename {
+    flex: 1;
+    min-width: 0;
+    min-height: 32px;
+    margin: 0 0.15rem;
+    padding: 0 0.45rem;
+    border: 1px solid var(--accent-line);
+    border-radius: var(--radius-sm);
+    outline: none;
+    background: var(--bg);
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.875rem;
+  }
+
   .label {
     flex: 1;
     min-width: 0;
@@ -249,13 +405,34 @@
     font-size: 0.75rem;
   }
 
-  .del {
+  .act {
     flex: none;
     opacity: 0;
   }
-  li:hover .del,
-  .del:focus-visible {
+  li:hover .act,
+  .act:focus-visible {
     opacity: 1;
+  }
+
+  .foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.1rem 0.15rem 0.1rem 0.5rem;
+  }
+  .foot .meta {
+    font-size: 0.75rem;
+  }
+  .formats {
+    display: inline-flex;
+    gap: 0.1rem;
+  }
+
+  .keys {
+    margin: 0.35rem 0.5rem 0.25rem;
+    font-size: 0.6875rem;
+    color: var(--ink-3);
   }
 
   @keyframes pop {
@@ -298,8 +475,19 @@
     nav :global(button) {
       padding: 0 0.32em;
     }
-    .del {
+    /* Nothing may hide behind hover on touch, and both row controls need a real target. */
+    .act {
       opacity: 1;
+      width: 40px;
+      min-height: 40px;
+    }
+    .item,
+    .rename,
+    .find input {
+      min-height: 40px;
+    }
+    .keys {
+      display: none;
     }
 
     /* Anchored to the trigger the menu would run off the right edge, so on a phone it spans
@@ -310,7 +498,7 @@
       left: max(0.75rem, env(safe-area-inset-left));
       right: max(0.75rem, env(safe-area-inset-right));
       width: auto;
-      max-height: min(24rem, 62vh);
+      max-height: min(28rem, 62vh);
     }
   }
 </style>

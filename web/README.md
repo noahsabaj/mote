@@ -27,7 +27,7 @@ exactly the same paths from the dev server. It is `apply: 'serve'` only — noth
 is imported by `src/`, and nothing from it can reach a production build.
 
 **The mock's data is fabricated and says so.** `status_note` begins `DEV MOCK — no model is
-loaded…` and is printed verbatim in the honesty strip; the device is named
+loaded…` and is printed verbatim in the Diagnostics sheet; the device is named
 `Mock device (development server, no GPU)`; checkpoints and runs are prefixed `mock_`. The app
 itself contains no placeholder values: a field the backend has not sent renders as `—`, never
 as a zero.
@@ -49,25 +49,29 @@ vite.config.ts              # svelte plugin + dev-only mock plugin
 src/
   main.ts                   # mount
   app.css                   # design tokens (light + dark), base type, shared controls
-  App.svelte                # shell: header, honesty strip, conversation, composer, sheets
+  App.svelte                # shell: header, conversation, composer, sheets, shortcuts
   lib/
     types.ts                # the docs/api.md contract, typed
     api.ts                  # HTTP client (/api/*), typed errors
     ws.ts                   # /ws/generate: reconnect with backoff, queue, cancel
     trace.svelte.ts         # compact per-byte model for one reply (typed arrays)
-    format.ts               # byte/count/percent/date formatting
+    format.ts               # byte/count/percent/date formatting, absolute and relative
     persist.ts              # failure-tolerant localStorage
-    actions.ts              # dismissable (popovers), autosize (composer)
+    download.ts             # hand a generated file to the browser
+    brand.ts                # the model's name, mirroring serve/identity.py
+    clock.svelte.ts         # one 30 s tick shared by every relative timestamp
+    actions.ts              # dismissable, autosize, tip (tooltips)
     chart.ts, views.ts      # small shared types
     stores/
-      chat.svelte.ts        # transcript, conversations, streaming pipeline
+      chat.svelte.ts        # transcript, conversations, streaming pipeline, export
       model.svelte.ts       # /api/model + checkpoints + hot swap
       settings.svelte.ts    # sampling params as overrides on the model's defaults
       diagnostics.svelte.ts # live values for the reply in flight
-      ui.svelte.ts          # view preferences
+      notice.svelte.ts      # the undo bar's one transient message
+      ui.svelte.ts          # view preferences, edit target, switcher state
   components/
-    Header.svelte           # wordmark, conversation menu, three surfaces
-    HonestyStrip.svelte     # status + status_note, verbatim, always on screen
+    Header.svelte           # wordmark, conversation switcher (filter/rename/export)
+    UndoBar.svelte          # "deleted — undo", above the composer
     Conversation.svelte     # transcript, opening state, follow-the-stream scrolling
     Message.svelte          # one turn, its actions and its measured footer
     ChunkedText.svelte      # plain reply, or the same reply with structure marked
@@ -103,17 +107,35 @@ same frame as everything else. The dev mock emits the same awkward values on pur
 does not silently regress.
 
 **Conversations.** The backend stores nothing, so the full message list is sent every turn.
-The transcript is kept in `localStorage` (up to 30 conversations, listed in the header menu with
-per-item delete). Per-byte traces are *not* persisted — after a reload a reply still shows its
-text and its measured footer, but Structure and Bytes are only offered for replies streamed in
-the current session, because inventing that detail later would be a lie.
+The transcript is kept in `localStorage` (up to 30 conversations, plus the byte traces of the 8
+most recent replies in each, so Structure and Bytes survive a reload for those). The header
+switcher lists them with a title filter, inline rename, per-item delete and Markdown/JSON
+export. Nothing disappears in silence: deleting shows an undo bar for eight seconds, and so does
+anything that replaces turns; the conversation evicted at the 30 cap is announced even though
+its storage has already gone.
+
+**Destructive edits.** Editing a prompt or retrying it discards the replies that followed,
+because they were conditioned on a continuation that no longer exists — the undo bar holds the
+whole transcript for eight seconds. The one exception is retrying the *newest* prompt: there is
+no tail to lose, so the old reply is kept as a sample and the `1/n` control flips between them.
+
+**Provenance.** Each reply records the sampling parameters and checkpoint step it was drawn at,
+captured at send time rather than read back later. The footer stays quiet when a reply used the
+checkpoint's own defaults and names the difference when it did not; the Bytes sheet and the JSON
+export carry the full values. A checkpoint hot-swapped mid-conversation draws a rule across the
+transcript, because two replies from two different models otherwise look identical.
 
 **Sampling.** `/api/model.defaults` is the baseline; your changes are stored as overrides, so
 Reset restores what the checkpoint recommends and a checkpoint that ships different defaults is
 honoured for anything you have not touched.
 
-**Keyboard.** Enter sends, Shift+Enter opens a line, Esc stops a reply (and closes a sheet).
-Sheets trap Tab and restore focus on close.
+**Keyboard.** Enter sends, Shift+Enter opens a line, Up on an empty composer edits the last
+prompt. Esc cancels an edit, then closes a layer, then stops a reply, then returns focus to the
+composer — in that order. Ctrl/⌘+K opens the conversation switcher; Alt/⌥+1/2/3 open the three
+panels. In an edit box Enter makes a line and Ctrl/⌘+Enter saves, because a prompt being
+rewritten is usually several paragraphs. Modifiers only, never a bare letter: the composer is a
+prose field. Alt rather than Ctrl for the digits, because the browser reserves Ctrl+1..8 for its
+own tabs. Sheets trap Tab and restore focus on close.
 
 **Theme and motion.** Both schemes are authored as tokens and chosen by `prefers-color-scheme`;
 all text pairs clear WCAG AA (the faintest is 5.07:1 dark, 5.16:1 light). Animation is limited to
