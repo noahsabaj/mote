@@ -95,11 +95,25 @@ def format_results(hits: List[dict], max_bytes: int = 1024) -> str:
     return "\n".join(lines)
 
 
+def _retry(fn, what: str, attempts: int = 6):
+    """Hub calls fail transiently (connect timeouts); wait 10, 30, 60, 120, 240 s between tries."""
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - any network error is worth a retry here
+            if i == attempts - 1:
+                raise
+            wait = min(10 * 2 ** i, 240)
+            print(f"{what}: {type(e).__name__}: {str(e)[:120]} - retry in {wait}s", flush=True)
+            time.sleep(wait)
+
+
 def build(out: Path, files: int, max_bytes: int, keep: bool, cache_dir: Path) -> None:
     import pyarrow.parquet as pq
     from huggingface_hub import hf_hub_download, list_repo_files
 
-    names = sorted(f for f in list_repo_files(REPO, repo_type="dataset") if f.startswith("data/enwiki/"))[:files]
+    listing = _retry(lambda: list_repo_files(REPO, repo_type="dataset"), "list_repo_files")
+    names = sorted(f for f in listing if f.startswith("data/enwiki/"))[:files]
     conn = open_db(out)
     finished = {r[0] for r in conn.execute("SELECT file FROM done")}
     total = conn.execute("SELECT COALESCE(SUM(rows), 0) FROM done").fetchone()[0]
@@ -111,7 +125,7 @@ def build(out: Path, files: int, max_bytes: int, keep: bool, cache_dir: Path) ->
         # a killed run may have left part of this file behind: drop it rather than duplicate it
         conn.execute("DELETE FROM intros WHERE file = ?", (name,))
         conn.commit()
-        local = hf_hub_download(REPO, name, repo_type="dataset", local_dir=cache_dir)
+        local = _retry(lambda: hf_hub_download(REPO, name, repo_type="dataset", local_dir=cache_dir), f"download {name}")
         n = 0
         batch_rows: List[tuple] = []
         with open(local, "rb") as fh:  # closed before the delete below: Windows refuses to remove open files
