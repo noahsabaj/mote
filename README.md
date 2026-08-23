@@ -115,6 +115,16 @@ Measured on the RTX 4060 Ti before this work: ~9 % MFU (42 kB/s on the 35M model
   kernel per process). The benchmark chain sets it; put it in `~/.bashrc` on the training box.
 * Research log with the 2026 evidence behind these: `docs/research/efficiency-campaign-2026-08-23.md`.
 
+## Identity and pushback
+
+Mote is told what it is two ways: a short identity card (`morpheme/serve/identity.py`) is prepended as the system message
+at serve time, and `python -m morpheme.data.build_identity --out data/sft_identity --params <n>` generates identity
+dialogues plus *balanced* pushback dialogues (user wrong → hold with a one-line check; user right → concede) and DPO
+pairs. Mix the shard into SFT with `--mix data/sft_identity:0.05`, then optionally run
+`python -m morpheme.train.dpo --init-from <sft.pt> --pairs data/sft_identity.dpo.jsonl --out <dir>`.
+`python -m morpheme.eval.probe --checkpoint <pt>` measures identity accuracy, hold rate and concede rate with greedy
+decoding and writes `probe.json` next to the checkpoint; the studio's Model sheet shows it. The pilot scores 0/0/0.
+
 ## Run the studio
 
 ```bash
