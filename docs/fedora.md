@@ -13,6 +13,26 @@ ran into). Order: after the rename, with no training running. Status boxes are f
 - [ ] Stop the Windows studio service (`.\mote service stop`) and remove the login item
       (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Mote Studio.vbs`).
 
+## Carrying the Claude Code session over
+
+Claude Code keeps everything under `~/.claude`, so Fedora starts empty — but the Windows copy is readable
+from the mounted C: drive. Copy the whole project directory (session transcripts + `memory/`) and keep
+the same project name, then resume the session by id (resume searches every project since 2.1.223;
+this machine runs 2.1.241):
+
+```bash
+WIN=/run/media/$USER/<C-drive-label>/Users/noahs/.claude/projects/D--Code-Workshop-1
+mkdir -p ~/.claude/projects && cp -r "$WIN" ~/.claude/projects/
+cd ~/mote && CLAUDE_CODE_PROJECT_DIR_NAME=D--Code-Workshop-1 claude --resume a5c0fd49-b82d-4d4f-840f-ece5aa374fcf
+```
+
+`CLAUDE_CODE_PROJECT_DIR_NAME` (2.1.234+) pins the project name so new sessions and the auto-memory land in
+the same directory instead of `-home-noahs-mote`. Log in again on Fedora (the login is per machine). The
+transcript format is internal and version-dependent: if the resume misbehaves, start fresh — the memory
+notes (`~/.claude/projects/D--Code-Workshop-1/memory/`, mirrored in `docs/_memory-export/`) plus
+`docs/shape.md`, `docs/prefs.md`, `docs/context.md` carry every decision, and that is a lighter start
+than a 28 MB, thrice-compacted transcript.
+
 ## On Fedora
 
 1. **Disk**: the repo, `data/` (23 GB) and `runs/` live on ext4, not on the NTFS mount — NTFS through
