@@ -259,6 +259,7 @@ def main(argv=None):
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
     ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
+    ap.add_argument("--beta2", type=float, default=0.95, help="AdamW β₂ (2608.16760: the convergence threshold rises as the batch shrinks; A/B 0.99/0.997 at our 32 kB steps)")
     ap.add_argument("--mbp-weight", type=float, default=None, help="λ1 for the multi-byte head loss (preset default 1.0)")
     ap.add_argument("--mbp-gamma", type=float, default=None, help="position weighting exp(-offset/γ) on the head loss (0 = off)")
     ap.add_argument("--mbp-transition", action="store_true", help="add the V×V byte-transition bias to the head (DSpark Markov head)")
@@ -300,7 +301,7 @@ def main(argv=None):
     n_params = model.num_params()
     peak_tflops = peak_tflops_for(device) if device.type == "cuda" else None
     print(f"params: {n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('morpheme.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('morpheme.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
-    opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, optimizer=args.optimizer)
+    opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, betas=(0.9, args.beta2), optimizer=args.optimizer)
 
     train_shard = ByteShard(args.data, "train", sft=args.sft)
     val_shard = ByteShard(args.data, "val", sft=args.sft)
