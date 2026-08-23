@@ -57,10 +57,10 @@
   </div>
 </div>
 
-{#if !pinned && chat.busy}
+{#if !pinned && !chat.isEmpty}
   <button class="jump" onclick={() => toBottom()}>
     <Icon name="chevron" size={13} />
-    Follow the reply
+    {chat.busy ? 'Follow the reply' : 'Jump to latest'}
   </button>
 {/if}
 
@@ -74,7 +74,7 @@
   }
 
   .column {
-    max-width: calc(var(--measure) + 6rem);
+    max-width: var(--shell);
     margin: 0 auto;
     padding: 2rem var(--gutter) 1.5rem;
   }

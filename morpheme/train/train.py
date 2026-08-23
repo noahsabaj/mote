@@ -26,7 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from ..config import MorphemeConfig
-from ..data.loader import ByteShard
+from ..data.loader import ByteShard, MixedShard
 from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.hnet import HNetForCausalLM
 from ..tokenizer import ByteTokenizer
@@ -259,6 +259,7 @@ def main(argv=None):
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
     ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
+    ap.add_argument("--mix", action="append", default=[], metavar="PREFIX:SHARE", help="extra shard mixed into training by share, e.g. data/sft_identity:0.05 (repeatable)")
     ap.add_argument("--beta2", type=float, default=0.95, help="AdamW β₂ (2608.16760: the convergence threshold rises as the batch shrinks; A/B 0.99/0.997 at our 32 kB steps)")
     ap.add_argument("--mbp-weight", type=float, default=None, help="λ1 for the multi-byte head loss (preset default 1.0)")
     ap.add_argument("--mbp-gamma", type=float, default=None, help="position weighting exp(-offset/γ) on the head loss (0 = off)")
@@ -305,6 +306,11 @@ def main(argv=None):
 
     train_shard = ByteShard(args.data, "train", sft=args.sft)
     val_shard = ByteShard(args.data, "val", sft=args.sft)
+    if args.mix:
+        extras = [(ByteShard(spec.rsplit(":", 1)[0], "train", sft=args.sft), float(spec.rsplit(":", 1)[1])) for spec in args.mix]
+        main_w = max(1.0 - sum(w for _, w in extras), 0.0)
+        train_shard = MixedShard([train_shard] + [s for s, _ in extras], [main_w] + [w for _, w in extras])
+        print("training mix:", {args.data: main_w, **{spec: float(spec.rsplit(':', 1)[1]) for spec in args.mix}}, flush=True)
     if args.init_from and not (args.resume and ckpt_path_exists(out_dir)):
         _step, _ = load_checkpoint(Path(args.init_from), model, None)
         print(f"initialized weights from {args.init_from} (step {_step})", flush=True)

@@ -207,9 +207,11 @@
 
   footer {
     display: flex;
-    align-items: center;
+    /* The stats often run to two lines; the actions belong beside the first of them, not
+       floating against the middle of the block. */
+    align-items: flex-start;
     justify-content: space-between;
-    gap: 1rem;
+    gap: 0.5rem 1rem;
     flex-wrap: wrap;
     margin-top: 0.55rem;
     min-height: 28px;
@@ -217,6 +219,7 @@
 
   .stats {
     margin: 0;
+    padding-top: 0.3rem;
     font-size: 0.75rem;
     flex: 1 1 14rem;
   }
@@ -224,6 +227,7 @@
   .actions {
     display: flex;
     align-items: center;
+    flex: none;
     gap: 0.1rem;
     opacity: 0;
     transition: opacity 120ms ease;

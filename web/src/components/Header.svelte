@@ -25,11 +25,19 @@
     menuOpen = false;
     chat.newConversation();
   }
+
+  // Below 34rem the labels are hidden and only the icon shows, so the header still fits a
+  // phone without the wordmark and the conversation title fighting over the same pixels.
+  const SURFACES = [
+    { view: 'model', label: 'Model', icon: 'model' },
+    { view: 'diagnostics', label: 'Diagnostics', icon: 'diagnostics' },
+    { view: 'training', label: 'Training', icon: 'training' }
+  ] as const;
 </script>
 
 <header>
   <div class="left">
-    <Wordmark />
+    <span class="brand"><Wordmark /></span>
     <div class="menu-anchor">
       <button
         bind:this={trigger}
@@ -79,19 +87,17 @@
 
   <nav aria-label="Model surfaces">
     <StatusBadge onopen={() => onopen('diagnostics')} />
-    <button class="quiet" aria-pressed={open === 'model'} onclick={() => onopen('model')}>
-      Model
-    </button>
-    <button
-      class="quiet"
-      aria-pressed={open === 'diagnostics'}
-      onclick={() => onopen('diagnostics')}
-    >
-      Diagnostics
-    </button>
-    <button class="quiet" aria-pressed={open === 'training'} onclick={() => onopen('training')}>
-      Training
-    </button>
+    {#each SURFACES as s (s.view)}
+      <button
+        class="quiet surface"
+        aria-pressed={open === s.view}
+        onclick={() => onopen(s.view)}
+        title={s.label}
+      >
+        <span class="surface-icon"><Icon name={s.icon} size={15} /></span>
+        <span class="surface-label">{s.label}</span>
+      </button>
+    {/each}
     <button
       class="quiet theme"
       onclick={() => ui.cycleTheme()}
@@ -109,6 +115,9 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
+    width: 100%;
+    max-width: var(--shell);
+    margin: 0 auto;
     padding: 0.6rem var(--gutter) 0.55rem;
   }
 
@@ -116,16 +125,25 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
+    flex: 1 1 auto;
     min-width: 0;
+  }
+
+  .brand {
+    flex: none;
   }
 
   .menu-anchor {
     position: relative;
+    flex: 1 1 auto;
     min-width: 0;
+    max-width: 15rem;
   }
 
+  /* Both caps are relative to the shrinking anchor, so a long title ellipsises instead of
+     pushing the button out from under it and into the nav. */
   .convo {
-    max-width: 15rem;
+    max-width: 100%;
   }
   .convo :global(svg) {
     transform: rotate(90deg);
@@ -135,6 +153,7 @@
     transform: rotate(-90deg);
   }
   .convo-title {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -145,6 +164,10 @@
     align-items: center;
     gap: 0.1rem;
     flex: none;
+  }
+  /* Label on a laptop, icon on a phone — never both. */
+  .surface-icon {
+    display: none;
   }
   .theme {
     margin-left: 0.35rem;
@@ -244,17 +267,52 @@
     }
   }
 
+  /* Phone: the wordmark gives way to the conversation title, and the three surfaces become
+     icons. Everything still fits at 320px with the longest status word. */
   @media (max-width: 34rem) {
-    .convo-title,
+    .brand,
     .stamp {
       display: none;
     }
+    .menu-anchor {
+      max-width: none;
+    }
+    .surface-icon {
+      display: block;
+    }
+    .surface-label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    /* Height is the cheap dimension on a phone: the icons stay narrow so the row still fits
+       320px, but every target is 40px tall rather than 28. */
+    .surface,
+    .theme,
+    .convo {
+      min-height: 40px;
+    }
     nav :global(button) {
-      padding: 0 0.3em;
-      font-size: 0.78125rem;
+      padding: 0 0.32em;
     }
     .del {
       opacity: 1;
+    }
+
+    /* Anchored to the trigger the menu would run off the right edge, so on a phone it spans
+       the viewport instead. */
+    .menu {
+      position: fixed;
+      top: calc(env(safe-area-inset-top) + 3rem);
+      left: max(0.75rem, env(safe-area-inset-left));
+      right: max(0.75rem, env(safe-area-inset-right));
+      width: auto;
+      max-height: min(24rem, 62vh);
     }
   }
 </style>

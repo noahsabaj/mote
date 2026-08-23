@@ -77,6 +77,7 @@
 
 <section class="table">
   <h3>Bytes</h3>
+  <div class="frame">
   <div class="head" aria-hidden="true">
     <span class="c-i">#</span>
     <span class="c-hex">hex</span>
@@ -103,7 +104,9 @@
             <span class="c-i">{r.i}</span>
             <span class="c-hex">{hex(r.byte)}</span>
             <span class="c-ch" class:sep={!r.chars}>{byteGlyph(r.byte)}</span>
-            <span class="c-src" class:mbp={r.mbp}>{r.mbp ? 'parallel' : 'sampled'}</span>
+            <span class="c-src" class:mbp={r.mbp} class:fix={r.fix}
+              >{r.mbp ? 'parallel' : r.fix ? 'corrected' : 'sampled'}</span
+            >
             <span class="c-n">{num(r.p, 2)}</span>
             <span class="c-n">{num(r.entropy, 2)}</span>
             <span class="c-n">{num(r.boundaryP, 2)}</span>
@@ -112,10 +115,13 @@
       </div>
     </div>
   </div>
+  </div>
   <p class="meta foot">
-    A left rule marks a byte the router chose as a chunk start. <span class="k">p</span> is the
-    sampled byte's probability, <span class="k">H</span> the entropy of that step,
-    <span class="k">p(b)</span> the boundary probability.
+    A left rule marks a byte the router chose as a chunk start. <span class="k">parallel</span>
+    came from the multi-byte head, <span class="k">corrected</span> replaced a draft byte that
+    verification rejected. <span class="k">p</span> is the sampled byte's probability,
+    <span class="k">H</span> the entropy of that step, <span class="k">p(b)</span> the boundary
+    probability.
   </p>
 </section>
 
@@ -133,16 +139,31 @@
     margin: 0.15rem 0 0.5rem;
   }
 
+  /* One horizontally scrollable frame around both, and fixed columns in both: the rows sit
+     inside a vertical scroller and the head does not, so any `fr` column resolves to a
+     different width in each and the last column loses its digits. */
+  .frame {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+
   .head,
   .row {
     display: grid;
-    grid-template-columns: 3.2rem 2.1rem 3.1rem 4.4rem 1fr 1fr 1fr;
-    gap: 0.35rem;
+    grid-template-columns: 2.3rem 2.1rem 2.2rem 3.9rem 2rem 2rem 2.3rem;
+    gap: 0.3rem;
     align-items: center;
     font-family: var(--font-mono);
     font-size: 0.75rem;
     font-variant-numeric: tabular-nums;
     padding: 0 0.4rem;
+  }
+
+  /* Both boxes hold the same floor, so the frame scrolls them together rather than letting
+     the rows squeeze under the vertical scrollbar. The floor allows for that scrollbar. */
+  .head,
+  .viewport {
+    min-width: 20.5rem;
   }
 
   .head {
@@ -155,6 +176,7 @@
   .viewport {
     height: min(26rem, 48vh);
     overflow-y: auto;
+    scrollbar-gutter: stable;
     overscroll-behavior: contain;
     contain: strict;
   }
@@ -190,6 +212,9 @@
   }
   .c-src.mbp {
     color: var(--accent-ink);
+  }
+  .c-src.fix {
+    color: var(--ink);
   }
   .c-n {
     text-align: right;

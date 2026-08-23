@@ -20,6 +20,7 @@ from ..model.hnet import HNetForCausalLM
 from ..model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
 from ..model.dc import HAS_SSD_KERNEL
 from ..model.relation import FullRelation
+from .identity import identity_card, with_system_card
 from ..tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer
 
 STOP_IDS = {EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ASSISTANT_ID, BOS_ID}
@@ -191,6 +192,17 @@ class Engine:
             status, note = "flagship", f"Step {step}" + (f", {val_bpb:.2f} bits/byte" if val_bpb is not None else "")
         return CheckpointInfo(str(path), step, bytes_seen, val_bpb, minutes, created, status, note)
 
+    def probe_results(self):
+        """identity/pushback probe numbers if `probe.json` sits next to the checkpoint (see morpheme.eval.probe)."""
+        p = Path(self.ckpt_path).parent / "probe.json"
+        if not p.exists():
+            return None
+        try:
+            r = json.loads(p.read_text(encoding="utf-8"))
+            return {k: r[k] for k in ("identity_acc", "hold_rate", "concede_rate", "n_identity", "n_facts") if k in r}
+        except Exception:
+            return None
+
     def info(self) -> dict:
         dev = {"name": "cpu", "vram_total_mb": 0, "vram_used_mb": 0}
         if self.device.type == "cuda":
@@ -214,6 +226,8 @@ class Engine:
             "device": dev,
             "kernels": {"mamba3": HAS_MAMBA3_KERNEL and self.device.type == "cuda", "ssd": HAS_SSD_KERNEL and self.device.type == "cuda"},
             "defaults": vars(self.defaults),
+            "probe": self.probe_results(),
+            "identity_card": identity_card(self.model.num_params()),
         }
 
     # ------------------------------------------------------------------------------
@@ -248,6 +262,8 @@ class Engine:
 
     def _generate(self, messages, params: GenParams, emit, stop: threading.Event) -> None:
         limit = self.cfg.max_seq_len
+        if limit >= 1024:  # the identity card needs room; tiny test contexts go without
+            messages = with_system_card(messages, self.model.num_params())  # Mote knows what it is
         prompt_ids, truncated = self.build_prompt(messages, limit, reserve=min(params.max_bytes, limit // 4))
         ids = torch.tensor([prompt_ids], device=self.device)
         t0 = time.perf_counter()

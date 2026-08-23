@@ -15,7 +15,10 @@
     | 'structure'
     | 'sun'
     | 'moon'
-    | 'auto';
+    | 'auto'
+    | 'model'
+    | 'diagnostics'
+    | 'training';
 
   let { name, size = 16 }: { name: Name; size?: number } = $props();
 
@@ -34,7 +37,10 @@
     structure: 'M2.5 4h4M9.5 4h4M2.5 12h4M9.5 12h4M8 2.2v11.6',
     sun: 'M8 1.6v1.7M8 12.7v1.7M1.6 8h1.7M12.7 8h1.7M3.5 3.5l1.2 1.2M11.3 11.3l1.2 1.2M3.5 12.5l1.2-1.2M11.3 4.7l1.2-1.2',
     moon: 'M13.2 9.8A5.6 5.6 0 0 1 6.2 2.8a5.6 5.6 0 1 0 7 7Z',
-    auto: ''
+    auto: '',
+    model: 'M8 1.9 13.7 5v6L8 14.1 2.3 11V5ZM2.5 5.1 8 8.1l5.5-3M8 8.1V14',
+    diagnostics: 'M1.7 8.6h2.6l1.7-4.9 2.7 7.6 1.5-2.7h4.1',
+    training: 'M2.6 2.2v11.2h11.2M5 10.9l2.9-3.4 2.3 1.9 3.2-4.6'
   };
 </script>
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
   import { model } from '../lib/stores/model.svelte';
   import { chat } from '../lib/stores/chat.svelte';
   import Icon from './Icon.svelte';
@@ -47,6 +48,15 @@
   <section>
     <h3>Architecture</h3>
     <dl class="rows">
+      <dt>Knows itself</dt>
+      <dd>
+        {#if info.probe}
+          {pct(info.probe.identity_acc)} identity · holds a right answer {pct(info.probe.hold_rate)} · accepts a true correction {pct(info.probe.concede_rate)}
+          <span class="muted">({info.probe.n_identity} identity prompts, {info.probe.n_facts} facts, greedy)</span>
+        {:else}
+          not measured for this checkpoint
+        {/if}
+      </dd>
       <dt>Parameters</dt>
       <dd>{count(info.params)}</dd>
       <dt>Outer width</dt>
@@ -99,9 +109,9 @@
             <div class="who">
               <span class="id">{c.id}</span>
               <span class="meta">
-                step {c.step.toLocaleString()} · {num(c.val_bpb, 3)} bits/byte · {bytes(
-                  c.bytes_seen
-                )} · {when(c.created_at)}
+                step {c.step.toLocaleString()} ·
+                {c.val_bpb === null ? 'not evaluated yet' : `${num(c.val_bpb, 3)} bits/byte`} ·
+                {bytes(c.bytes_seen)} · {when(c.created_at)}
               </span>
             </div>
             {#if c.loaded}
@@ -129,6 +139,10 @@
 {/if}
 
 <style>
+  .muted {
+    color: var(--ink-3);
+    font-size: 0.8em;
+  }
   section + section {
     margin-top: 1.7rem;
   }

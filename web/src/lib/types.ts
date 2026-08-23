@@ -55,6 +55,10 @@ export interface ModelInfo {
   device: DeviceInfo;
   kernels: Kernels;
   defaults: SamplingParams;
+  /** identity / pushback probe (morpheme.eval.probe), measured on this checkpoint; absent until run */
+  probe?: { identity_acc: number; hold_rate: number; concede_rate: number; n_identity: number; n_facts: number } | null;
+  /** the system message the engine prepends so the model knows what it is */
+  identity_card?: string;
 }
 
 export interface CheckpointListItem {

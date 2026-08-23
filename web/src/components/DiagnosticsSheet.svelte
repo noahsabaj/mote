@@ -13,6 +13,12 @@
   const s = $derived(diagnostics.stats);
   const d = $derived(diagnostics.latest);
   const contextFrac = $derived(s ? Math.min(1, s.context_bytes / s.context_limit) : 0);
+  // spec_* are optional in the wire format. An older backend that omits them has not measured
+  // zero rounds — it has not measured anything, and that is what this has to say.
+  const rounds = $derived.by(() => {
+    if (!s || s.spec_rounds === undefined) return '—';
+    return `${s.spec_rounds} rounds · ${s.spec_fixes ?? 0} corrections · ${s.spec_replays ?? 0} replays`;
+  });
   const status = $derived(
     auth.required ? 'locked' : model.error ? 'offline' : (model.info?.status ?? 'loading')
   );
@@ -81,7 +87,7 @@
       <dt>Verification</dt>
       <dd>exact (rejection sampling) · draft length {settings.params.n_candidates}</dd>
       <dt>Rounds</dt>
-      <dd>{s ? `${s.spec_rounds ?? 0} rounds · ${s.spec_fixes ?? 0} corrections · ${s.spec_replays ?? 0} replays` : '—'}</dd>
+      <dd>{rounds}</dd>
     </dl>
   </section>
 

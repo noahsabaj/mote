@@ -10,6 +10,36 @@ import numpy as np
 import torch
 
 
+class MixedShard:
+    """Several shards sampled per window by weight (e.g. the SFT mix plus a small identity shard)."""
+
+    def __init__(self, shards, weights):
+        assert len(shards) == len(weights) and shards
+        self.shards = shards
+        total = float(sum(weights))
+        self.weights = [w / total for w in weights]
+        self.sft = shards[0].sft
+        self.meta = {"mixed": [getattr(s, "meta", {}) for s in shards], "weights": self.weights}
+        self.n = sum(s.n for s in shards)
+
+    def sample_batch(self, batch_size: int, seq_len: int, generator: torch.Generator):
+        ids, masks = [], []
+        for _ in range(batch_size):
+            r = float(torch.rand(1, generator=generator))
+            k = 0
+            acc = self.weights[0]
+            while r > acc and k < len(self.weights) - 1:
+                k += 1
+                acc += self.weights[k]
+            x, m = self.shards[k].sample_batch(1, seq_len, generator)
+            ids.append(x)
+            masks.append(m)
+        return torch.cat(ids, 0), (torch.cat(masks, 0) if masks[0] is not None else None)
+
+    def sequential_batches(self, batch_size: int, seq_len: int, max_batches=None):
+        return self.shards[0].sequential_batches(batch_size, seq_len, max_batches)
+
+
 class ByteShard:
     """Pretraining shards: ``{prefix}.meta.json`` + ``{prefix}.train.bin`` / ``.val.bin``.
     SFT shards: ``{prefix}.sft.meta.json`` + ``.sft.{split}.bin`` and ``.sft.{split}.mask.bin``."""

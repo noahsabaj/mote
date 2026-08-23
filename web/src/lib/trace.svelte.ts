@@ -25,6 +25,8 @@ export interface Segment {
 
 const FLAG_BOUNDARY = 1;
 const FLAG_MBP = 2;
+/** The byte that replaced a rejected draft byte. Still an exact sample, but not a plain step. */
+const FLAG_FIX = 4;
 
 export interface SerializedTrace {
   v: 1;
@@ -120,7 +122,10 @@ export class ByteTrace {
     this.#boundaryP[s] = ev.boundary_p;
     this.#chunk[s] = ev.chunk;
     this.#tMs[s] = ev.t_ms;
-    this.#flags[s] = (ev.boundary ? FLAG_BOUNDARY : 0) | (ev.source === 'mbp' ? FLAG_MBP : 0);
+    this.#flags[s] =
+      (ev.boundary ? FLAG_BOUNDARY : 0) |
+      (ev.source === 'mbp' ? FLAG_MBP : 0) |
+      (ev.source === 'fix' ? FLAG_FIX : 0);
     if (s === 0 || this.#chunk[s - 1] !== ev.chunk) this.#runStart.push(s);
     if (ev.text) this.#text += ev.text;
     this.#textEnd[s] = this.#text.length;
@@ -168,6 +173,7 @@ export class ByteTrace {
     tMs: number;
     boundary: boolean;
     mbp: boolean;
+    fix: boolean;
     chars: string;
   } {
     const from = i > 0 ? this.#textEnd[i - 1] : 0;
@@ -181,6 +187,7 @@ export class ByteTrace {
       tMs: this.#tMs[i],
       boundary: (this.#flags[i] & FLAG_BOUNDARY) !== 0,
       mbp: (this.#flags[i] & FLAG_MBP) !== 0,
+      fix: (this.#flags[i] & FLAG_FIX) !== 0,
       chars: this.#text.slice(from, this.#textEnd[i])
     };
   }

@@ -176,7 +176,8 @@
           {r.id}
         </span>
         <span class="meta">
-          {r.steps.toLocaleString()} steps · {num(r.last_val_bpb, 3)} bits/byte
+          {r.steps.toLocaleString()} steps ·
+          {r.last_val_bpb === null ? 'not evaluated yet' : `${num(r.last_val_bpb, 3)} bits/byte`}
           {#if r.running}<span class="live">running</span>{/if}
         </span>
       </button>
