@@ -81,6 +81,8 @@ export class ByteTrace {
   #n = 0;
   #byte = new Uint8Array(this.#cap);
   #p = new Float32Array(this.#cap);
+  /** Running sum of `#p`, so the mean is O(1) and never a scan over a long reply. */
+  #pSum = 0;
   #entropy = new Float32Array(this.#cap);
   #boundaryP = new Float32Array(this.#cap);
   #chunk = new Int32Array(this.#cap);
@@ -113,11 +115,22 @@ export class ByteTrace {
     return this.#text;
   }
 
+  /**
+   * Mean probability of the byte the model actually chose, under the distribution it actually
+   * sampled from. Unlike `entropy` (which the engine computes on the raw softmax, before
+   * temperature and top-p), this moves when the sampling knobs move, so it is the one honest
+   * per-reply answer to "what did that setting do".
+   */
+  get meanP(): number {
+    return this.#n === 0 ? 0 : this.#pSum / this.#n;
+  }
+
   push(ev: ByteEvent): void {
     if (this.#n === this.#cap) this.#grow();
     const s = this.#n;
     this.#byte[s] = ev.byte & 0xff;
     this.#p[s] = ev.p;
+    this.#pSum += ev.p;
     this.#entropy[s] = ev.entropy;
     this.#boundaryP[s] = ev.boundary_p;
     this.#chunk[s] = ev.chunk;
@@ -286,6 +299,7 @@ export class ByteTrace {
     t.#runStart = d.runStart.slice();
     t.#closed = d.closed;
     t.#text = d.text;
+    for (let i = 0; i < n; i++) t.#pSum += t.#p[i];
     t.settle(d.text);
     return t;
   }

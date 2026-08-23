@@ -2,7 +2,7 @@
   import { chat } from '../lib/stores/chat.svelte';
   import { model } from '../lib/stores/model.svelte';
   import { diagnostics } from '../lib/stores/diagnostics.svelte';
-  import { settings } from '../lib/stores/settings.svelte';
+  import { settings, showParam } from '../lib/stores/settings.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { autosize, dismissable } from '../lib/actions';
   import SamplingControls from './SamplingControls.svelte';
@@ -52,6 +52,23 @@
     if (ui.focusComposer === 0) return;
     area?.focus();
   });
+
+  // What the *next* reply will be drawn at. The transcript already discloses what each past
+  // reply was drawn at, so this reads forward: the two never say the same thing twice.
+  // Only the randomness knobs are named — they are what changes the character of a reply, and
+  // naming all four would reflow the toolbar mid-drag. A cap or draft-length change adds a dot.
+  const summary = $derived(
+    settings.offDefaultKeys
+      .filter((k) => k === 'temperature' || k === 'top_p')
+      .map((k) => showParam(k, settings.params[k]))
+      .join(' · ')
+  );
+  const otherChanged = $derived(
+    settings.offDefaultKeys.some((k) => k === 'max_bytes' || k === 'n_candidates')
+  );
+  const spoken = $derived(
+    settings.offDefaultKeys.map((k) => showParam(k, settings.params[k])).join(', ')
+  );
 
   // Context is only worth a line when it is actually filling up.
   const context = $derived.by(() => {
@@ -108,9 +125,10 @@
         >
           <Icon name="sliders" size={14} />
           Sampling
+          {#if summary}<span class="summary tabular" aria-hidden="true">· {summary}</span>{/if}
+          {#if otherChanged}<span class="dot" aria-hidden="true"></span>{/if}
           {#if settings.anyOverridden}
-            <span class="dot" aria-hidden="true"></span>
-            <span class="sr-only">(changed from the checkpoint defaults)</span>
+            <span class="sr-only">— next reply off the checkpoint defaults: {spoken}</span>
           {/if}
         </button>
         {#if panelOpen}
@@ -238,12 +256,22 @@
     background: var(--accent);
   }
 
+  .summary {
+    color: var(--accent-ink);
+    white-space: nowrap;
+  }
+
   .panel {
     position: absolute;
     bottom: calc(100% + 0.5rem);
     left: 0;
     z-index: 30;
     width: min(23rem, calc(100vw - 2rem));
+    /* Pinning every hint open, on a phone, used to run the panel off the top of the screen
+       with no way back down to Reset. */
+    max-height: min(60vh, 32rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 0.95rem 1rem;
     background: var(--bg);
     border: 1px solid var(--rule-strong);

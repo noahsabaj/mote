@@ -333,9 +333,9 @@ class Chat {
     // Provenance is captured here, not read back later: by the time you compare two samples
     // the sliders have moved and the checkpoint may have been swapped underneath them.
     const params = { ...settings.params };
-    const offDefault = (Object.keys(params) as (keyof SamplingParams)[]).filter(
-      (k) => params[k] !== settings.defaults[k]
-    );
+    // Same value-based comparison the panel and the composer trigger use, so a reply is never
+    // labelled off-default by one surface and on-default by another.
+    const offDefault = settings.offDefaultKeys;
     const reply: Turn = {
       id: newId(),
       role: 'assistant',

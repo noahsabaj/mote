@@ -7,7 +7,7 @@
   import ChunkedText from './ChunkedText.svelte';
   import Icon from './Icon.svelte';
   import { ago, num, pct } from '../lib/format';
-  import type { SamplingParams } from '../lib/types';
+  import { showParam } from '../lib/stores/settings.svelte';
 
   let {
     turn,
@@ -78,19 +78,12 @@
 
   // --------------------------------------------------------------- provenance
 
-  const SHORT: Record<keyof SamplingParams, string> = {
-    temperature: 'T',
-    top_p: 'top-p',
-    max_bytes: 'max',
-    n_candidates: 'n'
-  };
-
   // Only the knobs that were not the checkpoint's own recommendation. A reply drawn at the
   // defaults says nothing, because there is nothing to disclose.
   const offDefault = $derived.by(() => {
     const p = turn.params;
     if (!p || !turn.offDefault?.length) return '';
-    return turn.offDefault.map((k) => `${SHORT[k]} ${p[k]}`).join(', ');
+    return turn.offDefault.map((k) => showParam(k, p[k])).join(', ');
   });
 
   const reasonNote = $derived(
