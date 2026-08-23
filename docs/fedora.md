@@ -33,6 +33,27 @@ notes (`~/.claude/projects/D--Code-Workshop-1/memory/`, mirrored in `docs/_memor
 `docs/shape.md`, `docs/prefs.md`, `docs/context.md` carry every decision, and that is a lighter start
 than a 28 MB, thrice-compacted transcript.
 
+## Decisions (grilling, 2026-08-23 afternoon)
+
+* **Hand-off**: the copy on Fedora's root (`~/mote`) is canonical. A bare repo on the USB disk is the backup
+  remote, readable from both OSes: `git init --bare /run/media/$USER/<D>/Code/mote.git` then
+  `git remote add backup …` and `git push backup --all` after every session. The Windows working copy on D:
+  stays untouched until the Windows clean-up below.
+* **Phone**: Fedora joins Tailscale as its own node (Noah installs Tailscale); re-pair the phone once and
+  re-add the home-screen tile for the new origin. The Windows node stays valid for boots back into Windows.
+* **Disks, measured**: D: (USB flash, NTFS) 389 MiB/s sequential, ~9 000 random 4 KiB reads/s; C: (NVMe)
+  8–40× that. Training never needed more than the USB disk gives (tens of reads per step); small-file work
+  (git, npm, tests) is what it slowed. Nothing moves to C:.
+* **Copy**: `data/` 29 GB + `runs/` 7.4 GB + the repo, onto the 212 GB Linux root. The venv, `node_modules`
+  and the Mamba checkout are rebuilt, not copied.
+* **Mamba kernels**: the code imports only Triton kernels (`mamba3_siso_combined`, `ssd_combined`); WSL
+  never had `nvcc`. On Fedora: `git clone https://github.com/state-spaces/mamba.git ~/mamba && git -C ~/mamba
+  checkout e9594ce && MAMBA_SKIP_CUDA_BUILD=TRUE uv pip install -e ~/mamba --no-build-isolation`.
+* **Studio on Fedora** serves on `cuda` (Triton present), which is also what day-one step 5 measures.
+* **Windows clean-up, after day one passes and the backup remote holds the full history**: `mote service
+  uninstall` (done at leave time), then delete the WSL distro (`wsl --unregister <distro>`, ~36 GB on C:;
+  the hnet-venv and chain logs go with it — the results are in docs/results). **Not before Noah says so.**
+
 ## On Fedora
 
 1. **Disk**: the repo, `data/` (23 GB) and `runs/` go on Fedora's own partition on the NVMe (disk 0 has a
@@ -59,7 +80,8 @@ than a 28 MB, thrice-compacted transcript.
    token moved with `.mote/token`, so the existing PWA keeps working; re-add the tile only for a new icon).
 9. **SearXNG** (search design): `podman run -d --name searxng -p 127.0.0.1:8080:8080 docker.io/searxng/searxng`
    with `settings.yml` enabling the JSON format — the server only ever talks to localhost:8080.
-10. **WSL leftovers**: nothing in `~/` on the WSL side is needed; the chain scripts there are history.
+10. **WSL leftovers**: nothing in `~/` on the WSL side is needed (HF cache empty, chain scripts are history);
+    the distro is deleted in the Windows clean-up step above, not before.
 
 ## After the move
 
