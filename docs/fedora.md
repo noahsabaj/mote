@@ -35,8 +35,12 @@ than a 28 MB, thrice-compacted transcript.
 
 ## On Fedora
 
-1. **Disk**: the repo, `data/` (23 GB) and `runs/` live on ext4, not on the NTFS mount — NTFS through
-   `ntfs-3g` is slow for the memmapped shards. Copy once: `rsync -a --info=progress2 /run/media/<user>/<D>/Code/Workshop/1/ ~/mote/`.
+1. **Disk**: the repo, `data/` (23 GB) and `runs/` go on Fedora's own partition on the NVMe (disk 0 has a
+   2 GB Linux boot partition and a 212 GB Linux root — Fedora's default is Btrfs; ext4 only if chosen at install;
+   `df -hT /` tells). Both C: and D: stay NTFS and are only read from. D: is a 934 GB **USB flash disk**, the
+   worst place for memmapped shards, so the copy is the single biggest I/O change of the move. Copy once:
+   `rsync -a --info=progress2 /run/media/<user>/<D>/Code/Workshop/1/ ~/mote/`. On Btrfs, mark the big-file
+   directories no-CoW before filling them: `chattr +C ~/mote/data ~/mote/runs`.
 2. **GPU**: `nvidia-smi` works (confirmed by Noah). Install CUDA toolkit matching the driver for Triton
    (`sudo dnf install cuda-toolkit` from the NVIDIA repo, or the `nvidia-cuda-toolkit` build that matches).
 3. **Python**: `uv venv --python 3.11 .venv && source .venv/bin/activate && uv pip install -e .` then
