@@ -22,7 +22,8 @@
     | 'pencil'
     | 'info'
     | 'search'
-    | 'download';
+    | 'download'
+    | 'grip';
 
   let { name, size = 16 }: { name: Name; size?: number } = $props();
 
@@ -31,6 +32,7 @@
     stop: '',
     sliders: 'M2.5 4.5h11M2.5 11.5h11',
     close: 'M4 4l8 8M12 4l-8 8',
+    grip: 'M6.1 4.6h.3M9.6 4.6h.3M6.1 8h.3M9.6 8h.3M6.1 11.4h.3M9.6 11.4h.3',
     copy: 'M5.5 5.5V3.2A.7.7 0 0 1 6.2 2.5h6.1a.7.7 0 0 1 .7.7v6.1a.7.7 0 0 1-.7.7h-2.3M3.2 5.5h6.1a.7.7 0 0 1 .7.7v6.6a.7.7 0 0 1-.7.7H3.2a.7.7 0 0 1-.7-.7V6.2a.7.7 0 0 1 .7-.7Z',
     redo: 'M13.2 6.6A5.4 5.4 0 1 0 13.4 9M13.2 2.9v3.7h-3.7',
     plus: 'M8 3.2v9.6M3.2 8h9.6',

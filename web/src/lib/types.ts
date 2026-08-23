@@ -141,10 +141,31 @@ export function isTrainRecord(r: LogRecord): r is TrainRecord {
  *  correction drawn when a draft byte was rejected (still distributed exactly as the model would sample). */
 export type ByteSource = 'nbp' | 'mbp' | 'fix';
 
+/** folding (docs/context.md): 'auto' folds when the prompt would overflow, 'now' folds everything before
+ *  the last user turn, 'off' is plain truncation (drop oldest) */
+export type FoldMode = 'auto' | 'now' | 'off';
+
+/** the first `from` turns were folded into `card`, which rides inside the first kept user turn */
+export interface FoldInfo {
+  from: number;
+  turns: number;
+  card: string;
+}
+
+/** POST /api/context — what the next prompt would look like, without generating */
+export interface ContextPreview {
+  used: number;
+  limit: number;
+  reserve: number;
+  fold: FoldInfo | null;
+  truncated: boolean;
+}
+
 export interface ClientGenerate {
   type: 'generate';
   messages: { role: ChatRole; content: string }[];
   params: SamplingParams;
+  context?: { fold: FoldMode; card?: string | null };
 }
 
 export interface ClientStop {
@@ -158,7 +179,9 @@ export interface StartEvent {
   prompt_bytes: number;
   context_bytes: number;
   context_limit: number;
+  /** only when even folding could not fit (a giant message) */
   truncated: boolean;
+  fold?: FoldInfo | null;
 }
 
 export interface ByteEvent {

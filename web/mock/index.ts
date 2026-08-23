@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin, ViteDevServer } from 'vite';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { CHECKPOINTS, checkpointList, modelPayload, runLog, runs, state } from './data';
-import { runGeneration, type Session } from './generate';
+import { previewContext, runGeneration, type Session } from './generate';
 
 const SWAP_MS = 1400;
 
@@ -106,6 +106,20 @@ async function handle(
     state.loadedId = id;
     state.swapping = false;
     return json(res, 200, modelPayload());
+  }
+
+  if (path === '/api/context' && req.method === 'POST') {
+    const body = await readJson(req);
+    return json(
+      res,
+      200,
+      previewContext(
+        (body.messages ?? []) as { role: string; content: string }[],
+        Number(body.max_bytes ?? 512),
+        String(body.fold ?? 'auto'),
+        (body.card ?? null) as string | null
+      )
+    );
   }
 
   if (path === '/api/training/runs' && req.method === 'GET') {

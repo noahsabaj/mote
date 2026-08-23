@@ -125,8 +125,12 @@ export class GenerateSocket {
   }
 
   /** Queued rather than rejected when the link is down, then sent on the next open. */
-  generate(messages: { role: ChatRole; content: string }[], params: SamplingParams): void {
-    this.#pending = { type: 'generate', messages, params };
+  generate(
+    messages: { role: ChatRole; content: string }[],
+    params: SamplingParams,
+    context?: ClientGenerate['context']
+  ): void {
+    this.#pending = { type: 'generate', messages, params, ...(context ? { context } : {}) };
     if (this.#ws?.readyState === WebSocket.OPEN) this.#flush();
     else this.connect();
   }

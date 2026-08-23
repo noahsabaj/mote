@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Optional, Callable, Dict, List, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -20,6 +20,7 @@ from ..model.hnet import HNetForCausalLM
 from ..model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
 from ..model.dc import HAS_SSD_KERNEL
 from ..model.relation import FullRelation
+from .context import fold
 from .identity import identity_card, with_system_card
 from ..tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer
 
@@ -257,15 +258,19 @@ class Engine:
         return {"mamba3": {"encoder_retention": mean(enc), "decoder_retention": mean(dec)}, "relation": {"exchange_mass": rel}, "boundary_probs": boundary_probs[-64:]}
 
     @torch.no_grad()
-    def generate(self, messages: Sequence[dict], params: GenParams, emit: Callable[[dict], None], stop: threading.Event) -> None:
+    def generate(self, messages: Sequence[dict], params: GenParams, emit: Callable[[dict], None], stop: threading.Event,
+                 context: Optional[dict] = None) -> None:
+        """`context`: {"fold": "auto" | "now" | "off", "card": <edited card or None>} — see morpheme.serve.context."""
         with self.lock:
-            self._generate(messages, params, emit, stop)
+            self._generate(messages, params, emit, stop, context or {})
 
-    def _generate(self, messages, params: GenParams, emit, stop: threading.Event) -> None:
+    def _generate(self, messages, params: GenParams, emit, stop: threading.Event, context: dict) -> None:
         limit = self.cfg.max_seq_len
         if limit >= 1024:  # the identity card needs room; tiny test contexts go without
             messages = with_system_card(messages, self.model.num_params())  # Mote knows what it is
-        prompt_ids, truncated = self.build_prompt(messages, limit, reserve=min(params.max_bytes, limit // 4))
+        folded = fold(messages, limit, reserve=min(params.max_bytes, limit // 4), tok=self.tok,
+                      mode=context.get("fold", "auto") or "auto", card_override=context.get("card"))
+        prompt_ids, truncated = folded.ids, folded.truncated
         ids = torch.tensor([prompt_ids], device=self.device)
         t0 = time.perf_counter()
         state = self.model.allocate_inference_state(self.device)
@@ -273,7 +278,8 @@ class Engine:
         logits = out.logits[0, -1]
         n_chunks = int(out.chunk_id[0, -1]) + 1
         P = len(prompt_ids)
-        emit({"type": "start", "prompt_bytes": P, "context_bytes": P, "context_limit": limit, "truncated": truncated})
+        emit({"type": "start", "prompt_bytes": P, "context_bytes": P, "context_limit": limit, "truncated": truncated,
+              "fold": folded.report()})
 
         streamer = Utf8Streamer()
         boundary_probs: List[float] = []

@@ -74,11 +74,20 @@
   const context = $derived.by(() => {
     const live = diagnostics.stats;
     const last = [...chat.turns].reverse().find((t) => t.contextLimit);
-    const used = live?.context_bytes ?? last?.contextBytes;
-    const limit = live?.context_limit ?? last?.contextLimit ?? model.info?.context_limit_bytes;
+    const used = live?.context_bytes ?? chat.preview?.used ?? last?.contextBytes;
+    const limit = live?.context_limit ?? chat.preview?.limit ?? last?.contextLimit ?? model.info?.context_limit_bytes;
     if (!used || !limit) return null;
     if (used / limit < 0.5) return null;
     return { used, limit, frac: Math.min(1, used / limit) };
+  });
+  // The meter shows the *next* prompt: re-ask the backend whenever what would be sent changes.
+  $effect(() => {
+    void chat.turns.length;
+    void chat.foldMode;
+    void chat.foldNow;
+    void chat.card;
+    void settings.params.max_bytes;
+    chat.refreshPreview();
   });
 </script>
 
@@ -93,10 +102,21 @@
     <p class="line">Loading {model.swapping} — the composer is disabled until the swap finishes.</p>
   {:else if context}
     <p class="line">
-      Context {context.used} of {context.limit} bytes
+      {chat.busy ? 'Context' : 'Next prompt'} {context.used} of {context.limit} bytes
       <span class="gauge" aria-hidden="true"
         ><span class="gauge-fill" style="width: {context.frac * 100}%"></span></span
       >
+      {#if chat.preview?.fold && !chat.busy}
+        · {chat.preview.fold.turns} folded
+      {/if}
+      {#if chat.foldMode === 'off'}
+        · folding off
+        <button class="quiet inline" onclick={() => chat.refold()}>Fold again</button>
+      {:else if !chat.busy && chat.turns.length >= 3}
+        <button class="quiet inline" onclick={() => chat.foldNext()} disabled={chat.foldNow}>
+          {chat.foldNow ? 'Folding on the next reply' : 'Fold now'}
+        </button>
+      {/if}
     </p>
   {/if}
 

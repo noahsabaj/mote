@@ -2,6 +2,7 @@
   import { chat } from '../lib/stores/chat.svelte';
   import { notices } from '../lib/stores/notice.svelte';
   import Message from './Message.svelte';
+  import FoldLine from './FoldLine.svelte';
   import Icon from './Icon.svelte';
 
   let { oninspect }: { oninspect: (id: string) => void } = $props();
@@ -27,6 +28,9 @@
       };
     });
   });
+
+  // Where Mote's view will start on the next reply (docs/context.md); turns above it are dimmed.
+  const fold = $derived(chat.busy ? null : (chat.preview?.fold ?? null));
 
   function onscroll() {
     if (!scroller) return;
@@ -66,13 +70,18 @@
         </p>
       </div>
     {:else}
-      {#each rows as row (row.turn.id)}
+      {#each rows as row, i (row.turn.id)}
         {#if row.rule !== null}
           <div class="swap" role="separator">
             <span>checkpoint step {row.rule} loaded</span>
           </div>
         {/if}
-        <Message turn={row.turn} isLast={row.isLast} {oninspect} />
+        {#if fold && i === fold.from}
+          <FoldLine {fold} card={chat.card} onedit={(c) => chat.setCard(c)} onunfold={() => chat.unfold()} />
+        {/if}
+        <div class="slot" class:folded={fold !== null && i < fold.from}>
+          <Message turn={row.turn} isLast={row.isLast} {oninspect} />
+        </div>
       {/each}
     {/if}
   </div>
@@ -86,6 +95,10 @@
 {/if}
 
 <style>
+  .slot.folded {
+    opacity: 0.55;
+  }
+
   .scroller {
     flex: 1;
     overflow-y: auto;

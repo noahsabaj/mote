@@ -5,6 +5,7 @@
 // per animation frame: a reply is thousands of `byte` events and each one must not touch
 // the DOM on its own.
 
+import { api } from '../api';
 import { GenerateSocket, type LinkState } from '../ws';
 import { auth } from './auth.svelte';
 import { ByteTrace, type SerializedTrace } from '../trace.svelte';
@@ -15,7 +16,7 @@ import { settings } from './settings.svelte';
 import { diagnostics } from './diagnostics.svelte';
 import { model } from './model.svelte';
 import { notices } from './notice.svelte';
-import type { ChatRole, DoneEvent, SamplingParams, ServerEvent, StatsPayload } from '../types';
+import type { ChatRole, ContextPreview, DoneEvent, FoldInfo, SamplingParams, ServerEvent, StatsPayload } from '../types';
 
 export interface Turn {
   id: string;
@@ -26,8 +27,10 @@ export interface Turn {
   stats?: StatsPayload | null;
   reason?: DoneEvent['reason'];
   error?: string | null;
-  /** from `start`: the prompt did not fit the context window */
+  /** from `start`: even folding could not fit the prompt (a giant message) */
   truncated?: boolean;
+  /** from `start`: what this reply saw in place of the oldest turns (docs/context.md) */
+  fold?: FoldInfo | null;
   contextBytes?: number;
   contextLimit?: number;
   /** milliseconds from send to the first byte of the reply */
@@ -119,6 +122,16 @@ class Chat {
   awaitingStart = $state(false);
   link = $state<LinkState>('offline');
 
+  /** folding for the next reply: 'auto' folds when the prompt would overflow, 'off' is plain truncation */
+  foldMode = $state<'auto' | 'off'>('auto');
+  /** one-shot: fold everything before the last user turn on the next send */
+  foldNow = $state(false);
+  /** the user's edited compaction card, sent in place of the generated one until reset */
+  card = $state<string | null>(null);
+  /** what the next prompt would look like (POST /api/context), refreshed as the turns change */
+  preview = $state<ContextPreview | null>(null);
+  #previewTimer: ReturnType<typeof setTimeout> | null = null;
+
   #socket: GenerateSocket;
   #queue: ServerEvent[] = [];
   #frame: number | null = null;
@@ -168,6 +181,7 @@ class Chat {
   // ------------------------------------------------------------ conversations
 
   open(id: string): void {
+    this.#resetFolding();
     if (this.busy) this.stop();
     const stored = persist.read<StoredConversation | null>(convKey(id), null);
     if (!stored) return;
@@ -189,6 +203,7 @@ class Chat {
   }
 
   newConversation(): void {
+    this.#resetFolding();
     if (this.busy) this.stop();
     this.id = newId();
     this.title = 'New conversation';
@@ -325,6 +340,62 @@ class Chat {
     this.#socket.stop();
   }
 
+  // ------------------------------------------------------------------ folding (docs/context.md)
+
+  /** Ask the backend what the next prompt would look like; debounced, for the meter and the fold line. */
+  refreshPreview(): void {
+    if (this.#previewTimer) clearTimeout(this.#previewTimer);
+    this.#previewTimer = setTimeout(async () => {
+      this.#previewTimer = null;
+      const messages = this.turns.map((t) => ({ role: t.role, content: t.content }));
+      if (!messages.length) {
+        this.preview = null;
+        return;
+      }
+      try {
+        this.preview = await api.context(
+          messages,
+          settings.params.max_bytes,
+          this.foldNow ? 'now' : this.foldMode,
+          this.card
+        );
+      } catch {
+        /* offline: the meter falls back to the last reply's numbers */
+      }
+    }, 250);
+  }
+
+  /** The user's version of the compaction card (null = the generated one). */
+  setCard(card: string | null): void {
+    this.card = card;
+    this.refreshPreview();
+  }
+
+  /** Send the whole conversation next time; older turns are dropped, not folded. */
+  unfold(): void {
+    this.foldMode = 'off';
+    this.foldNow = false;
+    this.refreshPreview();
+  }
+
+  refold(): void {
+    this.foldMode = 'auto';
+    this.refreshPreview();
+  }
+
+  /** Fold everything before the last user turn on the next send. */
+  foldNext(): void {
+    this.foldNow = true;
+    this.refreshPreview();
+  }
+
+  #resetFolding(): void {
+    this.foldMode = 'auto';
+    this.foldNow = false;
+    this.card = null;
+    this.preview = null;
+  }
+
   #dispatch(samples?: Turn[]): void {
     const history: { role: ChatRole; content: string }[] = this.turns.map((t) => ({
       role: t.role,
@@ -354,7 +425,9 @@ class Chat {
     this.awaitingStart = true;
     this.#sentAt = performance.now();
     diagnostics.begin();
-    this.#socket.generate(history, settings.params);
+    const context = { fold: this.foldNow ? ('now' as const) : this.foldMode, card: this.card };
+    this.foldNow = false;
+    this.#socket.generate(history, settings.params, context);
     this.#save();
   }
 
@@ -391,6 +464,7 @@ class Chat {
           this.awaitingStart = false;
           this.#patch(id, {
             truncated: ev.truncated,
+            fold: ev.fold ?? null,
             contextBytes: ev.context_bytes,
             contextLimit: ev.context_limit
           });

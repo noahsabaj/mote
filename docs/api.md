@@ -42,6 +42,10 @@ shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair
 }
 ```
 
+### `POST /api/context`  body `{ "messages": [...], "max_bytes": 512, "fold": "auto", "card": null }`
+What the next prompt would look like, without generating — for the studio's meter and fold line:
+`{ "used": 1830, "limit": 2048, "reserve": 512, "fold": null | { "from", "turns", "card" }, "truncated": false }`.
+
 ### `GET /api/checkpoints`
 `[{ "id": "pilot_1h/last.pt", "step": 3100, "val_bpb": 1.63, "bytes_seen": 101580800, "created_at": "...", "loaded": true }, ...]`
 
@@ -71,13 +75,17 @@ Client → server
 ```json
 { "type": "generate",
   "messages": [{"role": "user", "content": "What does dynamic chunking do?"}],
-  "params": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "n_candidates": 3 } }
+  "params": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "n_candidates": 3 },
+  "context": { "fold": "auto" | "now" | "off", "card": null | "<the user's edited compaction card>" } }   // optional
 { "type": "stop" }
 ```
 
 Server → client (in order)
 ```json
-{ "type": "start", "prompt_bytes": 61, "context_bytes": 61, "context_limit": 2048, "truncated": false }
+{ "type": "start", "prompt_bytes": 61, "context_bytes": 61, "context_limit": 2048, "truncated": false,
+  "fold": null | { "from": 6, "turns": 6, "card": "(Earlier in this conversation, 6 turns folded. ...)" } }
+  // fold: the first `from` non-system turns were folded into `card`, which rides inside the first kept user
+  // turn (docs/context.md); `truncated` is now only true when even folding could not fit (a giant message).
 
 { "type": "byte", "i": 0, "byte": 84, "text": "T", "pending": 0,
   "p": 0.42, "entropy": 2.31, "boundary": true, "boundary_p": 0.93, "chunk": 0,

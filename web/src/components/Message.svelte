@@ -172,6 +172,12 @@
         The conversation was truncated to fit the {turn.contextLimit} byte context window.
       </p>
     {/if}
+    {#if turn.fold}
+      <p class="notice">
+        <Icon name="structure" size={13} />
+        {turn.fold.turns} earlier {turn.fold.turns === 1 ? 'turn was' : 'turns were'} folded into a card for this reply.
+      </p>
+    {/if}
 
     <div class="body" class:awaiting={empty}>
       {#if trace && (streaming || ui.structure)}

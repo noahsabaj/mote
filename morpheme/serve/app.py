@@ -23,6 +23,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .context import context_report
+from .identity import with_system_card
 from .engine import Engine, GenParams, discover_checkpoints
 from .pairing import Pairing, router as pairing_router
 
@@ -179,12 +181,30 @@ class ChatBody(BaseModel):
     model: Optional[str] = None
 
 
-def _run_generation(eng: Engine, messages, params: GenParams, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stop: threading.Event):
+class ContextBody(BaseModel):
+    messages: list
+    max_bytes: Optional[int] = None
+    fold: str = "auto"
+    card: Optional[str] = None
+
+
+@app.post("/api/context")
+def context_preview(body: ContextBody):
+    """What the next prompt would look like — bytes used, fold point, card — without generating."""
+    eng = engine()
+    limit = eng.cfg.max_seq_len
+    msgs = with_system_card(body.messages, eng.model.num_params()) if limit >= 1024 else body.messages
+    reserve = min(body.max_bytes or eng.defaults.max_bytes, limit // 4)
+    return context_report(msgs, limit, reserve, eng.tok, body.fold or "auto", body.card)
+
+
+def _run_generation(eng: Engine, messages, params: GenParams, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stop: threading.Event,
+                    context: Optional[dict] = None):
     def emit(ev: dict):
         loop.call_soon_threadsafe(queue.put_nowait, ev)
 
     try:
-        eng.generate(messages, params, emit, stop)
+        eng.generate(messages, params, emit, stop, context=context)
     except Exception as e:  # surface engine errors to the client
         emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
@@ -269,7 +289,7 @@ async def ws_generate(ws: WebSocket):
             params = GenParams.from_dict(msg.get("params"), eng.defaults)
             queue: asyncio.Queue = asyncio.Queue()
             stop.clear()
-            threading.Thread(target=_run_generation, args=(eng, msg.get("messages", []), params, loop, queue, stop), daemon=True).start()
+            threading.Thread(target=_run_generation, args=(eng, msg.get("messages", []), params, loop, queue, stop, msg.get("context")), daemon=True).start()
 
             async def pump_client():
                 # listen for a stop message while generating

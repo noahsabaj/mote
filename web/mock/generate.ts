@@ -6,7 +6,7 @@
 // The text is drawn from a small fixed set of sentences — no model is involved.
 
 import type { WebSocket } from 'ws';
-import type { ClientGenerate, SamplingParams, StatsPayload } from '../src/lib/types';
+import type { ClientGenerate, ContextPreview, FoldInfo, SamplingParams, StatsPayload } from '../src/lib/types';
 import { state } from './data';
 
 const REPLIES = [
@@ -52,6 +52,36 @@ export interface Session {
   active: boolean;
 }
 
+/** The backend's fold, approximated: everything before the last user turn, first message in the card. */
+export function mockFold(messages: { role: string; content: string }[], card: string | null): FoldInfo | null {
+  const users = messages.map((m, i) => (m.role === 'user' ? i : -1)).filter((i) => i >= 1);
+  if (!users.length) return null;
+  const from = users[users.length - 1];
+  const first = messages.find((m) => m.role === 'user')?.content.replace(/\s+/g, ' ').slice(0, 200) ?? '';
+  return {
+    from,
+    turns: from,
+    card: card ?? `(Earlier in this conversation, ${from} turns folded. You first said: "${first}".)`
+  };
+}
+
+/** POST /api/context in the mock: the same arithmetic the start event uses. */
+export function previewContext(
+  messages: { role: string; content: string }[],
+  max_bytes: number,
+  mode: string,
+  card: string | null
+): ContextPreview {
+  const limit = 2048;
+  const enc = new TextEncoder();
+  const total = enc.encode(messages.map((m) => `${m.role}: ${m.content}`).join('\n')).length + 480;
+  const reserve = Math.min(max_bytes || 512, limit / 4);
+  const overflow = total > limit - reserve;
+  const fold = mode !== 'off' && (overflow || mode === 'now') ? mockFold(messages, card) : null;
+  const used = fold ? Math.min(total, limit - reserve) : Math.min(total, limit);
+  return { used, limit, reserve, fold, truncated: overflow && fold === null };
+}
+
 export function runGeneration(ws: WebSocket, req: ClientGenerate): Session {
   const session: Session = { active: true, cancel: () => (session.active = false) };
   void stream(ws, req, session);
@@ -78,7 +108,10 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
   const contextLimit = 2048;
   const conversation = req.messages.map((m) => `${m.role}: ${m.content}`).join('\n');
   const promptBytesTotal = enc.encode(conversation).length;
-  const truncated = promptBytesTotal > contextLimit;
+  const mode = req.context?.fold ?? 'auto';
+  const overflow = promptBytesTotal > contextLimit;
+  const fold = mode !== 'off' && (overflow || mode === 'now') ? mockFold(req.messages, req.context?.card ?? null) : null;
+  const truncated = overflow && fold === null;
   const promptBytes = Math.min(promptBytesTotal, contextLimit);
 
   const last = req.messages.filter((m) => m.role === 'user').pop();
@@ -94,7 +127,8 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
     prompt_bytes: promptBytes,
     context_bytes: promptBytes,
     context_limit: contextLimit,
-    truncated
+    truncated,
+    fold
   });
 
   const t0 = Date.now();
