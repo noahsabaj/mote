@@ -3,6 +3,8 @@
   import { notices } from '../lib/stores/notice.svelte';
   import Message from './Message.svelte';
   import FoldLine from './FoldLine.svelte';
+  import QueuedList from './QueuedList.svelte';
+  import { queue } from '../lib/stores/queue.svelte';
   import Icon from './Icon.svelte';
 
   let { oninspect }: { oninspect: (id: string) => void } = $props();
@@ -52,6 +54,7 @@
   $effect(() => {
     const live = chat.streamingId ? chat.traces[chat.streamingId] : undefined;
     void chat.turns.length;
+    void queue.items.length;
     void live?.version;
     if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight;
   });
@@ -84,6 +87,10 @@
         </div>
       {/each}
     {/if}
+
+    <!-- Outside the empty branch on purpose: /clear can empty the transcript while items
+         are still waiting, and they must not blink out of sight before they run. -->
+    <QueuedList />
   </div>
 </div>
 

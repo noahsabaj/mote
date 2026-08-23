@@ -16,6 +16,9 @@ import { settings } from './settings.svelte';
 import { diagnostics } from './diagnostics.svelte';
 import { model } from './model.svelte';
 import { notices } from './notice.svelte';
+import { queue } from './queue.svelte';
+import { ui } from './ui.svelte';
+import { parseCommand, unescapeCommand } from '../commands';
 import type { ChatRole, ContextPreview, DoneEvent, FoldInfo, SamplingParams, ServerEvent, StatsPayload } from '../types';
 
 export interface Turn {
@@ -231,6 +234,9 @@ class Chat {
 
   /** Deletes at once and hands the undo bar everything needed to put it back verbatim. */
   deleteConversation(id: string): void {
+    // A debounced save may still be pending, and the snapshot the undo bar holds has to be
+    // the conversation as it actually stands, not as it stood 300 ms ago.
+    if (id === this.id && this.#saveTimer !== null) this.#saveNow();
     const stored = persist.read<StoredConversation | null>(convKey(id), null);
     const storedTraces = persist.read<Record<string, SerializedTrace>>(tracesKey(id), {});
     const before = this.index;
@@ -253,6 +259,57 @@ class Chat {
   }
 
   // ------------------------------------------------------------------ sending
+
+  /**
+   * Everything typed into the composer arrives here, message or command alike.
+   *
+   * While a reply is running the text waits in the queue instead of being refused, so a
+   * thought had mid-reply is not lost. /help is the exception: it changes nothing about the
+   * conversation, so making it wait would be pure ceremony.
+   */
+  enter(text: string): void {
+    const t = text.trim();
+    if (!t) return;
+    if (parseCommand(t) === 'help') {
+      ui.help = true;
+      return;
+    }
+    if (this.busy) {
+      queue.add(t);
+      return;
+    }
+    this.#run(t);
+  }
+
+  #run(text: string): void {
+    switch (parseCommand(text)) {
+      case 'help':
+        ui.help = true;
+        return;
+      case 'clear':
+        // Nothing to delete and nothing to undo — announcing a deletion here would be a
+        // small untruth about an empty conversation.
+        if (this.turns.length > 0) this.deleteConversation(this.id);
+        return;
+      default:
+        this.send(unescapeCommand(text));
+    }
+  }
+
+  /**
+   * Run whatever has been waiting. A command finishes synchronously, so the loop keeps
+   * going; a message takes the socket and stops it until the reply lands. Deferred by a
+   * microtask so the drain that called this can unwind first.
+   */
+  #pump(): void {
+    queueMicrotask(() => {
+      while (!this.busy) {
+        const next = queue.shift();
+        if (!next) return;
+        this.#run(next.text);
+      }
+    });
+  }
 
   send(text: string): void {
     const content = text.trim();
@@ -510,6 +567,7 @@ class Chat {
       this.awaitingStart = false;
       diagnostics.end(finished.stats);
       this.#save();
+      this.#pump();
     }
 
     if (this.#queue.length > 0 && this.#frame === null) {
@@ -531,6 +589,7 @@ class Chat {
     this.awaitingStart = false;
     diagnostics.end(null);
     this.#save();
+    this.#pump();
   }
 
   #fail(message: string): void {
@@ -541,6 +600,8 @@ class Chat {
     this.awaitingStart = false;
     diagnostics.end(null);
     this.#save();
+    // A failed reply does not cancel what you asked for next.
+    this.#pump();
   }
 
   // -------------------------------------------------------------- persistence
@@ -551,6 +612,7 @@ class Chat {
   }
 
   #saveNow(): void {
+    if (this.#saveTimer !== null) clearTimeout(this.#saveTimer);
     this.#saveTimer = null;
     if (this.turns.length === 0) return;
     const title = this.#titleLocked ? this.title : titleFor(this.turns);

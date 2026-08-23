@@ -3,6 +3,7 @@
   // become, so the queue reads as part of the conversation rather than as a control panel —
   // but it is not a turn yet, and nothing here is persisted, exported or traced.
 
+  import { tick } from 'svelte';
   import { queue, type QueuedItem } from '../lib/stores/queue.svelte';
   import { chat } from '../lib/stores/chat.svelte';
   import { autosize, tip } from '../lib/actions';
@@ -10,16 +11,26 @@
 
   let {
     item,
+    index,
+    total,
     isLast,
     dragging,
     ongrab
   }: {
     item: QueuedItem;
+    index: number;
+    total: number;
     /** the bottom-most item carries Interrupt, which belongs to the stream, not to any one item */
     isLast: boolean;
     dragging: boolean;
     ongrab: (e: PointerEvent, id: string) => void;
   } = $props();
+
+  // Spoken by the handle. It carries the position because a reorder is otherwise silent:
+  // re-focusing the handle after a move makes a screen reader read the new place aloud.
+  const gripLabel = $derived(
+    `Reorder — ${index + 1} of ${total}. Hold to drag, or Alt with the arrow keys`
+  );
 
   let editing = $state(false);
   let draft = $state('');
@@ -59,15 +70,17 @@
 
   // Dragging is a pointer gesture, so it is useless to a keyboard and to a screen reader.
   // The same reorder lives on the handle's own arrow keys.
-  function onGripKey(e: KeyboardEvent) {
+  async function onGripKey(e: KeyboardEvent) {
     if (!e.altKey) return;
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      queue.nudge(item.id, -1);
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      queue.nudge(item.id, 1);
-    }
+    const delta = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
+    if (delta === 0) return;
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    if (!queue.nudge(item.id, delta)) return;
+    // Moving a keyed block re-inserts the node, and Chrome blurs whatever it re-inserts —
+    // so without this a second keypress would go to the document and do nothing.
+    await tick();
+    handle.focus();
   }
 </script>
 
@@ -94,7 +107,7 @@
     <footer>
       <button
         class="quiet ico grip"
-        aria-label="Reorder — hold to drag, or Alt with the arrow keys"
+        aria-label={gripLabel}
         onpointerdown={(e) => ongrab(e, item.id)}
         onkeydown={onGripKey}
         use:tip={'Drag, or Alt+↑ ↓'}
@@ -169,7 +182,6 @@
     /* otherwise a touch drag scrolls the transcript instead of moving the item */
     touch-action: none;
     cursor: grab;
-    color: var(--ink-3);
   }
 
   .interrupt {

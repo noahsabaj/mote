@@ -18,6 +18,11 @@ class Ui {
   editing = $state<string | null>(null);
   /** The header's conversation menu. Here so a keyboard shortcut can reach it. */
   switcher = $state(false);
+  /**
+   * The /help popover. It lives here because /help can arrive either straight from the
+   * composer or from an item that was edited into a command while sitting in the queue.
+   */
+  help = $state(false);
   /** Bumped to ask the composer for focus; it is a signal, not a value. */
   focusComposer = $state(0);
 

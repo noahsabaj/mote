@@ -61,6 +61,7 @@ src/
     brand.ts                # the model's name, mirroring serve/identity.py
     clock.svelte.ts         # one 30 s tick shared by every relative timestamp
     actions.ts              # dismissable, autosize, tip (tooltips)
+    commands.ts             # /clear and /help: parsing, escaping, the menu's contents
     chart.ts, views.ts      # small shared types
     stores/
       chat.svelte.ts        # transcript, conversations, streaming pipeline, export
@@ -68,14 +69,19 @@ src/
       settings.svelte.ts    # sampling params as overrides on the model's defaults
       diagnostics.svelte.ts # live values for the reply in flight
       notice.svelte.ts      # the undo bar's one transient message
+      queue.svelte.ts       # what is waiting behind the reply in flight (memory only)
       ui.svelte.ts          # view preferences, edit target, switcher state
   components/
     Header.svelte           # wordmark, conversation switcher (filter/rename/export)
     UndoBar.svelte          # "deleted — undo", above the composer
     Conversation.svelte     # transcript, opening state, follow-the-stream scrolling
     Message.svelte          # one turn, its actions and its measured footer
+    QueuedList.svelte       # the waiting items; owns the pointer drag that reorders them
+    QueuedTurn.svelte       # one waiting item: edit, remove, reorder, interrupt
     ChunkedText.svelte      # plain reply, or the same reply with structure marked
-    Composer.svelte         # textarea, sampling popover, context line, send/stop
+    Composer.svelte         # textarea, sampling popover, context line, send/queue/stop
+    CommandMenu.svelte      # the list that opens on a leading slash
+    HelpPanel.svelte        # what /help shows, above the composer
     SamplingControls.svelte
     Sheet.svelte            # right-hand panel (bottom sheet under 40rem), focus-trapped
     ModelSheet.svelte       # checkpoint, architecture, device, checkpoint list + swap
@@ -125,12 +131,40 @@ checkpoint's own defaults and names the difference when it did not; the Bytes sh
 export carry the full values. A checkpoint hot-swapped mid-conversation draws a rule across the
 transcript, because two replies from two different models otherwise look identical.
 
+**Commands.** `/clear` deletes the open conversation — index entry, stored turns and traces —
+and opens a fresh one, with the undo bar holding it for eight seconds; `/help` opens a popover
+above the composer. Parsing is exact: the whole trimmed message has to be the command, so
+`/clear the table` and a mistyped `/celar` are ordinary messages and `//clear` sends the literal
+text. That matters because Mote reads raw bytes and "/clear is a shell builtin, right?" is a
+question worth being able to ask it. The composer highlights a command in the accent colour as
+you type it — a mirror div behind a transparent textarea, which is only safe because a command
+never wraps or scrolls. Typing `/` opens a menu; picking an entry fills the field and running it
+takes a second, deliberate Enter.
+
+`/help` never enters the transcript. The transcript is a record of what Mote produced and it
+feeds the exports and the byte traces, so a fabricated turn in it would make all of those
+slightly untrue.
+
+**The queue.** Anything typed while a reply is running waits below it rather than being refused,
+messages and commands alike, and fires in order as each reply lands — including after a reply
+that failed, because a dropped socket is not a reason to discard what you asked for next. Each
+waiting item is a bubble you can edit by clicking, remove with its ×, and reorder by dragging its
+handle or holding Alt with the arrow keys; the handle names its own position so a reorder is not
+silent to a screen reader. `Interrupt`, on the bottom-most item, ends the reply so the queue
+starts now — which is exactly what Escape already did, so the two agree rather than compete.
+Stop keeps its place in the composer and the queue button appears to its left, because the
+emergency control should not move. The queue is memory only: it is never persisted, never
+exported, carries no byte trace, and a reload drops it. A queued prompt captures its sampling
+parameters when it fires rather than when you typed it — the sliders may well have moved while
+it waited. `/clear` does not empty the queue, so anything you lined up behind it runs in the new
+conversation.
+
 **Sampling.** `/api/model.defaults` is the baseline; your changes are stored as overrides, so
 Reset restores what the checkpoint recommends and a checkpoint that ships different defaults is
 honoured for anything you have not touched.
 
-**Keyboard.** Enter sends, Shift+Enter opens a line, Up on an empty composer edits the last
-prompt. Esc cancels an edit, then closes a layer, then stops a reply, then returns focus to the
+**Keyboard.** Enter sends — or queues, while a reply is running — Shift+Enter opens a line, and
+Up on an empty composer edits the last prompt. Esc cancels an edit, then closes a layer, then stops a reply, then returns focus to the
 composer — in that order. Ctrl/⌘+K opens the conversation switcher; Alt/⌥+1/2/3 open the three
 panels. In an edit box Enter makes a line and Ctrl/⌘+Enter saves, because a prompt being
 rewritten is usually several paragraphs. Modifiers only, never a bare letter: the composer is a
