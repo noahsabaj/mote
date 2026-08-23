@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "websockets>=12.0",
+    "qrcode>=8",
     "pytest>=8.0.0",
 ]
 

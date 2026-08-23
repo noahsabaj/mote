@@ -25,8 +25,11 @@ public, TLS is handled for you, and no router or firewall changes are needed.
    (plain `tailscale` works in any terminal opened after the install). It prints the URL —
    `https://<your-node>.<your-tailnet>.ts.net/` on this tailnet. This also reaches a server running
    inside WSL2, because WSL2 forwards its ports to Windows `localhost`.
-5. On the phone, open that URL and paste the token when asked. It is stored in the browser;
-   change the token on the server to revoke every device at once.
+5. Pair the phone without typing the token: on the PC open **http://127.0.0.1:7861/pair** (served only
+   to the machine itself). Scan its QR with the phone's camera — the link carries the token in the URL
+   fragment, which browsers never send to a server — or type the six-digit code it shows into the
+   studio's unlock sheet (codes last 2 minutes, work once, 10 attempts per minute). The token is then
+   stored in that browser; change the token on the server to revoke every device at once.
 6. Optional: Safari share sheet → **Add to Home Screen**. The studio ships a web-app manifest and
    icons, so it opens full-screen like an app. There is deliberately no service worker — the app
    needs its backend, and a cached shell is the one thing that could go stale after a rebuild. The
@@ -49,5 +52,7 @@ not reachable this way — run the Windows server, or publish via Tailscale as a
 * HTTP (`/api/*`, `/v1/*`): `Authorization: Bearer <token>` on every request, else `401`.
 * WebSocket (`/ws/generate`): first frame must be `{"type": "auth", "token": "<token>"}`; the
   server answers `{"type": "auth_ok"}` or closes with code `4401`.
-* `/api/health` and the static frontend stay open so the UI can load and ask for the token.
+* `/api/health`, `/api/pair` (code redemption) and the static frontend stay open so the UI can load and pair.
+* `/pair` and `/pair/code` answer only loopback clients; `--public-url` (or `MORPHEME_URL`) overrides the
+  address encoded in the QR (default: detected from `tailscale serve status`).
 * Comparison is constant-time; the token is never put in a URL.

@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .engine import Engine, GenParams, discover_checkpoints
+from .pairing import Pairing, router as pairing_router
 
 ROOT = Path(__file__).resolve().parents[2]
 mimetypes.add_type("application/manifest+json", ".webmanifest")
@@ -37,7 +38,9 @@ STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "tok
 # UI can load and ask for the token. Binding to anything but loopback refuses to start
 # without a token unless --no-auth is given explicitly.
 PROTECTED_PREFIXES = ("/api/", "/v1/")
-OPEN_PATHS = {"/api/health"}
+OPEN_PATHS = {"/api/health", "/api/pair"}  # /api/pair is how a device obtains the token
+PAIRING = Pairing(STATE)
+app.include_router(pairing_router(PAIRING))
 
 
 def token_ok(presented) -> bool:
@@ -318,11 +321,16 @@ def main(argv=None):
     ap.add_argument("--token", default=os.environ.get("MORPHEME_TOKEN") or None,
                     help="shared access token (or MORPHEME_TOKEN); required unless bound to loopback or --no-auth")
     ap.add_argument("--no-auth", action="store_true", help="serve without a token on a non-loopback host (not recommended)")
+    ap.add_argument("--public-url", default=os.environ.get("MORPHEME_URL") or None,
+                    help="address phones use (default: detected from `tailscale serve status`); encoded in the /pair QR")
     args = ap.parse_args(argv)
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
     if not loopback and not args.token and not args.no_auth:
         raise SystemExit(f"refusing to bind {args.host} without a token: pass --token (or MORPHEME_TOKEN), or --no-auth to override")
     STATE["token"] = args.token or None
+    PAIRING.public_url = args.public_url
+    if STATE["token"]:
+        print(f"pair a device: open http://127.0.0.1:{args.port}/pair on this machine", flush=True)
     print("access token: " + ("required" if STATE["token"] else "none" + ("" if loopback else " (--no-auth)")), flush=True)
     ck = Path(args.checkpoint) if args.checkpoint else (discover_checkpoints(ROOT) or [None])[0]
     if ck is None:

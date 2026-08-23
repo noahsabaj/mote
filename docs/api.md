@@ -11,7 +11,10 @@ request needs `Authorization: Bearer <token>` (otherwise `401` with `WWW-Authent
 and `/ws/generate` expects a first frame `{"type": "auth", "token": "<token>"}` answered by
 `{"type": "auth_ok"}` — a wrong or missing frame closes the socket with code `4401`. An auth frame is
 answered with `auth_ok` even when no token is configured, so clients that hold one can always wait for it.
-`/api/health` and the static frontend are always open. See `docs/remote-access.md`.
+`/api/health`, `/api/pair` and the static frontend are always open. Pairing: `GET /pair` (loopback only)
+shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair {"code"}` returns
+`{"token"}` for a valid, unexpired, unused code (400 otherwise, 429 after 10 attempts/min). The UI reads
+`#token=` from the URL fragment on load and scrubs it. See `docs/remote-access.md`.
 
 ## HTTP
 

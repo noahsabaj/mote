@@ -33,6 +33,31 @@ def test_no_token_means_open(monkeypatch):
         assert ws.receive_json() == {"type": "auth_ok"}
 
 
+def test_pairing_page_is_loopback_only_and_codes_work_once(monkeypatch):
+    monkeypatch.setitem(A.STATE, "token", "s3cret")
+    monkeypatch.setitem(A.STATE, "engine", None)
+    A.PAIRING.public_url = "https://example.ts.net"
+    remote = TestClient(A.app, client=("10.0.0.7", 1234))
+    assert remote.get("/pair").status_code == 403
+    assert remote.get("/pair/code").status_code == 403
+    local = TestClient(A.app, client=("127.0.0.1", 1234))
+    page = local.get("/pair")
+    assert page.status_code == 200 and "https://example.ts.net/#token=s3cret" in page.text
+    code = local.get("/pair/code").json()["code"]
+    assert len(code) == 6 and code.isdigit()
+    assert remote.post("/api/pair", json={"code": "000000" if code != "000000" else "000001"}).status_code == 400
+    assert remote.post("/api/pair", json={"code": code}).json() == {"token": "s3cret"}
+    assert remote.post("/api/pair", json={"code": code}).status_code == 400  # single use
+
+
+def test_pairing_is_rate_limited(monkeypatch):
+    monkeypatch.setitem(A.STATE, "token", "s3cret")
+    A.PAIRING._attempts.clear()
+    c = TestClient(A.app, client=("10.0.0.7", 1234))
+    codes = [c.post("/api/pair", json={"code": "999999"}).status_code for _ in range(11)]
+    assert codes[:10] == [400] * 10 and codes[10] == 429
+
+
 def test_websocket_needs_auth_frame_first(client):
     with client.websocket_connect("/ws/generate") as ws:
         ws.send_json({"type": "generate", "messages": []})

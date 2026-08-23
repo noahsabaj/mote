@@ -58,6 +58,13 @@ export const api = {
       body: JSON.stringify({ id })
     }),
   runs: () => request<TrainingRun[]>('/api/training/runs'),
+  /** redeem a 6-digit pairing code shown on the PC's /pair page for the access token */
+  pair: (code: string) =>
+    request<{ token: string }>('/api/pair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code })
+    }),
   runLog: (id: string, since = 0) =>
     request<LogPage>(`/api/training/runs/${encodeURIComponent(id)}/log?since=${since}`)
 };
