@@ -79,6 +79,24 @@ memory ceiling and the default allocator fragments across the ever-changing chun
 ~50% of bytes, so the materialized Relation attention is ~6× larger than after convergence. The Triton SSD kernel
 re-autotunes for every new chunk count, so the EMA dechunk uses a chunked pure-PyTorch scan instead.
 
+## Speed
+
+Measured on the RTX 4060 Ti before this work: ~9 % MFU (42 kB/s on the 35M model, 91 W of 160 W). Every run now logs
+`tflops` and `mfu` (analytic FLOPs/byte from `morpheme/train/flops.py`). The levers, all bit-neutral (bf16 math unchanged):
+
+* **Chunk-count bucketing** (`cfg.dc.chunk_bucket`, `--bucket`, default 64): the main network's length is padded to a
+  multiple of 64 so shapes repeat across steps (autotune caches hit, the allocator stops fragmenting, CUDA graphs become
+  possible). The padded tail is causal-invisible and never read back; `prefill` uses exact lengths so decode caches stay exact.
+* **FlashRelation** (`morpheme/model/flash_relation.py`): fused Triton kernel for the Relation mixer, forward from the
+  paper's Appendix A.3 and a backward derived here (FlashAttention-2 style, tiles recomputed). Verified against the
+  fp32 materialized reference to 2e-4 at head widths 48/64/96; 1.7× faster and 2.6× less memory than the materialized
+  layer at T=576 on this GPU. On automatically on CUDA (`relation.USE_FLASH`); the materialized path is the reference.
+* **Activation checkpointing** on the Relation blocks (`--ckpt-main`) to afford bigger micro-batches.
+* **Muon** (`--optimizer muon`): Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest, RMS-matched so the
+  same LR applies. An A/B, not a default.
+* `python -m morpheme.train.profile_step --preset local --data ~/data/local_mix` prints TFLOPS/MFU, per-module forward
+  time, backward/optimizer time and the top CUDA kernels for one step.
+
 ## Serve
 
 ```bash
