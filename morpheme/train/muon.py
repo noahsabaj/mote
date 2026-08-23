@@ -2,6 +2,10 @@
 with the update scaled to match AdamW's per-element RMS (Liu et al. 2025, "Muon is scalable"), so
 the same learning rate and weight decay as AdamW can be used. Everything that is not a hidden
 2-D matrix (embeddings / tied head, norms, biases, SSM scalars, λ, Givens angles) stays on AdamW.
+
+Muon-SW (2607.23777): identical update, but the decoupled weight decay is scaled by η_t/η_max —
+the decay term becomes O(η²) and no longer shifts the stationary point as the schedule cools
+(`sw_decay=True`, `lr_max` = the schedule's peak learning rate).
 """
 
 from __future__ import annotations
@@ -28,8 +32,8 @@ def newton_schulz(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.T
 
 
 class Muon(torch.optim.Optimizer):
-    def __init__(self, params, lr: float = 1e-3, momentum: float = 0.95, nesterov: bool = True, weight_decay: float = 0.0, ns_steps: int = 5, rms_scale: float = 0.2):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, weight_decay=weight_decay, ns_steps=ns_steps, rms_scale=rms_scale)
+    def __init__(self, params, lr: float = 1e-3, momentum: float = 0.95, nesterov: bool = True, weight_decay: float = 0.0, ns_steps: int = 5, rms_scale: float = 0.2, sw_decay: bool = False, lr_max: float = 1.0):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, weight_decay=weight_decay, ns_steps=ns_steps, rms_scale=rms_scale, sw_decay=sw_decay, lr_max=lr_max)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -51,7 +55,8 @@ class Muon(torch.optim.Optimizer):
                 upd = newton_schulz(upd, steps=group["ns_steps"]).to(p.dtype)
                 upd = upd * (group["rms_scale"] * max(p.shape[0], p.shape[1]) ** 0.5)
                 if wd:
-                    p.mul_(1.0 - lr * wd)
+                    decay = lr * lr / group["lr_max"] if group["sw_decay"] else lr
+                    p.mul_(1.0 - decay * wd)
                 p.add_(upd, alpha=-lr)
         return loss
 

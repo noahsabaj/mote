@@ -65,7 +65,7 @@ class MultiOpt:
 
 def build_optimizer(model: HNetForCausalLM, lr: float, weight_decay: float, stage_lr_mult, betas=(0.9, 0.95), optimizer: str = "adamw"):
     groups = model.stage_param_groups()
-    muon_ids = {id(p) for p in split_muon_params(model)[0]} if optimizer == "muon" else set()
+    muon_ids = {id(p) for p in split_muon_params(model)[0]} if optimizer in ("muon", "muonsw") else set()
     adam_groups, muon_groups = [], []
     for stage, params in groups.items():
         decay, no_decay, muon = [], [], []
@@ -88,7 +88,11 @@ def build_optimizer(model: HNetForCausalLM, lr: float, weight_decay: float, stag
     adam = torch.optim.AdamW(adam_groups, lr=lr, betas=betas, eps=1e-8, fused=torch.cuda.is_available())
     if not muon_groups:
         return adam
-    return MultiOpt([adam, Muon(muon_groups, lr=lr, momentum=0.95, nesterov=True, weight_decay=weight_decay)])
+    # lr_max for Muon-SW is the schedule's peak LR times the group's multiplier; set_lr scales `lr` by the
+    # same multiplier, so η_t/η_max is the schedule's own fraction.
+    for g in muon_groups:
+        g["lr_max"] = lr * g["lr_mult"]
+    return MultiOpt([adam, Muon(muon_groups, lr=lr, momentum=0.95, nesterov=True, weight_decay=weight_decay, sw_decay=(optimizer == "muonsw"))])
 
 
 def wsd_lr(step: int, total: int, base: float, warmup_frac: float = 0.1, decay_frac: float = 0.2, min_ratio: float = 0.1) -> float:
@@ -246,7 +250,7 @@ def main(argv=None):
     ap.add_argument("--ckpt-minutes", type=float, default=10.0)
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--compile", action="store_true")
-    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"], help="muon: Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest")
+    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon", "muonsw"], help="muon: Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest; muonsw: Muon with η²-scaled weight decay (2607.23777)")
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
     ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
