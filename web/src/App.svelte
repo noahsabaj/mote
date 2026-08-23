@@ -1,7 +1,6 @@
 <script lang="ts">
   import Header from './components/Header.svelte';
   import type { SheetView } from './lib/views';
-  import HonestyStrip from './components/HonestyStrip.svelte';
   import Conversation from './components/Conversation.svelte';
   import Composer from './components/Composer.svelte';
   import Sheet from './components/Sheet.svelte';
@@ -60,7 +59,6 @@
 
 <div class="app">
   <Header open={sheet} onopen={toggle} />
-  <HonestyStrip />
   <main>
     <Conversation oninspect={inspect} />
   </main>

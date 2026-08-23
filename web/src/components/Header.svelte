@@ -1,6 +1,7 @@
 <script lang="ts">
   import Wordmark from './Wordmark.svelte';
   import Icon from './Icon.svelte';
+  import StatusBadge from './StatusBadge.svelte';
   import { chat } from '../lib/stores/chat.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { dismissable } from '../lib/actions';
@@ -77,6 +78,7 @@
   </div>
 
   <nav aria-label="Model surfaces">
+    <StatusBadge onopen={() => onopen('diagnostics')} />
     <button class="quiet" aria-pressed={open === 'model'} onclick={() => onopen('model')}>
       Model
     </button>

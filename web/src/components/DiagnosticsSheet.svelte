@@ -2,6 +2,9 @@
   // Live values only. A field that the backend has not sent stays empty rather than showing
   // a zero, because "not measured" and "measured as zero" are different facts.
   import { diagnostics } from '../lib/stores/diagnostics.svelte';
+  import { model } from '../lib/stores/model.svelte';
+  import { auth } from '../lib/stores/auth.svelte';
+  import { statusNote } from '../lib/status';
   import { settings } from '../lib/stores/settings.svelte';
   import Sparkline from './Sparkline.svelte';
   import Bars from './Bars.svelte';
@@ -10,7 +13,16 @@
   const s = $derived(diagnostics.stats);
   const d = $derived(diagnostics.latest);
   const contextFrac = $derived(s ? Math.min(1, s.context_bytes / s.context_limit) : 0);
+  const status = $derived(
+    auth.required ? 'locked' : model.error ? 'offline' : (model.info?.status ?? 'loading')
+  );
 </script>
+
+<section class="honesty">
+  <h3>Status</h3>
+  <p class="tag" class:off={auth.required || !!model.error || !model.info}>{status}</p>
+  <p class="meta">{statusNote()}</p>
+</section>
 
 {#if !s && !d}
   <p class="empty">
@@ -133,6 +145,26 @@
 {/if}
 
 <style>
+  .honesty {
+    padding-bottom: 1.2rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .tag {
+    margin: 0 0 0.35rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+  }
+  .tag.off {
+    color: var(--ink-3);
+  }
+  .honesty .meta {
+    margin: 0;
+    line-height: 1.5;
+  }
+
   .empty,
   .state {
     margin: 0 0 1.2rem;
