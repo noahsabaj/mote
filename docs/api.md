@@ -35,7 +35,7 @@ shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair
   "context_limit_bytes": 2048,
   "device": { "name": "NVIDIA GeForce RTX 4060 Ti", "vram_total_mb": 8188, "vram_used_mb": 912 },
   "kernels": { "mamba3": true, "ssd": true },
-  "defaults": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "accept_threshold": 0.9, "n_candidates": 3 }
+  "defaults": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "n_candidates": 3 }
 }
 ```
 
@@ -68,7 +68,7 @@ Client → server
 ```json
 { "type": "generate",
   "messages": [{"role": "user", "content": "What does dynamic chunking do?"}],
-  "params": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "accept_threshold": 0.9, "n_candidates": 3 } }
+  "params": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "n_candidates": 3 } }
 { "type": "stop" }
 ```
 
@@ -79,6 +79,11 @@ Server → client (in order)
 { "type": "byte", "i": 0, "byte": 84, "text": "T", "pending": 0,
   "p": 0.42, "entropy": 2.31, "boundary": true, "boundary_p": 0.93, "chunk": 0,
   "source": "nbp", "t_ms": 18.4 }
+
+`source` is `nbp` (sampled from the next-byte head), `mbp` (a byte drafted by the multi-byte head and accepted by
+exact speculative verification — Leviathan/Chen rejection sampling against the next-byte head's distribution, with
+temperature and top-p applied to both), or `fix` (the correction drawn when a draft byte was rejected). The byte
+stream is distributed exactly as plain sampling would be; `n_candidates` is the draft length (0 disables).
 // text: the completed UTF-8 character(s) this byte finished, or null while a multi-byte char is pending
 // pending: bytes currently buffered in UTF-8 assembly
 // source: "nbp" = sampled one byte at a time; "mbp" = accepted from the multi-byte head's parallel proposal
@@ -89,7 +94,7 @@ Server → client (in order)
 // partial: the chunk began inside the prompt (then start is clamped to 0 and bytes > end - start + 1).
 
 { "type": "stats", "bytes": 64, "elapsed_ms": 1730, "bytes_per_sec": 37.0, "chunks": 11,
-  "bytes_per_chunk": 5.8, "mbp_proposed": 30, "mbp_accepted": 12, "mbp_accept_rate": 0.40,
+  "bytes_per_chunk": 5.8, "mbp_proposed": 30, "mbp_accepted": 12, "mbp_accept_rate": 0.40, "spec_rounds": 10, "spec_fixes": 7, "spec_replays": 3,
   "context_bytes": 125, "context_limit": 2048 }                                         // every 16 bytes
 
 { "type": "diagnostics",                                                                // at every chunk boundary

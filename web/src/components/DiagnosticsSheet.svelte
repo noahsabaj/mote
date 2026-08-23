@@ -66,8 +66,10 @@
       <dd>{s ? pct(s.mbp_accept_rate, 1) : '—'}</dd>
       <dt>Proposed</dt>
       <dd>{s ? `${s.mbp_accepted} accepted of ${s.mbp_proposed}` : '—'}</dd>
-      <dt>Threshold τ</dt>
-      <dd>{settings.params.accept_threshold.toFixed(2)} · {settings.params.n_candidates} candidates</dd>
+      <dt>Verification</dt>
+      <dd>exact (rejection sampling) · draft length {settings.params.n_candidates}</dd>
+      <dt>Rounds</dt>
+      <dd>{s ? `${s.spec_rounds ?? 0} rounds · ${s.spec_fixes ?? 0} corrections · ${s.spec_replays ?? 0} replays` : '—'}</dd>
     </dl>
   </section>
 

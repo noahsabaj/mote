@@ -10,6 +10,7 @@ ratio loss. Inference supports batch-1 prefill + step decoding with full state c
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -200,6 +201,80 @@ class HNetForCausalLM(nn.Module):
             state.last_chunk_start_state = h[:, start[0, -1] : start[0, -1] + 1]
             state.cur_offset = int(offset[0, -1])
         return HNetOutput(logits, None, routing, chunk_id, offset)
+
+    @torch.no_grad()
+    def forward_from_state(self, input_ids: torch.Tensor, state: InferenceState):
+        """Continue a batch-1 sequence from `state` over k new bytes in one pass (the same math as k calls
+        of `step`, used to verify speculative drafts). Mutates `state`. Returns
+        (logits [1,k,V], boundary_mask [k] bool, boundary_prob [k] float)."""
+        assert input_ids.shape[0] == 1
+        B, K = input_ids.shape
+        D0 = self.cfg.d_model_outer
+        mask = torch.ones(B, K, dtype=torch.bool, device=input_ids.device)
+
+        h = self.embeddings(input_ids)
+        h, state.encoder = self.encoder(h, caches=state.encoder, return_caches=True)
+        residual = self.residual_proj(h.float())
+        routing = self.routing_module(h, mask, state.routing)
+        hc, _ = self.chunk_layer(h, routing.boundary_mask, exact=True)
+        if hc.shape[1] > 0:
+            zc, state.main = self.main_network(self._pad(hc), caches=state.main, return_caches=True)
+            zc = zc[..., :D0]
+        else:
+            zc = h[:, :0]
+        z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)
+        h2 = (z.float() + residual).to(h.dtype)
+        h3, state.decoder = self.decoder(h2, caches=state.decoder, return_caches=True)
+        logits = self.lm_head(h3)
+
+        if self.mbp_head is not None:
+            bm = routing.boundary_mask[0]
+            seg_cid = torch.cumsum(bm.long(), dim=0)  # 0 = continuation of the chunk in progress
+            pos = torch.arange(K, device=h.device)
+            start = torch.cummax(torch.where(bm, pos, torch.full_like(pos, -1)), dim=0).values  # -1 before any boundary
+            has_start = start >= 0
+            offset = torch.where(has_start, pos - start, state.cur_offset + 1 + pos)
+            start_state = torch.where(
+                has_start[None, :, None],
+                torch.gather(h, 1, start.clamp(min=0)[None, :, None].expand(-1, -1, D0)),
+                state.last_chunk_start_state.expand(-1, K, -1) if state.last_chunk_start_state is not None else torch.zeros_like(h),
+            )
+            x = self.mbp_head.build_inputs(z, start_state, offset[None, :])
+            old = torch.cat(state.cur_chunk_inputs, dim=1) if state.cur_chunk_inputs else x[:, :0]
+            all_x = torch.cat([old, x], dim=1)
+            all_cid = torch.cat([torch.zeros(old.shape[1], dtype=torch.long, device=h.device), seg_cid])
+            last = int(all_cid.max())
+            cur = all_x[:, all_cid == last]
+            if last >= 1:
+                state.prev_chunk_inputs = all_x[:, all_cid == last - 1]
+            state.cur_chunk_inputs = [cur[:, i : i + 1] for i in range(cur.shape[1])]
+            n_new = int(bm.sum())
+            state.n_chunks += n_new
+            state.last_chunk_z = z[:, -1:]
+            if n_new > 0:
+                s = int(start[-1])
+                state.last_chunk_start_state = h[:, s : s + 1]
+                state.cur_offset = K - 1 - s
+            else:
+                state.cur_offset += K
+        return logits, routing.boundary_mask[0], routing.boundary_prob[0, :, 1]
+
+    @staticmethod
+    def clone_state(state: InferenceState) -> InferenceState:
+        """Deep copy of every tensor in the inference state (snapshot before a speculative round)."""
+        def cl(o):
+            if isinstance(o, torch.Tensor):
+                return o.clone()
+            if isinstance(o, list):
+                return [cl(x) for x in o]
+            if isinstance(o, tuple):
+                return type(o)(*[cl(x) for x in o]) if hasattr(o, "_fields") else tuple(cl(x) for x in o)
+            if o is None or isinstance(o, (int, float, bool, str)):
+                return o
+            if hasattr(o, "__dataclass_fields__"):
+                return type(o)(**{k: cl(getattr(o, k)) for k in o.__dataclass_fields__})
+            return copy.deepcopy(o)
+        return cl(state)
 
     @torch.no_grad()
     def step(self, input_ids: torch.Tensor, state: InferenceState):

@@ -46,19 +46,10 @@ export const PARAM_SPECS: ParamSpec[] = [
     digits: 0
   },
   {
-    key: 'accept_threshold',
-    label: 'Accept threshold τ',
-    hint: 'Confidence the multi-byte head needs before its proposal is taken in parallel.',
-    min: 0.5,
-    max: 1,
-    step: 0.01,
-    digits: 2
-  },
-  {
     key: 'n_candidates',
-    label: 'Candidates n',
-    hint: 'How many bytes ahead the multi-byte head proposes at once.',
-    min: 1,
+    label: 'Draft length n',
+    hint: 'Bytes the multi-byte head drafts at each chunk boundary; the model verifies them exactly (0 = off).',
+    min: 0,
     max: 8,
     step: 1,
     digits: 0
@@ -69,7 +60,6 @@ const FALLBACK: SamplingParams = {
   temperature: 0.8,
   top_p: 0.9,
   max_bytes: 512,
-  accept_threshold: 0.9,
   n_candidates: 3
 };
 

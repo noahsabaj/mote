@@ -92,7 +92,6 @@ export function modelPayload(): ModelInfo {
       temperature: 0.8,
       top_p: 0.9,
       max_bytes: 512,
-      accept_threshold: 0.9,
       n_candidates: 3
     }
   };

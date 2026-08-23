@@ -64,7 +64,7 @@ def test_engine_event_stream_contract(tmp_path, no_stop_ids):
     info = eng.info()
     assert info["status"] == "pilot" and info["context_limit_bytes"] == 256 and info["params"] > 0
     events = []
-    eng.generate([{"role": "user", "content": "hi"}], GenParams(temperature=0.9, top_p=0.95, max_bytes=24, accept_threshold=0.0, n_candidates=3), events.append, threading.Event())
+    eng.generate([{"role": "user", "content": "hi"}], GenParams(temperature=0.9, top_p=0.95, max_bytes=24, n_candidates=3), events.append, threading.Event())
     types = [e["type"] for e in events]
     assert types[0] == "start" and types[-1] == "done"
     bytes_ev = [e for e in events if e["type"] == "byte"]
@@ -72,14 +72,15 @@ def test_engine_event_stream_contract(tmp_path, no_stop_ids):
     assert bytes_ev[0]["i"] == 0 and all(e["i"] == i for i, e in enumerate(bytes_ev))
     for e in bytes_ev:
         assert set(e) >= {"byte", "text", "pending", "p", "entropy", "boundary", "boundary_p", "chunk", "source", "t_ms"}
-        assert 0 <= e["byte"] < 262 and 0.0 <= e["p"] <= 1.0 + 1e-6 and e["source"] in ("nbp", "mbp")
+        assert 0 <= e["byte"] < 262 and 0.0 <= e["p"] <= 1.0 + 1e-6 and e["source"] in ("nbp", "mbp", "fix")
     done = events[-1]
     assert done["reason"] == "max_bytes" and len(bytes_ev) == 24
     assert done["stats"]["bytes"] == len(bytes_ev)
-    # with accept_threshold 0 every proposal is accepted, so the multi-byte head must have been used
+    # a boundary early in the reply triggers a draft; every draft byte is either accepted (mbp) or corrected (fix)
     if any(e["boundary"] for e in bytes_ev[:-3]):
-        assert done["stats"]["mbp_proposed"] > 0 and done["stats"]["mbp_accepted"] > 0
-        assert any(e["source"] == "mbp" for e in bytes_ev)
+        assert done["stats"]["mbp_proposed"] > 0 and done["stats"]["spec_rounds"] > 0
+        assert any(e["source"] in ("mbp", "fix") for e in bytes_ev)
+        assert done["stats"]["mbp_accepted"] + done["stats"]["spec_fixes"] >= 1
     assert any(e["type"] == "stats" for e in events)
     if any(e["boundary"] for e in bytes_ev):  # diagnostics are emitted at chunk boundaries
         assert any(e["type"] == "diagnostics" for e in events)
@@ -95,6 +96,6 @@ def test_engine_stop_flag(tmp_path, no_stop_ids):
         if e["type"] == "byte" and e["i"] == 2:
             stop.set()
 
-    eng.generate([{"role": "user", "content": "hi"}], GenParams(max_bytes=100, accept_threshold=1.1), emit, stop)
+    eng.generate([{"role": "user", "content": "hi"}], GenParams(max_bytes=100, n_candidates=0), emit, stop)
     assert events[-1]["type"] == "done" and events[-1]["reason"] == "stopped"
     assert len([e for e in events if e["type"] == "byte"]) == 3

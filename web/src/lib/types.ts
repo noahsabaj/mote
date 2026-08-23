@@ -41,7 +41,6 @@ export interface SamplingParams {
   temperature: number;
   top_p: number;
   max_bytes: number;
-  accept_threshold: number;
   n_candidates: number;
 }
 
@@ -129,7 +128,9 @@ export function isTrainRecord(r: LogRecord): r is TrainRecord {
 
 // ---------------------------------------------------------------- websocket
 
-export type ByteSource = 'nbp' | 'mbp';
+/** nbp: sampled from the next-byte head · mbp: a draft byte accepted by exact verification · fix: the
+ *  correction drawn when a draft byte was rejected (still distributed exactly as the model would sample). */
+export type ByteSource = 'nbp' | 'mbp' | 'fix';
 
 export interface ClientGenerate {
   type: 'generate';
@@ -184,6 +185,9 @@ export interface StatsPayload {
   mbp_proposed: number;
   mbp_accepted: number;
   mbp_accept_rate: number;
+  spec_rounds?: number;
+  spec_fixes?: number;
+  spec_replays?: number;
   context_bytes: number;
   context_limit: number;
 }

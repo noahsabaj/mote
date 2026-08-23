@@ -68,13 +68,20 @@ class RoutingModule(nn.Module):
 
     def forward(self, hidden: torch.Tensor, mask: torch.Tensor, state: Optional[RoutingState] = None) -> RoutingOutput:
         # hidden: [B, L, D]; mask: [B, L] bool (valid positions)
-        if state is not None:
-            assert (~state.has_seen_tokens).all(), "prefill must start from an empty routing state"
-        q = F.normalize(self.q_proj_layer(hidden[:, :-1]), dim=-1)
-        k = F.normalize(self.k_proj_layer(hidden[:, 1:]), dim=-1)
-        cos_sim = (q * k).sum(-1)  # [B, L-1]
-        p = torch.clamp((1 - cos_sim) / 2, min=0.0, max=1.0)
-        p = F.pad(p, (1, 0), value=1.0)  # first position is always a boundary
+        continuing = state is not None and bool(state.has_seen_tokens.any())
+        if continuing:
+            # continue a sequence: the first position is compared with the last byte seen before it
+            assert bool(state.has_seen_tokens.all()), "mixed fresh/continuing rows are not supported"
+            prev = torch.cat([state.last_hidden_state[:, None].to(hidden.dtype), hidden[:, :-1]], dim=1)
+            q = F.normalize(self.q_proj_layer(prev), dim=-1)
+            k = F.normalize(self.k_proj_layer(hidden), dim=-1)
+            p = torch.clamp((1 - (q * k).sum(-1)) / 2, min=0.0, max=1.0)  # [B, L]
+        else:
+            q = F.normalize(self.q_proj_layer(hidden[:, :-1]), dim=-1)
+            k = F.normalize(self.k_proj_layer(hidden[:, 1:]), dim=-1)
+            cos_sim = (q * k).sum(-1)  # [B, L-1]
+            p = torch.clamp((1 - cos_sim) / 2, min=0.0, max=1.0)
+            p = F.pad(p, (1, 0), value=1.0)  # first position is always a boundary
         boundary_prob = torch.stack([1 - p, p], dim=-1)
         selected_idx = boundary_prob.argmax(dim=-1)
         boundary_mask = (selected_idx == 1) & mask
@@ -147,7 +154,7 @@ class DeChunkLayer(nn.Module):
         return DeChunkState(last_value=torch.zeros(batch_size, self.d_model, device=device, dtype=dtype))
 
     @staticmethod
-    def _ema_chunked(x: torch.Tensor, p: torch.Tensor, C: int = 64) -> torch.Tensor:
+    def _ema_chunked(x: torch.Tensor, p: torch.Tensor, C: int = 64, init: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Stable parallel EMA: z̄_t = p_t x_t + (1-p_t) z̄_{t-1}, evaluated per block of C steps.
 
         Within a block, z̄_t = Σ_{s≤t} exp(L_t - L_s) p_s x_s + exp(L_t - L_0) z̄_0 with L_t = Σ_{u≤t} log(1-p_u);
@@ -171,7 +178,7 @@ class DeChunkLayer(nn.Module):
         A = torch.exp(diff.masked_fill(~mask, float("-inf")))
         local = torch.matmul(A, pf[..., None] * xf)  # [B, nb, C, D]
         # carry across blocks: z̄ at block end = local_end + exp(L_end) * carry_in
-        carry = torch.zeros(B, D, device=x.device, dtype=wdt)
+        carry = torch.zeros(B, D, device=x.device, dtype=wdt) if init is None else init.to(wdt)
         decay_t = torch.exp(L)  # exp(L_t - L_0) with L_0 = 0 at block start  [B, nb, C]
         blocks = []
         for b in range(nb):
@@ -181,9 +188,10 @@ class DeChunkLayer(nn.Module):
         out = torch.stack(blocks, dim=1)  # no in-place writes: autograd-safe
         return out.reshape(B, nb * C, D)[:, :M].to(x.dtype)
 
-    def _ema(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
-        """x: [B, M, D] chunk outputs (compacted); p: [B, M] boundary probs. Returns z̄ [B, M, D]."""
-        if self.use_kernel and HAS_SSD_KERNEL and x.is_cuda:
+    def _ema(self, x: torch.Tensor, p: torch.Tensor, init: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """x: [B, M, D] chunk outputs (compacted); p: [B, M] boundary probs; init: [B, D] value carried in
+        from earlier chunks (None = zero). Returns z̄ [B, M, D]."""
+        if self.use_kernel and HAS_SSD_KERNEL and x.is_cuda and init is None:
             dt = torch.log(1 / (1 - p)).to(torch.bfloat16)  # so that exp(-dt) = 1 - p
             xs = (x / dt[..., None]).to(torch.bfloat16)
             A = -torch.ones(self.nheads, device=x.device, dtype=torch.float32)
@@ -198,7 +206,7 @@ class DeChunkLayer(nn.Module):
                 chunk_size=self.block_size,
             )
             return out.reshape(x.shape)
-        return self._ema_chunked(x, p)
+        return self._ema_chunked(x, p, init=init)
 
     def forward(
         self,
@@ -212,9 +220,15 @@ class DeChunkLayer(nn.Module):
         token_idx = torch.arange(L, device=hidden.device)[None, :] + (~boundary_mask).long() * L
         order = torch.argsort(token_idx, dim=1)[:, : hidden.shape[1]]
         p = torch.gather(p, 1, order)  # [B, M] probs of the selected positions
-        smoothed = self._ema(hidden, p)  # [B, M, D]
-        plug = torch.cumsum(boundary_mask.long(), dim=1) - 1  # byte t -> its chunk index
-        plug = plug.clamp(min=0)
+        if state is None:
+            smoothed = self._ema(hidden, p)  # [B, M, D]
+            plug = (torch.cumsum(boundary_mask.long(), dim=1) - 1).clamp(min=0)  # byte t -> its chunk index
+        else:
+            # continue from the carried value: bytes before this segment's first boundary keep it
+            init = state.last_value.float()
+            smoothed = self._ema(hidden, p, init=init) if hidden.shape[1] > 0 else hidden.float()[:, :0]
+            smoothed = torch.cat([init[:, None, :], smoothed.float()], dim=1)  # slot 0 = carried value
+            plug = torch.cumsum(boundary_mask.long(), dim=1)
         out = torch.gather(smoothed, 1, plug[:, :, None].expand(-1, -1, self.d_model))
         if state is not None:
             state.last_value.copy_(out[:, -1])

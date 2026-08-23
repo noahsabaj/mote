@@ -30,8 +30,7 @@ class GenParams:
     temperature: float = 0.8
     top_p: float = 0.9
     max_bytes: int = 512
-    accept_threshold: float = 0.9
-    n_candidates: int = 3
+    n_candidates: int = 3  # draft length per chunk boundary (0 disables speculation); verification is exact
 
     @classmethod
     def from_dict(cls, d: Optional[dict], defaults: "GenParams") -> "GenParams":
@@ -40,7 +39,6 @@ class GenParams:
             temperature=float(d.get("temperature", defaults.temperature)),
             top_p=float(d.get("top_p", defaults.top_p)),
             max_bytes=int(d.get("max_bytes", defaults.max_bytes)),
-            accept_threshold=float(d.get("accept_threshold", defaults.accept_threshold)),
             n_candidates=int(d.get("n_candidates", defaults.n_candidates)),
         )
 
@@ -55,6 +53,48 @@ class CheckpointInfo:
     created_at: str
     status: str
     status_note: str
+
+
+def _dist(logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
+    """The sampling distribution [V] for these logits: temperature, then nucleus truncation, renormalised.
+    temperature <= 0 is greedy (a one-hot). Applied identically to target and draft so that speculative
+    verification reproduces the target's *sampling* distribution, transforms included."""
+    raw = torch.softmax(logits.float(), dim=-1)
+    if temperature <= 0:
+        return torch.zeros_like(raw).scatter(0, raw.argmax().view(1), 1.0)
+    probs = torch.softmax(logits.float() / temperature, dim=-1)
+    if top_p < 1.0:
+        sp, si = torch.sort(probs, descending=True)
+        cum = torch.cumsum(sp, dim=-1)
+        keep = cum - sp < top_p  # keep tokens until the mass reaches top_p (always at least one)
+        sp = sp * keep
+        probs = torch.zeros_like(probs).scatter(0, si, sp)
+        probs = probs / probs.sum()
+    return probs
+
+
+def _draw(probs: torch.Tensor) -> int:
+    return int(torch.multinomial(probs, 1))
+
+
+def verify_draft(xs: list, q_dists: list, p_dists: list, rand=None):
+    """Leviathan/Chen speculative sampling. xs[m] was drawn from q_dists[m]; p_dists[m] is the target's
+    distribution at the same position (given the accepted prefix). Accept left to right with probability
+    min(1, p(x)/q(x)); on the first rejection draw the correction from norm(max(0, p - q)).
+    Returns (n_accepted, correction_byte or None, target_prob_of_correction). The output sequence is
+    distributed exactly as the target would have produced it."""
+    rand = rand or (lambda: float(torch.rand(1)))
+    for m, b in enumerate(xs):
+        p_m, q_m = p_dists[m], q_dists[m]
+        ratio = min(1.0, float(p_m[b]) / max(float(q_m[b]), 1e-12))
+        if rand() < ratio:
+            continue
+        resid = (p_m - q_m).clamp(min=0.0)
+        total = float(resid.sum())
+        resid = resid / total if total > 0 else p_m
+        fix = _draw(resid)
+        return m, fix, float(p_m[fix])
+    return len(xs), None, None
 
 
 def _sample(logits: torch.Tensor, temperature: float, top_p: float):
@@ -215,18 +255,22 @@ class Engine:
         out = self.model.prefill(ids, state)
         logits = out.logits[0, -1]
         n_chunks = int(out.chunk_id[0, -1]) + 1
-        emit({"type": "start", "prompt_bytes": len(prompt_ids), "context_bytes": len(prompt_ids), "context_limit": limit, "truncated": truncated})
+        P = len(prompt_ids)
+        emit({"type": "start", "prompt_bytes": P, "context_bytes": P, "context_limit": limit, "truncated": truncated})
 
         streamer = Utf8Streamer()
         boundary_probs: List[float] = []
         generated: List[int] = []
         text_parts: List[str] = []
-        candidates: List[tuple] = []  # (byte, p) accepted from the multi-byte head, in order
-        mbp_proposed = mbp_accepted = 0
-        chunk_start = len(prompt_ids)  # absolute index where the current chunk began
+        spec = {"rounds": 0, "proposed": 0, "accepted": 0, "fixes": 0, "replays": 0, "paused": False}
+        # Break-even for a recurrent target: a round costs ~1 sequence forward (+ a replay on rejection) against
+        # the k steps it replaces; below this acceptance rate drafting only slows decoding, so stop for the reply.
+        PAUSE_AFTER, PAUSE_BELOW = 48, 0.15
+        chunk_start = P  # absolute index where the current chunk began
         chunk_index = n_chunks - 1
         reason = "max_bytes"
         last_stats_bytes = 0
+        n_draft = params.n_candidates if self.model.mbp_head is not None else 0
 
         def stats() -> dict:
             elapsed = time.perf_counter() - t0
@@ -234,55 +278,24 @@ class Engine:
             return {
                 "bytes": n, "elapsed_ms": elapsed * 1000, "bytes_per_sec": n / elapsed if elapsed > 0 else 0.0,
                 "chunks": chunk_index + 1 - (n_chunks - 1), "bytes_per_chunk": n / max(chunk_index + 1 - (n_chunks - 1), 1),
-                "mbp_proposed": mbp_proposed, "mbp_accepted": mbp_accepted,
-                "mbp_accept_rate": mbp_accepted / mbp_proposed if mbp_proposed else 0.0,
-                "context_bytes": len(prompt_ids) + n, "context_limit": limit,
+                "mbp_proposed": spec["proposed"], "mbp_accepted": spec["accepted"],
+                "mbp_accept_rate": spec["accepted"] / spec["proposed"] if spec["proposed"] else 0.0,
+                "spec_rounds": spec["rounds"], "spec_fixes": spec["fixes"], "spec_replays": spec["replays"],
+                "spec_paused": spec["paused"],
+                "context_bytes": P + n, "context_limit": limit,
             }
 
-        while len(generated) < params.max_bytes:
-            if stop.is_set():
-                reason = "stopped"
-                break
-            if len(prompt_ids) + len(generated) >= limit - 1:
-                reason = "context"
-                break
-            t_byte = time.perf_counter()
-            if candidates:
-                byte, p = candidates.pop(0)
-                source = "mbp"
-                raw = torch.softmax(logits.float(), -1)
-                entropy = float(-(raw * torch.log2(raw.clamp_min(1e-12))).sum())
-            else:
-                byte, p, entropy = _sample(logits, params.temperature, params.top_p)
-                source = "nbp"
-            if byte in STOP_IDS:
-                reason = "eos"
-                break
-            step_in = torch.tensor([[byte]], device=self.device)
-            logits_next, routing, is_b, mbp = self.model.step(step_in, state)
-            abs_i = len(prompt_ids) + len(generated)
+        def record(byte: int, p: float, entropy: float, is_b: bool, bp: float, source: str, t_ms: float) -> None:
+            nonlocal chunk_index, chunk_start
+            abs_i = P + len(generated)
             if is_b:
                 if abs_i > chunk_start:
-                    # reply-local inclusive coordinates; a chunk that began inside the prompt is reported from reply byte 0
-                    P = len(prompt_ids)
                     emit({"type": "chunk", "index": chunk_index, "start": max(chunk_start - P, 0), "end": abs_i - 1 - P,
                           "bytes": abs_i - chunk_start, "partial": chunk_start < P,
                           "text": bytes(b for b in (prompt_ids + generated)[chunk_start:abs_i] if b < 256).decode("utf-8", errors="replace")})
                 chunk_index += 1
                 chunk_start = abs_i
-                candidates = []
-                if mbp is not None and params.n_candidates > 0:
-                    probs = torch.softmax(mbp[0, : params.n_candidates].float(), -1)  # [n, V]
-                    mbp_proposed += probs.shape[0]
-                    for row in probs:
-                        pm, bm = float(row.max()), int(row.argmax())
-                        if pm >= params.accept_threshold and bm not in STOP_IDS:
-                            candidates.append((bm, pm))
-                        else:
-                            break
-                    mbp_accepted += len(candidates)
                 emit({"type": "diagnostics", **self._diagnostics(boundary_probs)})
-            bp = float(routing.boundary_prob[0, 1])
             boundary_probs.append(bp)
             generated.append(byte)
             text = streamer.feed(byte)
@@ -291,9 +304,91 @@ class Engine:
             emit({
                 "type": "byte", "i": len(generated) - 1, "byte": byte, "text": text or None, "pending": len(streamer.pending),
                 "p": p, "entropy": entropy, "boundary": is_b, "boundary_p": bp, "chunk": chunk_index,
-                "source": source, "t_ms": (time.perf_counter() - t_byte) * 1000,
+                "source": source, "t_ms": t_ms,
             })
-            logits = logits_next[0, -1]
+
+        def entropy_of(lg: torch.Tensor) -> float:
+            raw = torch.softmax(lg.float(), -1)
+            return float(-(raw * torch.log2(raw.clamp_min(1e-12))).sum())
+
+        def new_draft(is_b: bool, mbp):
+            """Draft logits [n, V] for the bytes after a fresh boundary, or None."""
+            if not is_b or n_draft <= 0 or spec["paused"]:
+                return None
+            if spec["proposed"] >= PAUSE_AFTER and spec["accepted"] < PAUSE_BELOW * spec["proposed"]:
+                spec["paused"] = True
+                emit({"type": "diagnostics", **self._diagnostics(boundary_probs), "note": f"drafting paused: {spec['accepted']}/{spec['proposed']} draft bytes accepted, below break-even"})
+                return None
+            if mbp is None:
+                mbp = self.model._speculate(state)
+            return mbp[0, :n_draft]
+
+        draft = None
+        while len(generated) < params.max_bytes:
+            if stop.is_set():
+                reason = "stopped"
+                break
+            if P + len(generated) >= limit - 1:
+                reason = "context"
+                break
+            room = min(params.max_bytes - len(generated), limit - 1 - (P + len(generated)))
+            t_round = time.perf_counter()
+
+            if draft is not None and room >= 2:
+                # ---- speculative round: draw the draft, verify it in ONE pass from a snapshot, exact acceptance
+                k = min(int(draft.shape[0]), room - 1)
+                q_dists, xs = [], []
+                for m in range(k):
+                    qd = _dist(draft[m], params.temperature, params.top_p)
+                    b = _draw(qd)
+                    if b in STOP_IDS:
+                        break  # the target decides about stopping; the draft never proposes it
+                    q_dists.append(qd)
+                    xs.append(b)
+                draft = None
+                if not xs:
+                    continue
+                spec["rounds"] += 1
+                spec["proposed"] += len(xs)
+                snapshot = self.model.clone_state(state)
+                lg_seq, bm_seq, bp_seq = self.model.forward_from_state(torch.tensor([xs], device=self.device), state)
+                target_logits = [logits] + [lg_seq[0, m] for m in range(len(xs) - 1)]
+                p_dists = [_dist(lg, params.temperature, params.top_p) for lg in target_logits]
+                n_acc, fix, fix_p = verify_draft(xs, q_dists, p_dists)
+                spec["accepted"] += n_acc
+                per_byte_ms = (time.perf_counter() - t_round) * 1000 / max(n_acc + (1 if fix is not None else 0), 1)
+                for m in range(n_acc):
+                    record(xs[m], float(p_dists[m][xs[m]]), entropy_of(target_logits[m]), bool(bm_seq[m]), float(bp_seq[m]), "mbp", per_byte_ms)
+                if fix is None:
+                    logits = lg_seq[0, -1]
+                    draft = new_draft(bool(bm_seq[-1]), None)
+                    if len(generated) - last_stats_bytes >= 16:
+                        last_stats_bytes = len(generated)
+                        emit({"type": "stats", **stats()})
+                    continue
+                # rejection at position n_acc: roll back, replay the accepted prefix, step the correction
+                state = snapshot
+                if n_acc > 0:
+                    spec["replays"] += 1
+                    self.model.forward_from_state(torch.tensor([xs[:n_acc]], device=self.device), state)
+                if fix in STOP_IDS:
+                    reason = "eos"
+                    break
+                spec["fixes"] += 1
+                lg_next, routing, is_b, mbp = self.model.step(torch.tensor([[fix]], device=self.device), state)
+                record(fix, fix_p, entropy_of(target_logits[n_acc]), bool(is_b), float(routing.boundary_prob[0, 1]), "fix", per_byte_ms)
+                logits = lg_next[0, -1]
+                draft = new_draft(bool(is_b), mbp)
+            else:
+                # ---- plain step: one byte from the target
+                byte, p, entropy = _sample(logits, params.temperature, params.top_p)
+                if byte in STOP_IDS:
+                    reason = "eos"
+                    break
+                lg_next, routing, is_b, mbp = self.model.step(torch.tensor([[byte]], device=self.device), state)
+                record(byte, p, entropy, bool(is_b), float(routing.boundary_prob[0, 1]), "nbp", (time.perf_counter() - t_round) * 1000)
+                logits = lg_next[0, -1]
+                draft = new_draft(bool(is_b), mbp)
             if len(generated) - last_stats_bytes >= 16:
                 last_stats_bytes = len(generated)
                 emit({"type": "stats", **stats()})

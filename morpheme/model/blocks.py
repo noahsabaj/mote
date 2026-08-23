@@ -41,7 +41,7 @@ class Block(nn.Module):
                 hidden = self.mixer(hidden, cache=cache)
         else:  # Mamba-3
             if return_cache:
-                hidden, new_cache = self.mixer(hidden, return_final_states=True)
+                hidden, new_cache = self.mixer(hidden, return_final_states=True, initial_states=cache)
             else:
                 hidden = self.mixer(hidden)
         if self.mlp is not None:
