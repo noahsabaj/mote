@@ -6,10 +6,10 @@ ran into). Order: after the rename, with no training running. Status boxes are f
 
 ## Before leaving Windows
 
-- [ ] `git status` clean, everything pushed to the local repo's history (no remote needed).
-- [ ] Copy `~/.claude/projects/D--Code-Workshop-1/memory/` (the assistant's notes) to `docs/_memory-export/`
+- [x] `git status` clean (2026-08-23, after the rename), everything pushed to the local repo's history (no remote needed).
+- [x] Copied 2026-08-23 `~/.claude/projects/D--Code-Workshop-1/memory/` (the assistant's notes) to `docs/_memory-export/`
       or a USB stick — the Fedora install gets a fresh Claude Code memory directory.
-- [ ] Note the Tailscale machine name (`<old-node>`) and the studio token in `.mote/token`.
+- [x] Note the Tailscale machine name (`<old-node>`) and the studio token in `.mote/token`.
 - [ ] Stop the Windows studio service (`.\mote service stop`) and remove the login item
       (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Mote Studio.vbs`).
 
