@@ -24,7 +24,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .flash_relation import HAS_TRITON, flash_relation
+
 RelationCache = Tuple[torch.Tensor, torch.Tensor]  # (P2 [B,H,S,dh], I~ [B,H,S,dh])
+USE_FLASH = True  # fused Triton kernel (flash_relation.py) on CUDA; the materialized path is the reference
+FLASH_MIN_T = 16  # below this the launch costs more than the tiny matmuls
 
 
 def _rope_cos_sin(positions: torch.Tensor, dim: int, theta: float, dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -138,7 +142,19 @@ class FullRelation(nn.Module):
             p2_all, info_all = p2, info
         Sall = S + T
 
-        # pairwise evidence in fp32
+        if USE_FLASH and HAS_TRITON and x.is_cuda and T >= FLASH_MIN_T:
+            y, g = flash_relation(p1, p2_all, info_all, self.lam, self.tau_s, q_start=S)
+            out = self.wo(y.transpose(1, 2).reshape(B, T, D))
+            extras = []
+            if return_cache:
+                extras.append((p2_all, info_all))
+            if self.telemetry is not None:
+                self.telemetry["exchange_mass"] = float(g[0, :, -1].mean())
+            if return_gates:
+                extras.append(g)
+            return (out, *extras) if extras else out
+
+        # pairwise evidence in fp32 (materialized reference path)
         u = torch.matmul(p1, p2_all.transpose(-1, -2)).float() / math.sqrt(dh)  # [B,H,T,Sall]
         qi = torch.arange(S, Sall, device=x.device)  # absolute query index (0-based)
         kj = torch.arange(0, Sall, device=x.device)

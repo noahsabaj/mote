@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from .mamba3 import Mamba3Mixer
 from .norm import RMSNorm
@@ -72,6 +73,7 @@ class Isotropic(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList(blocks)
         self.rmsnorm = RMSNorm(d_model, eps=eps, device=device, dtype=dtype)
+        self.grad_checkpoint = False  # recompute each block in the backward (trainer flag --ckpt-main)
 
     @property
     def height(self) -> int:
@@ -80,9 +82,13 @@ class Isotropic(nn.Module):
     def forward(self, hidden: torch.Tensor, caches: Optional[List[Any]] = None, return_caches: bool = False):
         residual = None
         new_caches: List[Any] = []
+        use_ckpt = self.grad_checkpoint and torch.is_grad_enabled() and caches is None and not return_caches
         for i, layer in enumerate(self.layers):
             cache = caches[i] if caches is not None else None
-            hidden, residual, c = layer(hidden, residual, cache=cache, return_cache=return_caches)
+            if use_ckpt:
+                hidden, residual, c = checkpoint(layer, hidden, residual, use_reentrant=False)
+            else:
+                hidden, residual, c = layer(hidden, residual, cache=cache, return_cache=return_caches)
             new_caches.append(c)
         hidden = self.rmsnorm(hidden, residual=residual, prenorm=False, residual_in_fp32=True)
         return (hidden, new_caches) if return_caches else hidden

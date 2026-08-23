@@ -60,7 +60,7 @@ class HNetForCausalLM(nn.Module):
         self.embeddings = nn.Embedding(V, D0, **fk)
         self.encoder = make_mamba3_stack(cfg.encoder_layers, D0, cfg.mamba3, cfg.norm_eps, 0, **fk)
         self.routing_module = RoutingModule(D0, **fk)
-        self.chunk_layer = ChunkLayer()
+        self.chunk_layer = ChunkLayer(bucket=getattr(cfg.dc, "chunk_bucket", 1))
         self.main_network = make_relation_stack(cfg.main, cfg.norm_eps, **fk)
         self.dechunk_layer = DeChunkLayer(D0, prob_clamp=cfg.dc.prob_clamp)
         self.residual_proj = nn.Linear(D0, D0, device=device, dtype=torch.float32)
@@ -173,7 +173,7 @@ class HNetForCausalLM(nn.Module):
         h, state.encoder = self.encoder(h, caches=None, return_caches=True)
         residual = self.residual_proj(h.float())
         routing = self.routing_module(h, mask, state.routing)
-        hc, _ = self.chunk_layer(h, routing.boundary_mask)
+        hc, _ = self.chunk_layer(h, routing.boundary_mask, exact=True)  # caches must hold only real chunks
         zc, state.main = self.main_network(self._pad(hc), caches=None, return_caches=True)
         zc = zc[..., :D0]
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)

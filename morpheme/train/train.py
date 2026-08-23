@@ -30,30 +30,65 @@ from ..data.loader import ByteShard
 from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.hnet import HNetForCausalLM
 from ..tokenizer import ByteTokenizer
+from .flops import flops_per_byte, peak_tflops_for
+from .muon import Muon, split_muon_params
 
 LN2 = math.log(2.0)
 
 
 # --------------------------------------------------------------------------------------
-def build_optimizer(model: HNetForCausalLM, lr: float, weight_decay: float, stage_lr_mult, betas=(0.9, 0.95)):
+class MultiOpt:
+    """Several optimizers driven as one (Muon for hidden matrices + AdamW for the rest)."""
+
+    def __init__(self, opts):
+        self.opts = opts
+
+    @property
+    def param_groups(self):
+        return [g for o in self.opts for g in o.param_groups]
+
+    def zero_grad(self, set_to_none=True):
+        for o in self.opts:
+            o.zero_grad(set_to_none=set_to_none)
+
+    def step(self):
+        for o in self.opts:
+            o.step()
+
+    def state_dict(self):
+        return {"multi": [o.state_dict() for o in self.opts]}
+
+    def load_state_dict(self, sd):
+        for o, s in zip(self.opts, sd["multi"]):
+            o.load_state_dict(s)
+
+
+def build_optimizer(model: HNetForCausalLM, lr: float, weight_decay: float, stage_lr_mult, betas=(0.9, 0.95), optimizer: str = "adamw"):
     groups = model.stage_param_groups()
-    param_groups = []
+    muon_ids = {id(p) for p in split_muon_params(model)[0]} if optimizer == "muon" else set()
+    adam_groups, muon_groups = [], []
     for stage, params in groups.items():
-        decay, no_decay = [], []
+        decay, no_decay, muon = [], [], []
         for p in params:
             if not p.requires_grad:
                 continue
-            if p.ndim < 2 or getattr(p, "_no_weight_decay", False):
+            if id(p) in muon_ids:
+                muon.append(p)
+            elif p.ndim < 2 or getattr(p, "_no_weight_decay", False):
                 no_decay.append(p)
             else:
                 decay.append(p)
         mult = stage_lr_mult[stage]
         if decay:
-            param_groups.append({"params": decay, "weight_decay": weight_decay, "lr_mult": mult, "stage": stage})
+            adam_groups.append({"params": decay, "weight_decay": weight_decay, "lr_mult": mult, "stage": stage})
         if no_decay:
-            param_groups.append({"params": no_decay, "weight_decay": 0.0, "lr_mult": mult, "stage": stage})
-    opt = torch.optim.AdamW(param_groups, lr=lr, betas=betas, eps=1e-8, fused=torch.cuda.is_available())
-    return opt
+            adam_groups.append({"params": no_decay, "weight_decay": 0.0, "lr_mult": mult, "stage": stage})
+        if muon:
+            muon_groups.append({"params": muon, "weight_decay": weight_decay, "lr_mult": mult, "stage": stage})
+    adam = torch.optim.AdamW(adam_groups, lr=lr, betas=betas, eps=1e-8, fused=torch.cuda.is_available())
+    if not muon_groups:
+        return adam
+    return MultiOpt([adam, Muon(muon_groups, lr=lr, momentum=0.95, nesterov=True, weight_decay=weight_decay)])
 
 
 def wsd_lr(step: int, total: int, base: float, warmup_frac: float = 0.1, decay_frac: float = 0.2, min_ratio: float = 0.1) -> float:
@@ -205,6 +240,9 @@ def main(argv=None):
     ap.add_argument("--ckpt-minutes", type=float, default=10.0)
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--compile", action="store_true")
+    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"], help="muon: Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest")
+    ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
+    ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--sft", action="store_true", help="train on an SFT shard (assistant-byte loss mask)")
@@ -227,10 +265,15 @@ def main(argv=None):
     cfg.save(out_dir / "config.json")
     (out_dir / "run.json").write_text(json.dumps({**vars(args), "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
 
+    if args.bucket is not None:
+        cfg.dc.chunk_bucket = args.bucket
     model = HNetForCausalLM(cfg, device=device)
+    if args.ckpt_main:
+        model.main_network.grad_checkpoint = True
     n_params = model.num_params()
+    peak_tflops = peak_tflops_for(device) if device.type == "cuda" else None
     print(f"params: {n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('morpheme.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('morpheme.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
-    opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult)
+    opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, optimizer=args.optimizer)
 
     train_shard = ByteShard(args.data, "train", sft=args.sft)
     val_shard = ByteShard(args.data, "val", sft=args.sft)
@@ -317,6 +360,9 @@ def main(argv=None):
             t_log = time.time()
             rec = {"lr": lr, "target_ratio": target_ratio, "bytes_per_sec": tokens_per_step * args.log_every / dt, "train_bpb": stats["ce"] / LN2}
             rec.update(stats)
+            rec["tflops"] = flops_per_byte(model, args.seq_len, stats.get("bpic", 1.0)) * rec["bytes_per_sec"] / 1e12
+            if peak_tflops:
+                rec["mfu"] = rec["tflops"] / peak_tflops
             log(rec)
         if step % args.eval_every == 0:
             ev = evaluate(model, val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio)

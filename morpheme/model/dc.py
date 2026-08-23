@@ -102,12 +102,23 @@ class RoutingModule(nn.Module):
 
 
 class ChunkLayer(nn.Module):
-    """Keep only boundary positions; compact them to the front of a [B, M] tensor with a mask."""
+    """Keep only boundary positions; compact them to the front of a [B, M] tensor with a mask.
 
-    def forward(self, hidden: torch.Tensor, boundary_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    `bucket` rounds M up to a multiple (capped at L). The padded tail holds non-boundary bytes in
+    order; the main network is causal, so nothing valid can see them, and dechunk never reads them.
+    Stable shapes are what let Triton autotune caches, CUDA graphs and the allocator work.
+    """
+
+    def __init__(self, bucket: int = 1):
+        super().__init__()
+        self.bucket = max(int(bucket), 1)
+
+    def forward(self, hidden: torch.Tensor, boundary_mask: torch.Tensor, exact: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         B, L, D = hidden.shape
         num = boundary_mask.sum(dim=-1)
         M = int(num.max())
+        if self.bucket > 1 and not exact:
+            M = min(L, -(-M // self.bucket) * self.bucket)
         token_idx = torch.arange(L, device=hidden.device)[None, :] + (~boundary_mask).long() * L
         order = torch.argsort(token_idx, dim=1)[:, :M]
         out = torch.gather(hidden, 1, order[:, :, None].expand(-1, -1, D))

@@ -66,6 +66,7 @@ class DCCfg:
     schedule_warmup_frac: float = 0.6  # hold N_init for this fraction of training, then ramp linearly
     ratio_loss_weight: float = 0.03  # α
     prob_clamp: float = 1e-4  # p clamped to [ε, 1-ε] before the EMA
+    chunk_bucket: int = 64  # pad the chunk count to a multiple of this so shapes repeat (1 = exact); bit-neutral
 
 
 @dataclass
