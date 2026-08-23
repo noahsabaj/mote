@@ -21,15 +21,15 @@ the same project name, then resume the session by id (resume searches every proj
 this machine runs 2.1.241):
 
 ```bash
-WIN=/run/media/$USER/<C-drive-label>/Users/noahs/.claude/projects/D--Code-Workshop-1
+WIN=/run/media/$USER/<C-drive-label>/Users/noahs/.claude/projects/C--Code-mote   # the project moved to C:\Code\mote on 2026-08-23
 mkdir -p ~/.claude/projects && cp -r "$WIN" ~/.claude/projects/
-cd ~/mote && CLAUDE_CODE_PROJECT_DIR_NAME=D--Code-Workshop-1 claude --resume a5c0fd49-b82d-4d4f-840f-ece5aa374fcf
+cd ~/mote && CLAUDE_CODE_PROJECT_DIR_NAME=C--Code-mote claude --resume a5c0fd49-b82d-4d4f-840f-ece5aa374fcf
 ```
 
 `CLAUDE_CODE_PROJECT_DIR_NAME` (2.1.234+) pins the project name so new sessions and the auto-memory land in
-the same directory instead of `-home-noahs-mote`. Log in again on Fedora (the login is per machine). The
+the same directory instead of `-home-noahs-mote` (the Windows sessions before the C: move sit in `D--Code-Workshop-1`, copy that too if you want them). Log in again on Fedora (the login is per machine). The
 transcript format is internal and version-dependent: if the resume misbehaves, start fresh — the memory
-notes (`~/.claude/projects/D--Code-Workshop-1/memory/`, mirrored in `docs/_memory-export/`) plus
+notes (`~/.claude/projects/C--Code-mote/memory/`, mirrored in `docs/_memory-export/`) plus
 `docs/shape.md`, `docs/prefs.md`, `docs/context.md` carry every decision, and that is a lighter start
 than a 28 MB, thrice-compacted transcript.
 
@@ -38,7 +38,7 @@ than a 28 MB, thrice-compacted transcript.
 * **Hand-off**: the copy on Fedora's root (`~/mote`) is canonical. A bare repo on the USB disk is the backup
   remote, readable from both OSes: `git init --bare /run/media/$USER/<D>/Code/mote.git` then
   `git remote add backup …` and `git push backup --all` after every session. The Windows working copy on D:
-  stays untouched until the Windows clean-up below.
+  stays untouched until the Windows clean-up below. (Done on Windows 2026-08-23: the working copy moved to `C:\Code\mote`, `D:\Code\mote.git` is the backup remote, `D:\Code\Workshop` is the archive.)
 * **Phone**: Fedora joins Tailscale as its own node (Noah installs Tailscale); re-pair the phone once and
   re-add the home-screen tile for the new origin. The Windows node stays valid for boots back into Windows.
 * **Disks, measured**: D: (USB flash, NTFS) 389 MiB/s sequential, ~9 000 random 4 KiB reads/s; C: (NVMe)
@@ -60,7 +60,7 @@ than a 28 MB, thrice-compacted transcript.
    2 GB Linux boot partition and a 212 GB Linux root — Fedora's default is Btrfs; ext4 only if chosen at install;
    `df -hT /` tells). Both C: and D: stay NTFS and are only read from. D: is a 934 GB **USB flash disk**, the
    worst place for memmapped shards, so the copy is the single biggest I/O change of the move. Copy once:
-   `rsync -a --info=progress2 /run/media/<user>/<D>/Code/Workshop/1/ ~/mote/`. On Btrfs, mark the big-file
+   `rsync -a --info=progress2 /run/media/<user>/<C>/Code/mote/ ~/mote/` (the repo moved from the USB disk D: to C:\Code\mote on 2026-08-23; the bare backup repo is `D:\Code\mote.git`). On Btrfs, mark the big-file
    directories no-CoW before filling them: `chattr +C ~/mote/data ~/mote/runs`.
 2. **GPU**: `nvidia-smi` works (confirmed by Noah). Install CUDA toolkit matching the driver for Triton
    (`sudo dnf install cuda-toolkit` from the NVIDIA repo, or the `nvidia-cuda-toolkit` build that matches).
