@@ -111,7 +111,18 @@ Measured on the RTX 4060 Ti before this work: ~9 % MFU (42 kB/s on the 35M model
   kernel per process). The benchmark chain sets it; put it in `~/.bashrc` on the training box.
 * Research log with the 2026 evidence behind these: `docs/research/efficiency-campaign-2026-08-23.md`.
 
-## Serve
+## Run the studio
+
+```bash
+.\morpheme service install      # once: token file, config, login item (no admin); starts the studio now
+.\morpheme build                # after changes: web build + tests + restart + pair link
+.\morpheme pair                 # QR / 6-digit code page for phones
+.\morpheme status | logs | restart | config --checkpoint runs/x/last.pt
+```
+
+`morpheme` (a `.cmd` shim at the repo root, or the console script in the venv) runs a supervisor that keeps the
+server alive and re-reads `.morpheme/config.json` on every restart; the access token lives in `.morpheme/token`.
+On Linux `service install` writes a systemd user unit instead. Manual form, if you want it:
 
 ```bash
 python -m morpheme.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860

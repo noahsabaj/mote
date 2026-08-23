@@ -10,14 +10,13 @@ public, TLS is handled for you, and no router or firewall changes are needed.
    Install the Tailscale app on the phone and sign in with the same account.
 2. In the admin console (https://login.tailscale.com/admin/dns) make sure **MagicDNS** and
    **HTTPS certificates** are enabled (both are one click; MagicDNS is on by default).
-3. Generate a token and start the studio with it (PowerShell, repo root — the project venv's Python, not the global `python`, which has no torch):
+3. Install the studio as a login item and start it (PowerShell, repo root):
    ```powershell
-   $env:MORPHEME_TOKEN = .\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(24))"
-   $env:MORPHEME_TOKEN                      # copy this to the phone once
-   .\.venv\Scripts\python.exe -m morpheme.serve.app --checkpoint runs/pilot_sft/last.pt --device cpu --port 7861
+   .\morpheme service install
    ```
-   The server keeps listening on `127.0.0.1` only — Tailscale does the exposure.
-   Without a token the server refuses to bind anything but loopback (`--no-auth` overrides).
+   This creates the access token (`.morpheme/token`), the config (`.morpheme/config.json`: checkpoint, device,
+   port 7861) and a Startup-folder entry; a supervisor keeps the server alive and `.\morpheme build` rebuilds,
+   tests and restarts it. The server listens on `127.0.0.1` only — Tailscale does the exposure.
 4. Publish the port to your tailnet (PowerShell, once; survives reboots):
    ```powershell
    & "C:\Program Files\Tailscale	ailscale.exe" serve --bg http://127.0.0.1:7861

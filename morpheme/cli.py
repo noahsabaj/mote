@@ -1,0 +1,367 @@
+"""`morpheme` — one command for running the studio, so nothing lives in a terminal.
+
+    morpheme service install     register the studio to start at login (Startup folder; no admin), create the token
+    morpheme service start|stop|restart|status|uninstall
+    morpheme build               build the web app, run the tests, restart the studio, print the pair link
+    morpheme pair                open the pairing page (QR + code) in the browser
+    morpheme logs [-n 80]        tail the studio log
+    morpheme config [--checkpoint PATH] [--device cpu|cuda] [--port N]
+
+State lives in <repo>/.morpheme/: token (the access token), config.json, studio.log, *.pid.
+The supervisor (`service run`) launches the server, restarts it if it dies, and re-reads config.json
+on every (re)start — so `morpheme config --checkpoint ...` followed by `morpheme restart` is how a
+new checkpoint goes live.
+
+Linux: `service install` writes a systemd user unit instead (the Fedora path).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import secrets
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+STATE = ROOT / ".morpheme"
+TOKEN_FILE = STATE / "token"
+CONFIG_FILE = STATE / "config.json"
+LOG_FILE = STATE / "studio.log"
+SUP_PID = STATE / "supervisor.pid"
+SRV_PID = STATE / "server.pid"
+STOP_FLAG = STATE / "stop"
+PY = Path(sys.executable)
+PYW = PY.with_name("pythonw.exe") if os.name == "nt" else PY
+DEFAULT_CONFIG = {"checkpoint": "runs/pilot_sft/last.pt", "device": "cpu", "port": 7861, "host": "127.0.0.1"}
+
+
+# ---- state ----------------------------------------------------------------------------------
+def load_config() -> dict:
+    cfg = dict(DEFAULT_CONFIG)
+    if CONFIG_FILE.exists():
+        cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
+    return cfg
+
+
+def save_config(cfg: dict) -> None:
+    STATE.mkdir(exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+
+
+def ensure_token() -> str:
+    STATE.mkdir(exist_ok=True)
+    if not TOKEN_FILE.exists():
+        TOKEN_FILE.write_text(secrets.token_urlsafe(24), encoding="utf-8")
+    return TOKEN_FILE.read_text(encoding="utf-8").strip()
+
+
+def _pid(path: Path):
+    try:
+        pid = int(path.read_text().strip())
+    except Exception:
+        return None
+    return pid if _alive(pid) else None
+
+
+def _alive(pid: int) -> bool:
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _kill(pid: int) -> None:
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except Exception:
+        pass
+
+
+def _port_owner(port: int):
+    """pid listening on the port, or None."""
+    if os.name == "nt":
+        out = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[1].endswith(f":{port}") and parts[3] == "LISTENING":
+                return int(parts[4])
+        return None
+    out = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        if f":{port} " in line and "pid=" in line:
+            return int(line.split("pid=")[1].split(",")[0])
+    return None
+
+
+def _health(port: int):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return None
+
+
+# ---- supervisor -----------------------------------------------------------------------------
+def service_run() -> None:
+    """Foreground loop: run the server, restart it when it exits (unless a stop was requested)."""
+    STATE.mkdir(exist_ok=True)
+    STOP_FLAG.unlink(missing_ok=True)
+    SUP_PID.write_text(str(os.getpid()))
+    backoff = 3
+    while True:
+        cfg = load_config()
+        token = ensure_token()
+        env = {**os.environ, "MORPHEME_TOKEN": token, "PYTHONIOENCODING": "utf-8"}
+        args = [str(PY), "-m", "morpheme.serve.app", "--checkpoint", cfg["checkpoint"], "--device", cfg["device"],
+                "--port", str(cfg["port"]), "--host", cfg.get("host", "127.0.0.1")]
+        with open(LOG_FILE, "a", encoding="utf-8") as log:
+            log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} starting: {' '.join(args[2:])}\n")
+            log.flush()
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            proc = subprocess.Popen(args, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
+            SRV_PID.write_text(str(proc.pid))
+            t0 = time.time()
+            rc = proc.wait()
+            log.write(f"=== {time.strftime('%Y-%m-%d %H:%M:%S')} server exited with {rc}\n")
+        SRV_PID.unlink(missing_ok=True)
+        if STOP_FLAG.exists():
+            STOP_FLAG.unlink(missing_ok=True)
+            break
+        backoff = 3 if time.time() - t0 > 60 else min(backoff * 2, 60)  # crash loops slow down
+        time.sleep(backoff)
+    SUP_PID.unlink(missing_ok=True)
+
+
+def service_start(force: bool = False) -> int:
+    cfg = load_config()
+    ensure_token()
+    if _pid(SUP_PID):
+        print(f"already running (supervisor pid {_pid(SUP_PID)}); use `morpheme restart` to reload")
+        return 0
+    owner = _port_owner(cfg["port"])
+    if owner:
+        if not force:
+            print(f"port {cfg['port']} is held by pid {owner} (a studio started by hand?). Stop it, or run `morpheme service start --force` to take the port over.")
+            return 1
+        _kill(owner)
+        time.sleep(1)
+    flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
+    subprocess.Popen([str(PYW if PYW.exists() else PY), "-m", "morpheme.cli", "service", "run"], cwd=ROOT, creationflags=flags,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=(os.name != "nt"))
+    print("supervisor started; waiting for the studio ...", end="", flush=True)
+    for _ in range(90):
+        time.sleep(2)
+        h = _health(cfg["port"])
+        if h and h.get("model_loaded"):
+            print(f" up at http://127.0.0.1:{cfg['port']}  (pair devices: http://127.0.0.1:{cfg['port']}/pair)")
+            return 0
+        print(".", end="", flush=True)
+    print(" not healthy yet — check `morpheme logs`")
+    return 1
+
+
+def service_stop() -> int:
+    sup, srv = _pid(SUP_PID), _pid(SRV_PID)
+    if sup:
+        STOP_FLAG.touch()
+        _kill(sup)
+    if srv:
+        _kill(srv)
+    SUP_PID.unlink(missing_ok=True)
+    SRV_PID.unlink(missing_ok=True)
+    print("stopped" if (sup or srv) else "nothing was running")
+    return 0
+
+
+def service_restart() -> int:
+    if not _pid(SUP_PID):
+        return service_start()
+    srv = _pid(SRV_PID)
+    if srv:
+        _kill(srv)  # the supervisor relaunches it with the current config
+    cfg = load_config()
+    print("restarting ...", end="", flush=True)
+    time.sleep(4)
+    for _ in range(90):
+        time.sleep(2)
+        h = _health(cfg["port"])
+        if h and h.get("model_loaded") and _pid(SRV_PID) not in (None, srv):
+            print(f" up at http://127.0.0.1:{cfg['port']}")
+            return 0
+        print(".", end="", flush=True)
+    print(" not healthy yet — check `morpheme logs`")
+    return 1
+
+
+def service_status() -> int:
+    cfg = load_config()
+    sup, srv = _pid(SUP_PID), _pid(SRV_PID)
+    h = _health(cfg["port"])
+    print(f"supervisor: {'running pid ' + str(sup) if sup else 'not running'}")
+    print(f"server:     {'running pid ' + str(srv) if srv else 'not running'}")
+    print(f"health:     {h if h else 'no answer on port ' + str(cfg['port'])}")
+    print(f"config:     {json.dumps(cfg)}")
+    print(f"login item: {'installed' if _startup_entry().exists() else 'not installed'}")
+    ts = _tailscale_url()
+    print(f"tailscale:  {ts or 'serve not configured (run: tailscale serve --bg http://127.0.0.1:' + str(cfg['port']) + ')'}")
+    return 0
+
+
+# ---- login item ----------------------------------------------------------------------------
+def _startup_entry() -> Path:
+    if os.name == "nt":
+        return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Morpheme Studio.vbs"
+    return Path.home() / ".config" / "systemd" / "user" / "morpheme.service"
+
+
+def service_install() -> int:
+    ensure_token()
+    save_config(load_config())
+    entry = _startup_entry()
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        exe = PYW if PYW.exists() else PY
+        entry.write_text(
+            f'Set sh = CreateObject("WScript.Shell")\nsh.CurrentDirectory = "{ROOT}"\n'
+            f'sh.Run """{exe}"" -m morpheme.cli service run", 0, False\n', encoding="utf-8")
+        print(f"login item written: {entry}")
+    else:
+        entry.write_text(
+            "[Unit]\nDescription=Morpheme Studio\nAfter=network-online.target\n\n[Service]\n"
+            f"WorkingDirectory={ROOT}\nExecStart={PY} -m morpheme.cli service run\nRestart=always\n\n[Install]\nWantedBy=default.target\n",
+            encoding="utf-8")
+        subprocess.run(["systemctl", "--user", "daemon-reload"])
+        subprocess.run(["systemctl", "--user", "enable", "morpheme.service"])
+        print(f"systemd user unit written and enabled: {entry}")
+    print(f"token file: {TOKEN_FILE}   config: {CONFIG_FILE}")
+    return service_start()
+
+
+def service_uninstall() -> int:
+    service_stop()
+    entry = _startup_entry()
+    if entry.exists():
+        if os.name != "nt":
+            subprocess.run(["systemctl", "--user", "disable", "morpheme.service"])
+        entry.unlink()
+        print(f"removed {entry}")
+    return 0
+
+
+# ---- build / pair / logs / config -----------------------------------------------------------
+def _tailscale_url():
+    try:
+        from morpheme.serve.pairing import detect_tailscale_url
+
+        return detect_tailscale_url()
+    except Exception:
+        return None
+
+
+def build(skip_tests: bool = False) -> int:
+    npm = "npm.cmd" if os.name == "nt" else "npm"
+    steps = [("web: check", [npm, "run", "check"], ROOT / "web"), ("web: build", [npm, "run", "build"], ROOT / "web")]
+    if not skip_tests:
+        steps.append(("tests", [str(PY), "-m", "pytest", "-q", "tests/"], ROOT))
+    for name, cmd, cwd in steps:
+        print(f"-- {name}", flush=True)
+        rc = subprocess.run(cmd, cwd=cwd).returncode
+        if rc != 0:
+            print(f"{name} failed (exit {rc}); the studio was NOT restarted")
+            return rc
+    rc = service_restart()
+    if rc == 0:
+        cfg = load_config()
+        ts = _tailscale_url()
+        print(f"pair devices: http://127.0.0.1:{cfg['port']}/pair" + (f"   phone: {ts}/" if ts else ""))
+    return rc
+
+
+def pair() -> int:
+    cfg = load_config()
+    url = f"http://127.0.0.1:{cfg['port']}/pair"
+    if os.name == "nt":
+        os.startfile(url)  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", url])
+    print(url)
+    return 0
+
+
+def logs(n: int) -> int:
+    if not LOG_FILE.exists():
+        print("no log yet")
+        return 0
+    lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    print("\n".join(lines[-n:]))
+    return 0
+
+
+def config_cmd(args) -> int:
+    cfg = load_config()
+    for k in ("checkpoint", "device", "port", "host"):
+        v = getattr(args, k, None)
+        if v is not None:
+            cfg[k] = v
+    save_config(cfg)
+    print(json.dumps(cfg, indent=1))
+    if any(getattr(args, k, None) is not None for k in ("checkpoint", "device", "port", "host")):
+        print("run `morpheme restart` to apply")
+    return 0
+
+
+# ---- entry ---------------------------------------------------------------------------------------
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="morpheme", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("service")
+    s.add_argument("action", choices=["install", "uninstall", "start", "stop", "restart", "status", "run"])
+    s.add_argument("--force", action="store_true", help="take over the port from a studio started by hand")
+    sub.add_parser("restart")
+    sub.add_parser("status")
+    b = sub.add_parser("build")
+    b.add_argument("--skip-tests", action="store_true")
+    sub.add_parser("pair")
+    lg = sub.add_parser("logs")
+    lg.add_argument("-n", type=int, default=80)
+    c = sub.add_parser("config")
+    c.add_argument("--checkpoint")
+    c.add_argument("--device", choices=["cpu", "cuda"])
+    c.add_argument("--port", type=int)
+    c.add_argument("--host")
+    args = ap.parse_args(argv)
+
+    if args.cmd == "service":
+        return {"install": service_install, "uninstall": service_uninstall, "start": lambda: service_start(args.force),
+                "stop": service_stop, "restart": service_restart, "status": service_status, "run": lambda: (service_run(), 0)[1]}[args.action]()
+    if args.cmd == "restart":
+        return service_restart()
+    if args.cmd == "status":
+        return service_status()
+    if args.cmd == "build":
+        return build(args.skip_tests)
+    if args.cmd == "pair":
+        return pair()
+    if args.cmd == "logs":
+        return logs(args.n)
+    if args.cmd == "config":
+        return config_cmd(args)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

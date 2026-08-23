@@ -16,6 +16,9 @@ dependencies = [
     "pytest>=8.0.0",
 ]
 
+[project.scripts]
+morpheme = "morpheme.cli:main"
+
 [project.optional-dependencies]
 # Official Mamba-3 Triton kernels: Linux / WSL2 only. Install from the upstream source tree:
 #   MAMBA_SKIP_CUDA_BUILD=TRUE pip install -e /path/to/state-spaces/mamba --no-deps --no-build-isolation
