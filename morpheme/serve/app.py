@@ -8,6 +8,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import mimetypes
+import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -15,7 +18,7 @@ from typing import Optional
 
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -23,8 +26,37 @@ from pydantic import BaseModel
 from .engine import Engine, GenParams, discover_checkpoints
 
 ROOT = Path(__file__).resolve().parents[2]
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 app = FastAPI(title="Morpheme Studio")
-STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock()}
+STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "token": None}
+
+# --- access token -----------------------------------------------------------------
+# Optional shared secret (`--token` / MORPHEME_TOKEN). When set, every /api and /v1 route
+# needs `Authorization: Bearer <token>` and /ws/generate needs a first frame
+# {"type": "auth", "token": ...}. /api/health and the static frontend stay open so the
+# UI can load and ask for the token. Binding to anything but loopback refuses to start
+# without a token unless --no-auth is given explicitly.
+PROTECTED_PREFIXES = ("/api/", "/v1/")
+OPEN_PATHS = {"/api/health"}
+
+
+def token_ok(presented) -> bool:
+    tok = STATE["token"]
+    if not tok:
+        return True
+    return isinstance(presented, str) and secrets.compare_digest(presented.encode(), tok.encode())
+
+
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    path = request.url.path
+    if STATE["token"] and path.startswith(PROTECTED_PREFIXES) and path not in OPEN_PATHS:
+        auth = request.headers.get("authorization", "")
+        presented = auth[7:] if auth[:7].lower() == "bearer " else None
+        if not token_ok(presented):
+            return JSONResponse({"detail": "access token required"}, status_code=401,
+                                headers={"WWW-Authenticate": "Bearer"})
+    return await call_next(request)
 
 
 def engine() -> Engine:
@@ -205,11 +237,25 @@ async def chat_completions(body: ChatBody):
 @app.websocket("/ws/generate")
 async def ws_generate(ws: WebSocket):
     await ws.accept()
+    if STATE["token"]:
+        try:
+            first = await asyncio.wait_for(ws.receive_json(), timeout=15)
+        except Exception:
+            await ws.close(code=4401)
+            return
+        if not isinstance(first, dict) or first.get("type") != "auth" or not token_ok(first.get("token")):
+            await ws.close(code=4401)
+            return
+        await ws.send_json({"type": "auth_ok"})
     loop = asyncio.get_running_loop()
     stop = threading.Event()
     try:
         while True:
             msg = await ws.receive_json()
+            if msg.get("type") == "auth":
+                # a client that holds a token always sends this first and waits for the reply
+                await ws.send_json({"type": "auth_ok"})
+                continue
             if msg.get("type") != "generate":
                 continue
             try:
@@ -269,7 +315,15 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7860)
     ap.add_argument("--device", default=None, help="cuda (default when available) or cpu — e.g. to leave the GPU to a training run")
+    ap.add_argument("--token", default=os.environ.get("MORPHEME_TOKEN") or None,
+                    help="shared access token (or MORPHEME_TOKEN); required unless bound to loopback or --no-auth")
+    ap.add_argument("--no-auth", action="store_true", help="serve without a token on a non-loopback host (not recommended)")
     args = ap.parse_args(argv)
+    loopback = args.host in ("127.0.0.1", "localhost", "::1")
+    if not loopback and not args.token and not args.no_auth:
+        raise SystemExit(f"refusing to bind {args.host} without a token: pass --token (or MORPHEME_TOKEN), or --no-auth to override")
+    STATE["token"] = args.token or None
+    print("access token: " + ("required" if STATE["token"] else "none" + ("" if loopback else " (--no-auth)")), flush=True)
     ck = Path(args.checkpoint) if args.checkpoint else (discover_checkpoints(ROOT) or [None])[0]
     if ck is None:
         raise SystemExit("no checkpoint found; train one first or pass --checkpoint")

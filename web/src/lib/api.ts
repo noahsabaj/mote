@@ -8,6 +8,7 @@ import type {
   ModelInfo,
   TrainingRun
 } from './types';
+import { auth } from './stores/auth.svelte';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -23,12 +24,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     res = await fetch(path, {
       ...init,
-      headers: { Accept: 'application/json', ...(init?.headers ?? {}) }
+      headers: {
+        Accept: 'application/json',
+        ...(auth.token ? { Authorization: `Bearer ${auth.token}` } : {}),
+        ...(init?.headers ?? {})
+      }
     });
   } catch {
     throw new ApiError(0, 'Cannot reach the backend.');
   }
   if (!res.ok) {
+    if (res.status === 401) auth.require();
     let detail = `${res.status} ${res.statusText}`;
     try {
       const body = (await res.json()) as { detail?: string; message?: string };

@@ -2,6 +2,9 @@
 // automatic reconnect (capped exponential backoff) and cancellation.
 
 import type { ChatRole, ClientGenerate, SamplingParams, ServerEvent } from './types';
+import { auth } from './stores/auth.svelte';
+
+type AuthFrame = { type: 'auth'; token: string };
 
 /**
  * 'connecting' is only ever the very first attempt. Once a connection has succeeded or
@@ -17,6 +20,8 @@ export interface GenerateSocketHandlers {
   onInterrupted(): void;
   /** A request was cancelled before it ever reached the backend. */
   onAborted(): void;
+  /** The backend closed the socket with 4401: it wants an access token. No retries until one is set. */
+  onUnauthorized(): void;
 }
 
 const BACKOFF_MS = [400, 800, 1600, 3000, 5000, 8000];
@@ -38,13 +43,17 @@ export class GenerateSocket {
   #pending: ClientGenerate | null = null;
   #handlers: GenerateSocketHandlers;
   #state: LinkState = 'offline';
+  /** an auth frame is on the wire; nothing else is sent until `auth_ok` */
+  #awaitingAuth = false;
+  /** closed with 4401; only `retryNow()` (after a token is entered) reconnects */
+  #unauthorized = false;
 
   constructor(handlers: GenerateSocketHandlers) {
     this.#handlers = handlers;
   }
 
   connect(): void {
-    if (this.#disposed) return;
+    if (this.#disposed || this.#unauthorized) return;
     const live = this.#ws?.readyState;
     if (live === WebSocket.OPEN || live === WebSocket.CONNECTING) return;
     if (!this.#everConnected && this.#attempt === 0) this.#setState('connecting');
@@ -66,23 +75,43 @@ export class GenerateSocket {
       this.#attempt = 0;
       this.#everConnected = true;
       this.#setState('open');
-      this.#flush();
+      if (auth.token) {
+        // The server always answers an auth frame with auth_ok (token configured or not).
+        this.#awaitingAuth = true;
+        this.#write({ type: 'auth', token: auth.token });
+      } else {
+        this.#flush();
+      }
     });
 
     ws.addEventListener('message', (ev: MessageEvent<string>) => {
-      let parsed: ServerEvent;
+      let parsed: ServerEvent | { type: 'auth_ok' };
       try {
-        parsed = JSON.parse(ev.data) as ServerEvent;
+        parsed = JSON.parse(ev.data) as ServerEvent | { type: 'auth_ok' };
       } catch {
+        return;
+      }
+      if (parsed.type === 'auth_ok') {
+        this.#awaitingAuth = false;
+        this.#flush();
         return;
       }
       if (parsed.type === 'done' || parsed.type === 'error') this.#generating = false;
       this.#handlers.onEvent(parsed);
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (ev: CloseEvent) => {
       if (this.#ws === ws) this.#ws = null;
       if (this.#disposed) return;
+      this.#awaitingAuth = false;
+      if (ev.code === 4401) {
+        // The request (if any) never ran; keep it pending for after the token is entered.
+        this.#generating = false;
+        this.#unauthorized = true;
+        this.#setState('offline');
+        this.#handlers.onUnauthorized();
+        return;
+      }
       if (this.#generating) {
         this.#generating = false;
         this.#handlers.onInterrupted();
@@ -120,6 +149,7 @@ export class GenerateSocket {
       this.#retryTimer = null;
     }
     this.#attempt = 0;
+    this.#unauthorized = false;
     this.connect();
   }
 
@@ -133,14 +163,14 @@ export class GenerateSocket {
   }
 
   #flush(): void {
-    if (!this.#pending) return;
+    if (!this.#pending || this.#awaitingAuth) return;
     const request = this.#pending;
     if (!this.#write(request)) return;
     this.#pending = null;
     this.#generating = true;
   }
 
-  #write(msg: ClientGenerate | { type: 'stop' }): boolean {
+  #write(msg: ClientGenerate | { type: 'stop' } | AuthFrame): boolean {
     if (this.#ws?.readyState !== WebSocket.OPEN) return false;
     try {
       this.#ws.send(JSON.stringify(msg));

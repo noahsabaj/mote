@@ -90,12 +90,17 @@ python -m morpheme.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
 entropy, chunk boundaries, multi-byte acceptances, UTF-8 assembly, live Mamba-3 retention and Relation exchange mass).
 The built frontend (`web/dist`) is served at `/`.
 
+`--token <secret>` (or `MORPHEME_TOKEN`) gates the API and the generation socket; the server refuses to bind a
+non-loopback `--host` without one. `docs/remote-access.md` is the runbook for reaching the studio from a phone
+(Tailscale, recommended) or the home LAN.
+
 ## Frontend
 
 `web/` is a Vite + Svelte 5 + TypeScript app (see `web/README.md`): `npm install`, `npm run dev` (standalone against a
 clearly-labelled dev mock), `npm run build` (→ `web/dist`, served by the backend at `/`), `npm run check`. One page: the
 conversation, a one-line honesty strip, and Structure/Bytes toggles under each reply; Model, Diagnostics and Training
-open as sheets. Everything it shows comes from the API above.
+open as sheets. Everything it shows comes from the API above. It is installable (web-app manifest + icons,
+`web/icons/make_icons.py` renders them; no service worker) — see `docs/remote-access.md`.
 
 ## Cloud (Lightning.ai)
 

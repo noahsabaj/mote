@@ -2,10 +2,14 @@
   // The honesty label, always on screen, never editorialised: `status` and `status_note`
   // are printed exactly as the backend sends them.
   import { model } from '../lib/stores/model.svelte';
+  import { auth } from '../lib/stores/auth.svelte';
 </script>
 
 <div class="strip" role="note">
-  {#if model.error}
+  {#if auth.required}
+    <span class="tag off">locked</span>
+    <p>This studio needs its access token before anything here is measured.</p>
+  {:else if model.error}
     <span class="tag off">offline</span>
     <p>Backend unreachable — {model.error} Nothing on this screen is measured.</p>
   {:else if model.info}

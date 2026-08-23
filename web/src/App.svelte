@@ -9,6 +9,8 @@
   import DiagnosticsSheet from './components/DiagnosticsSheet.svelte';
   import TrainingSheet from './components/TrainingSheet.svelte';
   import ByteInspector from './components/ByteInspector.svelte';
+  import TokenPrompt from './components/TokenPrompt.svelte';
+  import { auth } from './lib/stores/auth.svelte';
   import { untrack } from 'svelte';
   import { chat } from './lib/stores/chat.svelte';
   import { model } from './lib/stores/model.svelte';
@@ -65,7 +67,9 @@
   <Composer />
 </div>
 
-{#if sheet}
+{#if auth.required}
+  <TokenPrompt />
+{:else if sheet}
   <Sheet
     title={SHEET_TITLES[sheet].title}
     subtitle={SHEET_TITLES[sheet].subtitle}
@@ -97,6 +101,9 @@
     flex-direction: column;
     height: 100dvh;
     max-height: 100dvh;
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 
   main {

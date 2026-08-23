@@ -4,6 +4,15 @@ Served by FastAPI (`morpheme.serve.app`) on `http://127.0.0.1:7860`. The built f
 is served at `/`. All values are real: they come from the loaded checkpoint, live tensors, or run logs.
 There is no decorative data anywhere.
 
+## Authentication (optional)
+
+When the server is started with `--token` (or `MORPHEME_TOKEN`), every `/api/*` and `/v1/*`
+request needs `Authorization: Bearer <token>` (otherwise `401` with `WWW-Authenticate: Bearer`),
+and `/ws/generate` expects a first frame `{"type": "auth", "token": "<token>"}` answered by
+`{"type": "auth_ok"}` — a wrong or missing frame closes the socket with code `4401`. An auth frame is
+answered with `auth_ok` even when no token is configured, so clients that hold one can always wait for it.
+`/api/health` and the static frontend are always open. See `docs/remote-access.md`.
+
 ## HTTP
 
 ### `GET /api/health`

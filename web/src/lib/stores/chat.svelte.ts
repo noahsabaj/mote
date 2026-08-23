@@ -6,6 +6,7 @@
 // the DOM on its own.
 
 import { GenerateSocket, type LinkState } from '../ws';
+import { auth } from './auth.svelte';
 import { ByteTrace, type SerializedTrace } from '../trace.svelte';
 import * as persist from '../persist';
 import { settings } from './settings.svelte';
@@ -86,6 +87,7 @@ class Chat {
   constructor() {
     this.#socket = new GenerateSocket({
       onEvent: (ev) => this.#enqueue(ev),
+      onUnauthorized: () => auth.require(),
       onLinkState: (s) => {
         this.link = s;
       },
