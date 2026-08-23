@@ -2,12 +2,12 @@
 
 import torch
 
-from morpheme.config import MBPCfg, Mamba3Cfg, MorphemeConfig, RelationCfg
-from morpheme.model.hnet import HNetForCausalLM
+from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.model.hnet import HNetForCausalLM
 
 
-def _tiny(bucket: int) -> MorphemeConfig:
-    cfg = MorphemeConfig(
+def _tiny(bucket: int) -> MoteConfig:
+    cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         mamba3=Mamba3Cfg(d_state=16, expand=2, headdim=16),
         main=RelationCfg(n_layers=2, d_model=32, n_heads=2, d_ff=64),

@@ -259,7 +259,7 @@
   <div class="eq">L = CE(next byte) + λ₁·CE(multi-byte head) + α·L_ratio,   L_ratio = N/(N−1)·[(N−1)·F·G + (1−F)(1−G)]</div>
   <p><code>F</code> is the fraction of bytes the router kept, <code>G</code> its mean boundary probability; the loss is minimal when both equal <code>1/N</code>. The straight-through gate on the dechunked output lets the router learn from the language loss, and the EMA keeps every step differentiable.</p>
 
-  <footer>Maintained alongside the code in <code>docs/architecture.html</code>. Parameter counts are exact for the presets in <code>morpheme/config.py</code>; the chunk sample and exchange masses are measurements from <code>runs/pilot_1h</code>, not illustrations.</footer>
+  <footer>Maintained alongside the code in <code>docs/architecture.html</code>. Parameter counts are exact for the presets in <code>mote/config.py</code>; the chunk sample and exchange masses are measurements from <code>runs/pilot_1h</code>, not illustrations.</footer>
 </div>
 
 <script>

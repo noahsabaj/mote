@@ -16,6 +16,6 @@ if ! $PY -c "import mamba_ssm.ops.triton.mamba3.mamba3_siso_combined" 2>/dev/nul
   MAMBA_SKIP_CUDA_BUILD=TRUE uv pip install --python $PY -q -e /tmp/mamba --no-deps --no-build-isolation
 fi
 $PY -c "import torch, triton; print('torch', torch.__version__, torch.cuda.get_device_name(0), '| triton', triton.__version__)"
-$PY -c "from morpheme.model.mamba3 import HAS_MAMBA3_KERNEL; print('mamba3 kernel:', HAS_MAMBA3_KERNEL)"
-$PY -m pytest -q -x -p no:cacheprovider tests/test_morpheme_model.py
+$PY -c "from mote.model.mamba3 import HAS_MAMBA3_KERNEL; print('mamba3 kernel:', HAS_MAMBA3_KERNEL)"
+$PY -m pytest -q -x -p no:cacheprovider tests/test_mote_model.py
 echo "bootstrap ok"

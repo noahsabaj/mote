@@ -1,15 +1,15 @@
-"""`morpheme` — one command for running the studio, so nothing lives in a terminal.
+"""`mote` — one command for running the studio, so nothing lives in a terminal.
 
-    morpheme service install     register the studio to start at login (Startup folder; no admin), create the token
-    morpheme service start|stop|restart|status|uninstall
-    morpheme build               build the web app, run the tests, restart the studio, print the pair link
-    morpheme pair                open the pairing page (QR + code) in the browser
-    morpheme logs [-n 80]        tail the studio log
-    morpheme config [--checkpoint PATH] [--device cpu|cuda] [--port N]
+    mote service install     register the studio to start at login (Startup folder; no admin), create the token
+    mote service start|stop|restart|status|uninstall
+    mote build               build the web app, run the tests, restart the studio, print the pair link
+    mote pair                open the pairing page (QR + code) in the browser
+    mote logs [-n 80]        tail the studio log
+    mote config [--checkpoint PATH] [--device cpu|cuda] [--port N]
 
-State lives in <repo>/.morpheme/: token (the access token), config.json, studio.log, *.pid.
+State lives in <repo>/.mote/: token (the access token), config.json, studio.log, *.pid.
 The supervisor (`service run`) launches the server, restarts it if it dies, and re-reads config.json
-on every (re)start — so `morpheme config --checkpoint ...` followed by `morpheme restart` is how a
+on every (re)start — so `mote config --checkpoint ...` followed by `mote restart` is how a
 new checkpoint goes live.
 
 Linux: `service install` writes a systemd user unit instead (the Fedora path).
@@ -30,7 +30,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STATE = ROOT / ".morpheme"
+STATE = ROOT / ".mote"
 TOKEN_FILE = STATE / "token"
 CONFIG_FILE = STATE / "config.json"
 LOG_FILE = STATE / "studio.log"
@@ -125,8 +125,8 @@ def service_run() -> None:
     while True:
         cfg = load_config()
         token = ensure_token()
-        env = {**os.environ, "MORPHEME_TOKEN": token, "PYTHONIOENCODING": "utf-8"}
-        args = [str(PY), "-m", "morpheme.serve.app", "--checkpoint", cfg["checkpoint"], "--device", cfg["device"],
+        env = {**os.environ, "MOTE_TOKEN": token, "PYTHONIOENCODING": "utf-8"}
+        args = [str(PY), "-m", "mote.serve.app", "--checkpoint", cfg["checkpoint"], "--device", cfg["device"],
                 "--port", str(cfg["port"]), "--host", cfg.get("host", "127.0.0.1")]
         with open(LOG_FILE, "a", encoding="utf-8") as log:
             log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} starting: {' '.join(args[2:])}\n")
@@ -150,17 +150,17 @@ def service_start(force: bool = False) -> int:
     cfg = load_config()
     ensure_token()
     if _pid(SUP_PID):
-        print(f"already running (supervisor pid {_pid(SUP_PID)}); use `morpheme restart` to reload")
+        print(f"already running (supervisor pid {_pid(SUP_PID)}); use `mote restart` to reload")
         return 0
     owner = _port_owner(cfg["port"])
     if owner:
         if not force:
-            print(f"port {cfg['port']} is held by pid {owner} (a studio started by hand?). Stop it, or run `morpheme service start --force` to take the port over.")
+            print(f"port {cfg['port']} is held by pid {owner} (a studio started by hand?). Stop it, or run `mote service start --force` to take the port over.")
             return 1
         _kill(owner)
         time.sleep(1)
     flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
-    subprocess.Popen([str(PYW if PYW.exists() else PY), "-m", "morpheme.cli", "service", "run"], cwd=ROOT, creationflags=flags,
+    subprocess.Popen([str(PYW if PYW.exists() else PY), "-m", "mote.cli", "service", "run"], cwd=ROOT, creationflags=flags,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=(os.name != "nt"))
     print("supervisor started; waiting for the studio ...", end="", flush=True)
     for _ in range(90):
@@ -170,7 +170,7 @@ def service_start(force: bool = False) -> int:
             print(f" up at http://127.0.0.1:{cfg['port']}  (pair devices: http://127.0.0.1:{cfg['port']}/pair)")
             return 0
         print(".", end="", flush=True)
-    print(" not healthy yet — check `morpheme logs`")
+    print(" not healthy yet — check `mote logs`")
     return 1
 
 
@@ -203,7 +203,7 @@ def service_restart() -> int:
             print(f" up at http://127.0.0.1:{cfg['port']}")
             return 0
         print(".", end="", flush=True)
-    print(" not healthy yet — check `morpheme logs`")
+    print(" not healthy yet — check `mote logs`")
     return 1
 
 
@@ -224,8 +224,8 @@ def service_status() -> int:
 # ---- login item ----------------------------------------------------------------------------
 def _startup_entry() -> Path:
     if os.name == "nt":
-        return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Morpheme Studio.vbs"
-    return Path.home() / ".config" / "systemd" / "user" / "morpheme.service"
+        return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Mote Studio.vbs"
+    return Path.home() / ".config" / "systemd" / "user" / "mote.service"
 
 
 def service_install() -> int:
@@ -237,15 +237,15 @@ def service_install() -> int:
         exe = PYW if PYW.exists() else PY
         entry.write_text(
             f'Set sh = CreateObject("WScript.Shell")\nsh.CurrentDirectory = "{ROOT}"\n'
-            f'sh.Run """{exe}"" -m morpheme.cli service run", 0, False\n', encoding="utf-8")
+            f'sh.Run """{exe}"" -m mote.cli service run", 0, False\n', encoding="utf-8")
         print(f"login item written: {entry}")
     else:
         entry.write_text(
-            "[Unit]\nDescription=Morpheme Studio\nAfter=network-online.target\n\n[Service]\n"
-            f"WorkingDirectory={ROOT}\nExecStart={PY} -m morpheme.cli service run\nRestart=always\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=Mote Studio\nAfter=network-online.target\n\n[Service]\n"
+            f"WorkingDirectory={ROOT}\nExecStart={PY} -m mote.cli service run\nRestart=always\n\n[Install]\nWantedBy=default.target\n",
             encoding="utf-8")
         subprocess.run(["systemctl", "--user", "daemon-reload"])
-        subprocess.run(["systemctl", "--user", "enable", "morpheme.service"])
+        subprocess.run(["systemctl", "--user", "enable", "mote.service"])
         print(f"systemd user unit written and enabled: {entry}")
     print(f"token file: {TOKEN_FILE}   config: {CONFIG_FILE}")
     return service_start()
@@ -256,7 +256,7 @@ def service_uninstall() -> int:
     entry = _startup_entry()
     if entry.exists():
         if os.name != "nt":
-            subprocess.run(["systemctl", "--user", "disable", "morpheme.service"])
+            subprocess.run(["systemctl", "--user", "disable", "mote.service"])
         entry.unlink()
         print(f"removed {entry}")
     return 0
@@ -265,7 +265,7 @@ def service_uninstall() -> int:
 # ---- build / pair / logs / config -----------------------------------------------------------
 def _tailscale_url():
     try:
-        from morpheme.serve.pairing import detect_tailscale_url
+        from mote.serve.pairing import detect_tailscale_url
 
         return detect_tailscale_url()
     except Exception:
@@ -320,13 +320,13 @@ def config_cmd(args) -> int:
     save_config(cfg)
     print(json.dumps(cfg, indent=1))
     if any(getattr(args, k, None) is not None for k in ("checkpoint", "device", "port", "host")):
-        print("run `morpheme restart` to apply")
+        print("run `mote restart` to apply")
     return 0
 
 
 def prefs_cmd(args) -> int:
     """Preference votes (docs/prefs.md): hand unrated pairs to the rater, take verdicts back, read the numbers."""
-    from morpheme.serve.prefs import PrefStore, rubric
+    from mote.serve.prefs import PrefStore, rubric
 
     store = PrefStore()
     if args.action == "export":
@@ -334,7 +334,7 @@ def prefs_cmd(args) -> int:
         print(f"{n} pairs -> {args.out}  (rubric {rubric()['hash']})")
     elif args.action == "import":
         if not args.file:
-            print("usage: morpheme prefs import <verdicts.jsonl>")
+            print("usage: mote prefs import <verdicts.jsonl>")
             return 2
         print(f"{store.import_verdicts(Path(args.file))} verdicts imported")
     elif args.action == "summary":
@@ -355,7 +355,7 @@ def prefs_cmd(args) -> int:
 
 # ---- entry ---------------------------------------------------------------------------------------
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="morpheme", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog="mote", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("service")
     s.add_argument("action", choices=["install", "uninstall", "start", "stop", "restart", "status", "run"])

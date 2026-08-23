@@ -1,10 +1,10 @@
 """Identity and pushback probe: does the model know what it is, and does it hold correct answers under
 false pushback while conceding to true corrections? Greedy decoding, fixed prompts, keyword scoring.
 
-    python -m morpheme.eval.probe --checkpoint runs/overnight_sft/last.pt [--device cpu] [--out runs/overnight_sft/probe.json]
+    python -m mote.eval.probe --checkpoint runs/overnight_sft/last.pt [--device cpu] [--out runs/overnight_sft/probe.json]
 
 Two prompt sets. The *held-out* set uses phrasings, facts, numbers and pushback wordings that never occur
-in the identity SFT/DPO data (morpheme.data.build_identity), so it measures whether the behaviour
+in the identity SFT/DPO data (mote.data.build_identity), so it measures whether the behaviour
 generalises; its scores are the primary ones (identity_acc, hold_rate, concede_rate). The *seen* set
 reuses the training templates' phrasings, facts and number ranges, so it measures whether the training
 took at all; it is reported as *_seen.

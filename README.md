@@ -1,7 +1,7 @@
-# Morpheme
+# Mote
 
 A byte-level language model that learns its own tokenizer, and a studio for chatting with it and
-looking inside. Working name; the package is `morpheme/`.
+looking inside. Working name; the package is `mote/`.
 
 **Architecture** — a Mamba/Relation hybrid: a one-stage H-Net (Hwang, Wang & Gu, 2025) over raw UTF-8 bytes, Mamba-3 at byte
 resolution outside, Transformer-style blocks with the Relation mixer (in place of attention) at chunk resolution inside:
@@ -12,14 +12,14 @@ bytes ─▶ Mamba-3 encoder ─▶ dynamic chunking ─▶ Relation main networ
 ```
 
 * **Encoder / decoder**: official Mamba-3 SISO mixers (`state-spaces/mamba`, Triton kernels on Linux/WSL2;
-  a weight-compatible pure-PyTorch path everywhere else, including a recurrent decode step) — `morpheme/model/mamba3.py`.
+  a weight-compatible pure-PyTorch path everywhere else, including a recurrent decode step) — `mote/model/mamba3.py`.
 * **Dynamic chunking**: cosine-similarity router, straight-through boundaries, EMA dechunking, ratio loss with the
-  ATDC target schedule — `morpheme/model/dc.py`.
+  ATDC target schedule — `mote/model/dc.py`.
 * **Main network**: Full Relation (Ge, Yang & Nie, 2026): Self/Exchange relations, count calibration λ, Givens head mixing,
-  `{P2, Ĩ}` decode cache — `morpheme/model/relation.py`.
+  `{P2, Ĩ}` decode cache — `mote/model/relation.py`.
 * **Multi-byte prediction**: Latent-Causal-Attention head (Owodunni et al., 2026) that proposes the rest of a chunk
-  in parallel; bytes are accepted while the head's confidence ≥ τ — `morpheme/model/mbp.py`.
-* **Tokenizer**: none. 256 byte values + `<|bos|> <|eos|> <|pad|> <|system|> <|user|> <|assistant|>` — `morpheme/tokenizer.py`.
+  in parallel; bytes are accepted while the head's confidence ≥ τ — `mote/model/mbp.py`.
+* **Tokenizer**: none. 256 byte values + `<|bos|> <|eos|> <|pad|> <|system|> <|user|> <|assistant|>` — `mote/tokenizer.py`.
 
 Every number the studio shows is real: checkpoint metadata, live tensors, run logs. Undertrained checkpoints are
 labelled as such.
@@ -51,9 +51,9 @@ Python ≥ 3.11. Two environments are useful on Windows:
 ## Data
 
 ```bash
-python -m morpheme.data.build_bytes --out data/fineweb_edu_pilot --target-mb 300 --val-mb 8     # pilot: FineWeb-Edu ≤4 KB docs
-python -m morpheme.data.build_mix   --out data/pretrain_mix --target-gb 10 --val-mb 64           # flagship mix (morpheme/data/sources.py)
-python -m morpheme.data.build_sft   --out data/sft_mix --target-mb 300 --val-mb 8                # chat SFT mix with loss masks
+python -m mote.data.build_bytes --out data/fineweb_edu_pilot --target-mb 300 --val-mb 8     # pilot: FineWeb-Edu ≤4 KB docs
+python -m mote.data.build_mix   --out data/pretrain_mix --target-gb 10 --val-mb 64           # flagship mix (mote/data/sources.py)
+python -m mote.data.build_sft   --out data/sft_mix --target-mb 300 --val-mb 8                # chat SFT mix with loss masks
 ```
 
 Shards are uint16 ids (bytes + specials) with BOS/EOS separators; SFT shards add a uint8 mask (1 on assistant bytes).
@@ -63,10 +63,10 @@ Shards are uint16 ids (bytes + specials) with BOS/EOS separators; SFT shards add
 ```bash
 # in WSL2 (kernels). Do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True under WSL2: it makes the
 # driver fail with "CUDA driver error: device not ready" mid-run (reproduced 3 times; fine on native Linux).
-python -m morpheme.train.train \
+python -m mote.train.train \
   --preset pilot --data ~/data/fineweb_edu_pilot --out runs/pilot_1h --batch-size 4 --grad-accum 4 --seq-len 2048 --max-minutes 60
 # SFT from a pretrained checkpoint:
-python -m morpheme.train.train --preset pilot --sft --init-from runs/pilot_1h/last.pt --data data/sft_mix --out runs/pilot_sft --max-minutes 20
+python -m mote.train.train --preset pilot --sft --init-from runs/pilot_1h/last.pt --data data/sft_mix --out runs/pilot_sft --max-minutes 20
 ```
 
 Multi-byte head options (A/B knobs from the 2026 speculative-decoding review, `docs/research/speculative-decoding-2026-08-23.md`):
@@ -89,25 +89,25 @@ re-autotunes for every new chunk count, so the EMA dechunk uses a chunked pure-P
 ## Speed
 
 Measured on the RTX 4060 Ti before this work: ~9 % MFU (42 kB/s on the 35M model, 91 W of 160 W). Every run now logs
-`tflops` and `mfu` (analytic FLOPs/byte from `morpheme/train/flops.py`). The levers, all bit-neutral (bf16 math unchanged):
+`tflops` and `mfu` (analytic FLOPs/byte from `mote/train/flops.py`). The levers, all bit-neutral (bf16 math unchanged):
 
 * **Chunk-count bucketing** (`cfg.dc.chunk_bucket`, `--bucket`, default 64): the main network's length is padded to a
   multiple of 64 so shapes repeat across steps (autotune caches hit, the allocator stops fragmenting, CUDA graphs become
   possible). The padded tail is causal-invisible and never read back; `prefill` uses exact lengths so decode caches stay exact.
-* **FlashRelation** (`morpheme/model/flash_relation.py`): fused Triton kernel for the Relation mixer, forward from the
+* **FlashRelation** (`mote/model/flash_relation.py`): fused Triton kernel for the Relation mixer, forward from the
   paper's Appendix A.3 and a backward derived here (FlashAttention-2 style, tiles recomputed). Verified against the
   fp32 materialized reference to 2e-4 at head widths 48/64/96; 1.7× faster and 2.6× less memory than the materialized
   layer at T=576 on this GPU. On automatically on CUDA (`relation.USE_FLASH`); the materialized path is the reference.
 * **Activation checkpointing** on the Relation blocks (`--ckpt-main`) to afford bigger micro-batches.
 * **Muon** (`--optimizer muon`): Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest, RMS-matched so the
   same LR applies. An A/B, not a default.
-* `python -m morpheme.train.profile_step --preset local --data ~/data/local_mix` prints TFLOPS/MFU, per-module forward
+* `python -m mote.train.profile_step --preset local --data ~/data/local_mix` prints TFLOPS/MFU, per-module forward
   time, backward/optimizer time and the top CUDA kernels for one step.
 * **No per-step GPU syncs**: losses and stats stay on the device and are materialised once per logging interval
   (the old loop had ~40 `.item()` syncs per optimizer step, each draining the launch queue).
 * **Block-local multi-byte head**: the LCA mask is exactly a contiguous causal window (own chunk + previous chunk),
   so the head attends over two 64-byte blocks per query block instead of the whole sequence — identical result, O(L·W)
-  instead of O(L²) (`morpheme/model/mbp.py`, dense path kept as the reference; `--dense-mbp` in the profiler).
+  instead of O(L²) (`mote/model/mbp.py`, dense path kept as the reference; `--dense-mbp` in the profiler).
 * **Gradient accumulation normalises once** over the total token count (sum-of-losses / sum-of-tokens); the old
   mean-of-means silently up-weighted SFT windows with few assistant bytes. Pretraining is unchanged.
 * Muon leaves Mamba-3's stacked `in_proj` on AdamW (measured worse under Muon on Mamba, 2608.03941); `out_proj`,
@@ -118,12 +118,12 @@ Measured on the RTX 4060 Ti before this work: ~9 % MFU (42 kB/s on the 35M model
 
 ## Identity and pushback
 
-Mote is told what it is two ways: a short identity card (`morpheme/serve/identity.py`) is prepended as the system message
-at serve time, and `python -m morpheme.data.build_identity --out data/sft_identity --params <n>` generates identity
+Mote is told what it is two ways: a short identity card (`mote/serve/identity.py`) is prepended as the system message
+at serve time, and `python -m mote.data.build_identity --out data/sft_identity --params <n>` generates identity
 dialogues plus *balanced* pushback dialogues (user wrong → hold with a one-line check; user right → concede) and DPO
 pairs. Mix the shard into SFT with `--mix data/sft_identity:0.05`, then optionally run
-`python -m morpheme.train.dpo --init-from <sft.pt> --pairs data/sft_identity.dpo.jsonl --out <dir>`.
-`python -m morpheme.eval.probe --checkpoint <pt>` measures identity accuracy, hold rate and concede rate with greedy
+`python -m mote.train.dpo --init-from <sft.pt> --pairs data/sft_identity.dpo.jsonl --out <dir>`.
+`python -m mote.eval.probe --checkpoint <pt>` measures identity accuracy, hold rate and concede rate with greedy
 decoding on *held-out* prompts (phrasings, facts, numbers and pushback wordings absent from the training data; the
 training-style set is reported as `*_seen`) and writes `probe.json` next to the checkpoint; the studio's Model sheet
 shows it. The pilot scores 0/0/0.
@@ -131,22 +131,22 @@ shows it. The pilot scores 0/0/0.
 ## Run the studio
 
 ```bash
-.\morpheme service install      # once: token file, config, login item (no admin); starts the studio now
-.\morpheme build                # after changes: web build + tests + restart + pair link
-.\morpheme pair                 # QR / 6-digit code page for phones
-.\morpheme status | logs | restart | config --checkpoint runs/x/last.pt
+.\mote service install      # once: token file, config, login item (no admin); starts the studio now
+.\mote build                # after changes: web build + tests + restart + pair link
+.\mote pair                 # QR / 6-digit code page for phones
+.\mote status | logs | restart | config --checkpoint runs/x/last.pt
 ```
 
-`morpheme` (a `.cmd` shim at the repo root, or the console script in the venv) runs a supervisor that keeps the
-server alive and re-reads `.morpheme/config.json` on every restart; the access token lives in `.morpheme/token`.
+`mote` (a `.cmd` shim at the repo root, or the console script in the venv) runs a supervisor that keeps the
+server alive and re-reads `.mote/config.json` on every restart; the access token lives in `.mote/token`.
 On Linux `service install` writes a systemd user unit instead. Manual form, if you want it:
 
 ```bash
-python -m morpheme.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
+python -m mote.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
 ```
 
 `docs/prefs.md` is the preference loop: Retry / Compare / arena votes in the studio, a challenger checkpoint for blind A/B, the rubric (`docs/rubric.md`) and the export/import round trip with Claude as the second rater. `docs/context.md` is context management: the engine keeps a prefix cache so each turn reads only the new bytes
-(`morpheme/serve/prefix_cache.py`, verified by `morpheme.eval.prefix_probe`), and the studio folds the oldest turns into an editable compaction card when a
+(`mote/serve/prefix_cache.py`, verified by `mote.eval.prefix_probe`), and the studio folds the oldest turns into an editable compaction card when a
 conversation outgrows the window (`POST /api/context` previews it), and the flagship window is 16384 bytes gated on a
 memory profile. `docs/search.md` is the settled design for web search (learned `<|search|>` call, SearXNG + an offline Wikipedia-intro
 index, snippets only, gated on a measured reading probe); nothing of it is live yet. `docs/api.md` is the contract: `/api/model`, `/api/checkpoints` (+ hot-swap), `/api/training/runs`,
@@ -154,7 +154,7 @@ index, snippets only, gated on a measured reading probe); nothing of it is live 
 entropy, chunk boundaries, multi-byte acceptances, UTF-8 assembly, live Mamba-3 retention and Relation exchange mass).
 The built frontend (`web/dist`) is served at `/`.
 
-`--token <secret>` (or `MORPHEME_TOKEN`) gates the API and the generation socket; the server refuses to bind a
+`--token <secret>` (or `MOTE_TOKEN`) gates the API and the generation socket; the server refuses to bind a
 non-loopback `--host` without one. `docs/remote-access.md` is the runbook for reaching the studio from a phone
 (Tailscale, recommended) or the home LAN.
 

@@ -5,7 +5,7 @@ Streams documents from Hugging Face, keeps those within a byte-length window, an
 plus ``{name}.meta.json``. uint16 costs 2x the raw bytes but keeps the special ids in-band.
 
 Example (pilot, ~300 MB of FineWeb-Edu):
-    python -m morpheme.data.build_bytes --out data/fineweb_edu_pilot --target-mb 300 --val-mb 8
+    python -m mote.data.build_bytes --out data/fineweb_edu_pilot --target-mb 300 --val-mb 8
 """
 
 from __future__ import annotations

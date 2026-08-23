@@ -7,7 +7,7 @@ warmup-stable-decay schedule, gradient clipping, ATDC target-ratio schedule, per
 (val bits/byte, bytes-per-chunk, boundary/word alignment, multi-byte-head accuracy, a chunked text
 sample), JSONL logging, atomic checkpoints every N minutes with auto-resume, and a wall-clock budget.
 
-    python -m morpheme.train.train --preset pilot --data data/fineweb_edu_pilot --out runs/pilot \
+    python -m mote.train.train --preset pilot --data data/fineweb_edu_pilot --out runs/pilot \
         --batch-size 16 --seq-len 2048 --max-minutes 60
 """
 
@@ -25,7 +25,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 
-from ..config import MorphemeConfig
+from ..config import MoteConfig
 from ..data.loader import ByteShard, MixedShard
 from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.hnet import HNetForCausalLM
@@ -217,7 +217,7 @@ def chunk_sample(model: HNetForCausalLM, text: str, device) -> str:
 
 
 # --------------------------------------------------------------------------------------
-def save_checkpoint(path: Path, model, opt, step: int, cfg: MorphemeConfig, extra: Dict):
+def save_checkpoint(path: Path, model, opt, step: int, cfg: MoteConfig, extra: Dict):
     tmp = path.with_suffix(".tmp")
     torch.save({"model": model.state_dict(), "optimizer": opt.state_dict(), "step": step, "config": cfg.to_dict(), "extra": extra}, tmp)
     os.replace(tmp, path)
@@ -277,7 +277,7 @@ def main(argv=None):
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = MorphemeConfig.load(args.config) if args.config else getattr(MorphemeConfig, args.preset)()
+    cfg = MoteConfig.load(args.config) if args.config else getattr(MoteConfig, args.preset)()
     cfg.max_seq_len = max(cfg.max_seq_len, args.seq_len)
     if args.ratio_weight is not None:
         cfg.dc.ratio_loss_weight = args.ratio_weight
@@ -301,7 +301,7 @@ def main(argv=None):
         model.main_network.grad_checkpoint = True
     n_params = model.num_params()
     peak_tflops = peak_tflops_for(device) if device.type == "cuda" else None
-    print(f"params: {n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('morpheme.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('morpheme.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
+    print(f"params: {n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('mote.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('mote.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
     opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, betas=(0.9, args.beta2), optimizer=args.optimizer)
 
     train_shard = ByteShard(args.data, "train", sft=args.sft)

@@ -77,7 +77,7 @@ def _make(cls, d: dict):
 
 
 @dataclass
-class MorphemeConfig:
+class MoteConfig:
     vocab_size: int = VOCAB_SIZE
     pad_vocab_to: int = 264  # embedding rows rounded up for alignment; ids >= vocab_size are never produced
     d_model_outer: int = 256  # encoder / decoder width (bytes)
@@ -98,7 +98,7 @@ class MorphemeConfig:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "MorphemeConfig":
+    def from_dict(cls, d: Dict[str, Any]) -> "MoteConfig":
         d = dict(d)
         return cls(
             main=_make(RelationCfg, d.pop("main", {})),
@@ -112,12 +112,12 @@ class MorphemeConfig:
         Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
 
     @classmethod
-    def load(cls, path: str | Path) -> "MorphemeConfig":
+    def load(cls, path: str | Path) -> "MoteConfig":
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
     # --- presets ------------------------------------------------------------------
     @classmethod
-    def pilot(cls) -> "MorphemeConfig":
+    def pilot(cls) -> "MoteConfig":
         """~12M params: the local 4060 Ti gate run (Relation 6L/384/8×48/768 = the paper's 10M setting)."""
         return cls(
             d_model_outer=256,
@@ -129,7 +129,7 @@ class MorphemeConfig:
         )
 
     @classmethod
-    def local(cls) -> "MorphemeConfig":
+    def local(cls) -> "MoteConfig":
         """~35M params: the largest comfortable overnight run on the 8 GB RTX 4060 Ti (5.9 GB peak at batch 4x2048)."""
         return cls(
             d_model_outer=384,
@@ -141,7 +141,7 @@ class MorphemeConfig:
         )
 
     @classmethod
-    def flagship(cls) -> "MorphemeConfig":
+    def flagship(cls) -> "MoteConfig":
         """~105M params, 16384-byte window; trains locally on the 4060 Ti (42 KB/s, ~44% MFU at batch 1 in the forced-6-bytes/chunk profile)."""
         return cls(
             d_model_outer=512,

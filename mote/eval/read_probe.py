@@ -1,6 +1,6 @@
 """Reading probe: can the model copy an answer span out of a passage placed in the user turn?
 
-    python -m morpheme.eval.read_probe --checkpoint runs/overnight_sft/last.pt [--n 100] [--device cpu]
+    python -m mote.eval.read_probe --checkpoint runs/overnight_sft/last.pt [--n 100] [--device cpu]
 
 The first gate for search (docs/search.md): a model that cannot read a ~1 KB passage and copy the span
 cannot use search results either. SQuAD v1.1 validation (rajpurkar/squad via `datasets`, cached),

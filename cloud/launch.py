@@ -23,27 +23,27 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STUDIO_NAME = "morpheme-flagship"
-REMOTE_DIR = "morpheme"  # under the studio home
+STUDIO_NAME = "mote-flagship"
+REMOTE_DIR = "mote"  # under the studio home
 MACHINE = "H100"
 USERNAME_FALLBACK = "noahbsabaj"
 
 PRETRAIN_CMD = (
     "cd ~/{d} && export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True && "
-    "nohup .venv-cloud/bin/python -m morpheme.train.train --preset flagship --data data/pretrain_mix --out runs/flagship "
+    "nohup .venv-cloud/bin/python -m mote.train.train --preset flagship --data data/pretrain_mix --out runs/flagship "
     "--batch-size 16 --grad-accum 2 --seq-len 4096 --lr 6e-4 --ratio-weight 0.1 --max-minutes {minutes} --eval-every 500 --eval-batches 16 "
     "--ckpt-minutes 10 --log-every 20 {resume} > runs/flagship/stdout.log 2>&1 &"
 )
 SFT_CMD = (
     "cd ~/{d} && export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True && "
-    "nohup .venv-cloud/bin/python -m morpheme.train.train --preset flagship --sft --init-from runs/flagship/last.pt "
+    "nohup .venv-cloud/bin/python -m mote.train.train --preset flagship --sft --init-from runs/flagship/last.pt "
     "--data data/sft_mix --out runs/flagship_sft --batch-size 16 --grad-accum 2 --seq-len 4096 --lr 2e-4 "
     "--max-minutes {minutes} --eval-every 200 --eval-batches 16 --ckpt-minutes 10 --log-every 20 {resume} "
     "> runs/flagship_sft/stdout.log 2>&1 &"
 )
 DATA_CMD = (
-    "cd ~/{d} && nohup bash -c '.venv-cloud/bin/python -m morpheme.data.build_mix --out data/pretrain_mix --target-gb {gb} --val-mb 64 && "
-    ".venv-cloud/bin/python -m morpheme.data.build_sft --out data/sft_mix --target-mb {sft_mb} --val-mb 8' > data/build.log 2>&1 &"
+    "cd ~/{d} && nohup bash -c '.venv-cloud/bin/python -m mote.data.build_mix --out data/pretrain_mix --target-gb {gb} --val-mb 64 && "
+    ".venv-cloud/bin/python -m mote.data.build_sft --out data/sft_mix --target-mb {sft_mb} --val-mb 8' > data/build.log 2>&1 &"
 )
 
 

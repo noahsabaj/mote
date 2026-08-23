@@ -6,7 +6,7 @@ import math
 import pytest
 import torch
 
-from morpheme.model.flash_relation import HAS_TRITON, flash_relation, relation_reference
+from mote.model.flash_relation import HAS_TRITON, flash_relation, relation_reference
 
 pytestmark = pytest.mark.skipif(not HAS_TRITON, reason="needs CUDA + Triton")
 

@@ -1,6 +1,6 @@
 """Identity and pushback data for Mote: SFT dialogues (packed like build_sft) and DPO pairs.
 
-    python -m morpheme.data.build_identity --out data/sft_identity --params 35400000 --n 800 --pairs 400
+    python -m mote.data.build_identity --out data/sft_identity --params 35400000 --n 800 --pairs 400
 
 Three kinds of dialogue, all synthetic and deterministic (seeded):
 * identity — "what are you?" in many phrasings, answered from the identity card's facts; a share of

@@ -1,4 +1,4 @@
-"""Preference votes (morpheme/serve/prefs.py, docs/prefs.md): the store's bookkeeping, the rater's blind
+"""Preference votes (mote/serve/prefs.py, docs/prefs.md): the store's bookkeeping, the rater's blind
 export/import round trip, and the studio routes (votes, challenger slot, engine routing over the socket)."""
 
 import json
@@ -6,11 +6,11 @@ import json
 import torch
 from fastapi.testclient import TestClient
 
-import morpheme.serve.app as A
-from morpheme.config import MBPCfg, Mamba3Cfg, MorphemeConfig, RelationCfg
-from morpheme.model.hnet import HNetForCausalLM
-from morpheme.serve.engine import Engine
-from morpheme.serve.prefs import PrefStore, divergence
+import mote.serve.app as A
+from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.model.hnet import HNetForCausalLM
+from mote.serve.engine import Engine
+from mote.serve.prefs import PrefStore, divergence
 
 SRC_A = {"checkpoint": "overnight_sft/last.pt", "step": 3666, "engine": "current", "params": {"temperature": 0.8}}
 SRC_B = {"checkpoint": "overnight_sft2/last.pt", "step": 3700, "engine": "challenger", "params": {"temperature": 0.8}}
@@ -69,7 +69,7 @@ def test_export_is_blind_ranked_and_import_stamps_the_rubric(tmp_path, monkeypat
 
 
 def _tiny_ckpt(tmp_path):
-    cfg = MorphemeConfig(
+    cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
         mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3),

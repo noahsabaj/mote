@@ -91,7 +91,7 @@ export interface Preset {
 
 /**
  * Three presets, no invented numbers. Greedy is argmax — the engine's own `temperature <= 0`
- * branch, and what `morpheme.eval.probe` runs at. Checkpoint is whatever shipped with the
+ * branch, and what `mote.eval.probe` runs at. Checkpoint is whatever shipped with the
  * weights. Raw is temperature 1 with no nucleus truncation, which is the distribution the
  * model actually learned, not a taste setting. Greedy leaves top-p at the checkpoint's value
  * rather than forcing one, because at temperature 0 the engine never reads it.

@@ -1,8 +1,8 @@
 # Context
 
 Design settled 2026-08-23 (grilling rounds 1–4). Two halves: what the studio does when a conversation
-outgrows the window (**built 2026-08-23**: `morpheme/serve/context.py`, `POST /api/context`, the fold line and
-meter in the studio, `morpheme.eval.needle_probe`), and how long the window is and whether it is a hard edge
+outgrows the window (**built 2026-08-23**: `mote/serve/context.py`, `POST /api/context`, the fold line and
+meter in the studio, `mote.eval.needle_probe`), and how long the window is and whether it is a hard edge
 (**decided for the flagship, gated on measurements**).
 
 ## Facts that shape it
@@ -39,7 +39,7 @@ Settled 2026-08-23 (grilling, after CacheRoute 2608.19677 made the point at flee
 used to re-read the whole conversation every turn — on the Windows studio (served on the CPU while
 training holds the GPU; reference Mamba-3 and Relation paths) that was 0.35 s at 50 B, 1.3 s at 900 B
 and 3.5 s at 1800 B before the first byte, superlinear because the Relation reference is O(S²). The router is causal, so an identical byte
-prefix gives identical chunks and an identical state: `morpheme/serve/prefix_cache.py` keeps snapshots
+prefix gives identical chunks and an identical state: `mote/serve/prefix_cache.py` keeps snapshots
 of the inference state and `Engine._prefill_with_cache` reads only the bytes after the longest one.
 
 * **Snapshots**: `card` — after the identity card, shared by every conversation (a cold start reads the
@@ -47,7 +47,7 @@ of the inference state and `Engine._prefill_with_cache` reads only the bytes aft
   `reply` — the end of the reply, where the next turn starts. A stopped reply whose transcript lacks
   the streamer's pending UTF-8 bytes simply matches the `prompt` snapshot instead.
 * **Storage**: CPU memory (pinned when the model is on CUDA), most-recently-used first, under a byte
-  budget — `MORPHEME_PREFIX_CACHE_MB`, default 1024, 0 disables. ~10 MB a snapshot on the 35M at 2048,
+  budget — `MOTE_PREFIX_CACHE_MB`, default 1024, 0 disables. ~10 MB a snapshot on the 35M at 2048,
   ~100–190 MB on the flagship at 16384. Nothing stays on the GPU between turns, since training shares it.
   Cleared with the engine on a checkpoint swap.
 * **Reporting**: the `start` event carries `prefix: {reused, prefilled, prefill_ms, snapshots, …}`; the
@@ -55,7 +55,7 @@ of the inference state and `Engine._prefill_with_cache` reads only the bytes aft
   reports `reusable`. **Verify cache** (sampling panel) re-reads each prompt cold after the warm
   continuation and reports moved cuts and the largest next-byte logit difference (`prefix_check` on a
   diagnostics event) — it doubles the read time, so it is a debug toggle, off by default.
-* **Measured**: `python -m morpheme.eval.prefix_probe` — a 40-turn greedy conversation on the 35M,
+* **Measured**: `python -m mote.eval.prefix_probe` — a 40-turn greedy conversation on the 35M,
   warm vs cold per turn (`docs/results/2026-08-23-prefix-cache.md`).
 * **Fedora follow-up**: the upstream Mamba-3 kernel accepts `Input_States`
   (`mamba3_siso_combined.py`), but the wrapper gates the kernel on `initial_states is None`, so a warm

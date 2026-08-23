@@ -11,7 +11,7 @@ Nothing in here runs until you type `--go`. Budget: 25 credits total.
 
 ## 1. Data (CPU machine — cheap)
 ```bash
-python cloud/launch.py up --go                 # CPU studio "morpheme-flagship", sync repo, run cloud/bootstrap.sh (installs torch/triton/mamba_ssm, runs tests)
+python cloud/launch.py up --go                 # CPU studio "mote-flagship", sync repo, run cloud/bootstrap.sh (installs torch/triton/mamba_ssm, runs tests)
 python cloud/launch.py data --go --gb 10 --sft-mb 300
 python cloud/launch.py logs --file data/build.log
 ```
@@ -40,7 +40,7 @@ python cloud/launch.py logs --file runs/flagship_sft/stdout.log
 python cloud/launch.py pull --run flagship          # -> runs/flagship/{last.pt, log.jsonl, config.json, run.json}
 python cloud/launch.py pull --run flagship_sft
 python cloud/launch.py stop --go                    # stop the machine (the disk persists; delete the studio manually when done)
-python -m morpheme.serve.app --checkpoint runs/flagship_sft/last.pt
+python -m mote.serve.app --checkpoint runs/flagship_sft/last.pt
 ```
 
 ## Chunking knob (decided from the local pilots)
@@ -51,5 +51,5 @@ want to push harder (the H-Net paper itself lands at 4.6–4.8 bytes/chunk for a
 
 ## Notes
 * `cloud/bootstrap.sh` pins `state-spaces/mamba` to commit `e9594ce` (the one validated locally) and runs the test suite.
-* Everything training-side is identical to the local pilot (`morpheme/train/train.py`); only the preset, batch and data differ.
-* The launcher resolves your user/teamspace from `lightning login` credentials; studio name is `morpheme-flagship`.
+* Everything training-side is identical to the local pilot (`mote/train/train.py`); only the preset, batch and data differ.
+* The launcher resolves your user/teamspace from `lightning login` credentials; studio name is `mote-flagship`.

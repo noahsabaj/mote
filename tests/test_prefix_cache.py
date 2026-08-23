@@ -1,4 +1,4 @@
-"""Prefix-state cache (morpheme/serve/prefix_cache.py, Engine._prefill_with_cache): a warm continuation
+"""Prefix-state cache (mote/serve/prefix_cache.py, Engine._prefill_with_cache): a warm continuation
 equals a cold prefill up to float rounding, the cache honours its budget and picks the longest usable
 snapshot, and the engine reports what it reused and verifies it on request."""
 
@@ -6,14 +6,14 @@ import threading
 
 import torch
 
-from morpheme.config import MBPCfg, Mamba3Cfg, MorphemeConfig, RelationCfg
-from morpheme.model.hnet import HNetForCausalLM
-from morpheme.serve.engine import Engine, GenParams
-from morpheme.serve.prefix_cache import PrefixCache
+from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.model.hnet import HNetForCausalLM
+from mote.serve.engine import Engine, GenParams
+from mote.serve.prefix_cache import PrefixCache
 
 
 def _cfg():
-    return MorphemeConfig(
+    return MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
         mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3),
@@ -80,7 +80,7 @@ def test_prefix_cache_picks_longest_prefix_and_keeps_budget():
 
 
 def test_engine_reuses_the_previous_turn_and_verifies(tmp_path, monkeypatch):
-    import morpheme.serve.engine as E
+    import mote.serve.engine as E
 
     monkeypatch.setattr(E, "STOP_IDS", set())  # a random-init model samples EOS at once; keep the stream going
     eng = _engine(tmp_path)

@@ -1,6 +1,6 @@
 """Direct Preference Optimization on chat pairs (Rafailov et al. 2023) for a byte-level model.
 
-    python -m morpheme.train.dpo --init-from runs/overnight_sft/last.pt --pairs data/sft_identity.dpo.jsonl \
+    python -m mote.train.dpo --init-from runs/overnight_sft/last.pt --pairs data/sft_identity.dpo.jsonl \
         --out runs/overnight_dpo --epochs 3 --lr 2e-6 --beta 0.1
 
 Each pair is a conversation context plus a chosen and a rejected final assistant reply. With the SFT
@@ -24,7 +24,7 @@ from typing import Dict, List
 import torch
 import torch.nn.functional as F
 
-from ..config import MorphemeConfig
+from ..config import MoteConfig
 from ..model.hnet import HNetForCausalLM
 from ..tokenizer import ByteTokenizer, ChatMessage
 
@@ -85,7 +85,7 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
 
     ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
-    cfg = MorphemeConfig.from_dict(ck["config"])
+    cfg = MoteConfig.from_dict(ck["config"])
     policy = HNetForCausalLM(cfg, device=device)
     policy.load_state_dict(ck["model"])
     ref = HNetForCausalLM(cfg, device=device)

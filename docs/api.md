@@ -1,12 +1,12 @@
-# Morpheme Studio — backend API contract (v1)
+# Mote Studio — backend API contract (v1)
 
-Served by FastAPI (`morpheme.serve.app`) on `http://127.0.0.1:7860`. The built frontend (`web/dist`)
+Served by FastAPI (`mote.serve.app`) on `http://127.0.0.1:7860`. The built frontend (`web/dist`)
 is served at `/`. All values are real: they come from the loaded checkpoint, live tensors, or run logs.
 There is no decorative data anywhere.
 
 ## Authentication (optional)
 
-When the server is started with `--token` (or `MORPHEME_TOKEN`), every `/api/*` and `/v1/*`
+When the server is started with `--token` (or `MOTE_TOKEN`), every `/api/*` and `/v1/*`
 request needs `Authorization: Bearer <token>` (otherwise `401` with `WWW-Authenticate: Bearer`),
 and `/ws/generate` expects a first frame `{"type": "auth", "token": "<token>"}` answered by
 `{"type": "auth_ok"}` — a wrong or missing frame closes the socket with code `4401`. An auth frame is
@@ -71,7 +71,7 @@ Hot-swaps the served model. Returns the new `/api/model` payload. Generation req
 `[{ "id": "pilot_1h", "steps": 3100, "last_val_bpb": 1.63, "running": false, "started_at": "..." }]`
 
 ### `GET /api/training/runs/{id}/log?since=<n>`
-Returns JSONL records from `runs/{id}/log.jsonl` starting at line `n` (see `morpheme/train/train.py` for the
+Returns JSONL records from `runs/{id}/log.jsonl` starting at line `n` (see `mote/train/train.py` for the
 record shapes: train records carry `step, lr, target_ratio, bytes_per_sec, train_bpb, ce, ce_mbp, ratio, bpic,
 grad_norm`; eval records carry `eval: { val_bpb, val_bpic, boundary_on_separator_frac, mbp_top1_acc, sample }`).
 `{ "records": [...], "next": <n + len(records)> }`

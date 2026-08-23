@@ -1,5 +1,5 @@
 [project]
-name = "morpheme"
+name = "mote"
 version = "0.1.0"
 description = "Byte-level H-Net language model (Mamba-3 encoder/decoder, Relation main network, multi-byte prediction head) and the studio that serves it."
 readme = "README.md"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-morpheme = "morpheme.cli:main"
+mote = "mote.cli:main"
 
 [project.optional-dependencies]
 # Official Mamba-3 Triton kernels: Linux / WSL2 only. Install from the upstream source tree:
@@ -30,7 +30,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["morpheme*"]
+include = ["mote*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

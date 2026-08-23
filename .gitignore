@@ -11,4 +11,4 @@ web/dist/
 .env
 
 # studio service state (token, pids, log)
-.morpheme/
+.mote/

@@ -1,6 +1,6 @@
-"""FastAPI server for Morpheme Studio — implements docs/api.md and serves web/dist.
+"""FastAPI server for Mote Studio — implements docs/api.md and serves web/dist.
 
-    python -m morpheme.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
+    python -m mote.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
 """
 
 from __future__ import annotations
@@ -31,13 +31,13 @@ from .pairing import Pairing, router as pairing_router
 
 ROOT = Path(__file__).resolve().parents[2]
 mimetypes.add_type("application/manifest+json", ".webmanifest")
-app = FastAPI(title="Morpheme Studio")
+app = FastAPI(title="Mote Studio")
 STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "token": None,
                "challenger": None, "challenger_loading": False}  # challenger: a second Engine for blind A/B (docs/prefs.md)
 PREFS = PrefStore()
 
 # --- access token -----------------------------------------------------------------
-# Optional shared secret (`--token` / MORPHEME_TOKEN). When set, every /api and /v1 route
+# Optional shared secret (`--token` / MOTE_TOKEN). When set, every /api and /v1 route
 # needs `Authorization: Bearer <token>` and /ws/generate needs a first frame
 # {"type": "auth", "token": ...}. /api/health and the static frontend stay open so the
 # UI can load and ask for the token. Binding to anything but loopback refuses to start
@@ -441,15 +441,15 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7860)
     ap.add_argument("--device", default=None, help="cuda (default when available) or cpu — e.g. to leave the GPU to a training run")
-    ap.add_argument("--token", default=os.environ.get("MORPHEME_TOKEN") or None,
-                    help="shared access token (or MORPHEME_TOKEN); required unless bound to loopback or --no-auth")
+    ap.add_argument("--token", default=os.environ.get("MOTE_TOKEN") or None,
+                    help="shared access token (or MOTE_TOKEN); required unless bound to loopback or --no-auth")
     ap.add_argument("--no-auth", action="store_true", help="serve without a token on a non-loopback host (not recommended)")
-    ap.add_argument("--public-url", default=os.environ.get("MORPHEME_URL") or None,
+    ap.add_argument("--public-url", default=os.environ.get("MOTE_URL") or None,
                     help="address phones use (default: detected from `tailscale serve status`); encoded in the /pair QR")
     args = ap.parse_args(argv)
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
     if not loopback and not args.token and not args.no_auth:
-        raise SystemExit(f"refusing to bind {args.host} without a token: pass --token (or MORPHEME_TOKEN), or --no-auth to override")
+        raise SystemExit(f"refusing to bind {args.host} without a token: pass --token (or MOTE_TOKEN), or --no-auth to override")
     STATE["token"] = args.token or None
     PAIRING.public_url = args.public_url
     if STATE["token"]:

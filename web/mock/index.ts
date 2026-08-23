@@ -17,7 +17,7 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('X-Morpheme-Mock', '1');
+  res.setHeader('X-Mote-Mock', '1');
   res.end(payload);
 }
 
@@ -70,7 +70,7 @@ function rubricText(): string {
 
 export function mockBackend(): Plugin {
   return {
-    name: 'morpheme:mock-backend',
+    name: 'mote:mock-backend',
     apply: 'serve',
     configureServer(server: ViteDevServer) {
       server.middlewares.use((req, res, next) => {
@@ -105,7 +105,7 @@ export function mockBackend(): Plugin {
       });
 
       server.config.logger.info(
-        '\n  [33mmorpheme mock backend[0m  /api, /v1 and /ws/generate answer with fabricated data\n'
+        '\n  [33mmote mock backend[0m  /api, /v1 and /ws/generate answer with fabricated data\n'
       );
     }
   };
@@ -206,7 +206,7 @@ async function handle(
       res.statusCode = 200;
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('X-Morpheme-Mock', '1');
+      res.setHeader('X-Mote-Mock', '1');
       for (const piece of text.match(/.{1,8}/g) ?? []) {
         res.write(
           `data: ${JSON.stringify({

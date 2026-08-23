@@ -1,6 +1,6 @@
 """Prefix-cache probe: a scripted multi-turn conversation through the serving engine, warm vs cold.
 
-    python -m morpheme.eval.prefix_probe --checkpoint runs/overnight_sft2/last.pt --turns 40 --device cpu
+    python -m mote.eval.prefix_probe --checkpoint runs/overnight_sft2/last.pt --turns 40 --device cpu
 
 Per turn: prompt bytes, bytes reused from the cache, warm read time, cold read time, the number of
 chunk cuts that moved and the largest next-byte logit difference between the warm continuation and a

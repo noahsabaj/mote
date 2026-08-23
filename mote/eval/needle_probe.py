@@ -1,7 +1,7 @@
 """Needle-in-chat probe: a fact stated in turn 1, asked after D bytes of filler turns — does the model
 still answer, with folding (docs/context.md) versus plain truncation?
 
-    python -m morpheme.eval.needle_probe --checkpoint runs/overnight_sft/last.pt [--device cpu] [--distances 512,1024,2048,4096]
+    python -m mote.eval.needle_probe --checkpoint runs/overnight_sft/last.pt [--device cpu] [--distances 512,1024,2048,4096]
 
 For each fact × distance × mode the conversation is: user states the fact, assistant acknowledges,
 generic filler exchanges until the distance is reached, then the question. Greedy decoding, ≤ 48

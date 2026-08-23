@@ -19,17 +19,17 @@ under a written rubric, and with disagreements discussed rather than resolved by
   served one (`POST /api/challenger/load`, `DELETE /api/challenger`; `/api/model.challenger`). Each
   reply records its source: checkpoint name, step, engine role, sampling params.
 * **Storage.** `data/prefs/pairs.jsonl` and `data/prefs/votes.jsonl`, append-only, local, gitignored
-  (`morpheme/serve/prefs.py`). The newest vote of a rater for a pair counts, so a changed mind is a new
+  (`mote/serve/prefs.py`). The newest vote of a rater for a pair counts, so a changed mind is a new
   line and the history stays.
 * **Numbers.** Model sheet → *Preferences*: wins / ties / both-bad per checkpoint pair from your votes,
   and the you-vs-rater agreement rate once the rater has voted.
 * **Rubric.** `docs/rubric.md`, drafted by Claude from the identity card, edited by Noah, shown in the
   Compare card; every AI verdict records its hash.
-* **Rater loop.** `morpheme prefs export` writes unrated pairs to `data/prefs/to_rate.jsonl`, your own
+* **Rater loop.** `mote prefs export` writes unrated pairs to `data/prefs/to_rate.jsonl`, your own
   voted pairs first (they calibrate the rater), then ranked by how different the two replies are (edit
   distance, length gap, rubric markers on one side only); sources and your votes are stripped. Claude
-  rates them in a Claude Code session and writes `{"id", "vote", "reason"}` lines; `morpheme prefs import
-  <file>` stores them as rater `claude`; `morpheme prefs disagreements` prints the pairs where the two of
+  rates them in a Claude Code session and writes `{"id", "vote", "reason"}` lines; `mote prefs import
+  <file>` stores them as rater `claude`; `mote prefs disagreements` prints the pairs where the two of
   you differ (hard: opposite sides; soft: one of you said tie or both bad) — those get discussed in the
   session, and your label stands unless you change it after the discussion.
 
@@ -53,7 +53,7 @@ Volume comes from pairs the rater judges, not from your votes:
 ## Gate for training (phase 3, GPU)
 
 The first DPO round on this data runs when there are **≥ ~1 000 rated pairs with ≥ ~150 of Noah's**
-(`morpheme.train.dpo --pairs … --sft-weight … --epochs 1 --lr 5e-7`), and ships only if the identity
+(`mote.train.dpo --pairs … --sft-weight … --epochs 1 --lr 5e-7`), and ships only if the identity
 held-out probe, hold/concede, and val bpb do not regress. Both-bad pairs are excluded from training.
 
 ## Files

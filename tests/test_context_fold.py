@@ -1,7 +1,7 @@
-"""Folding (morpheme.serve.context): fit guarantees, fold points, the card's contents, the modes."""
+"""Folding (mote.serve.context): fit guarantees, fold points, the card's contents, the modes."""
 
-from morpheme.serve.context import build_card, context_report, fold, user_facts
-from morpheme.tokenizer import ByteTokenizer, ChatMessage
+from mote.serve.context import build_card, context_report, fold, user_facts
+from mote.tokenizer import ByteTokenizer, ChatMessage
 
 TOK = ByteTokenizer()
 CARD = {"role": "system", "content": "You are Mote, a small byte-level model."}

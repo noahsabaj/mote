@@ -1,4 +1,4 @@
-/* Morpheme — one accent, hairlines instead of boxes, typography for hierarchy.
+/* Mote — one accent, hairlines instead of boxes, typography for hierarchy.
    No webfont: the studio is a local tool and should not reach the network to render text.
    Both schemes are authored; `prefers-color-scheme` picks between them. */
 

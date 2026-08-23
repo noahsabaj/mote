@@ -1,6 +1,6 @@
 """Profile one training step: where the time goes, per module and per CUDA kernel.
 
-    python -m morpheme.train.profile_step --preset local --data ~/data/local_mix --batch-size 2 --seq-len 2048
+    python -m mote.train.profile_step --preset local --data ~/data/local_mix --batch-size 2 --seq-len 2048
 
 Prints achieved TFLOPS / MFU, the forward time per top-level module (record_function ranges via
 hooks), backward and optimizer time, the 25 most expensive CUDA kernels, and peak memory. A Chrome
@@ -17,13 +17,13 @@ from pathlib import Path
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from ..config import MorphemeConfig
+from ..config import MoteConfig
 from ..data.loader import ByteShard
 from ..model.hnet import HNetForCausalLM
 from .flops import flops_per_byte, peak_tflops_for
 from .train import compute_losses
 
-PRESETS = {"pilot": MorphemeConfig.pilot, "local": MorphemeConfig.local, "flagship": MorphemeConfig.flagship}
+PRESETS = {"pilot": MoteConfig.pilot, "local": MoteConfig.local, "flagship": MoteConfig.flagship}
 
 
 def main(argv=None):
@@ -47,15 +47,15 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     device = torch.device(args.device)
-    cfg: MorphemeConfig = PRESETS[args.preset]()
+    cfg: MoteConfig = PRESETS[args.preset]()
     if args.bucket is not None:
         cfg.dc.chunk_bucket = args.bucket
     if args.no_flash:
-        import morpheme.model.relation as R
+        import mote.model.relation as R
 
         R.USE_FLASH = False
     if args.dense_mbp:
-        import morpheme.model.mbp as MBP
+        import mote.model.mbp as MBP
 
         MBP.USE_BLOCK_LOCAL = False
     if args.no_mbp:
@@ -64,7 +64,7 @@ def main(argv=None):
     model = HNetForCausalLM(cfg, device=device)  # fp32 parameters under autocast, exactly like the trainer
     if args.init_from:
         ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
-        cfg = MorphemeConfig.from_dict(ck["config"])
+        cfg = MoteConfig.from_dict(ck["config"])
         if args.bucket is not None:
             cfg.dc.chunk_bucket = args.bucket
         if args.no_mbp:
@@ -74,7 +74,7 @@ def main(argv=None):
     if args.chunk_bytes:
         # The router's own p still flows (its parameters get gradients as in training); only the
         # selection is forced to a fixed period, which is what sets the main-network and dechunk cost.
-        from morpheme.model.dc import RoutingOutput
+        from mote.model.dc import RoutingOutput
 
         router = model.routing_module
         real_forward = router.forward

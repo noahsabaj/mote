@@ -1,7 +1,7 @@
 # Rubric — how a pair of Mote replies is judged
 
 Draft 2026-08-23 (Claude, from the identity card; to be discussed and edited by Noah). Every AI verdict
-records the hash of this file as it stood (`morpheme prefs export`), so editing it is a visible break in
+records the hash of this file as it stood (`mote prefs export`), so editing it is a visible break in
 the data, not a silent one. The rater sees the conversation and the two replies, nothing else — not
 which checkpoint wrote which, not how the user voted.
 

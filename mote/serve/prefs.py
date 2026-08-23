@@ -1,6 +1,6 @@
 """Preference votes: pairs of replies to the same prompt and who preferred which (decided 2026-08-23,
-docs/prefs.md). The studio writes pairs and the user's votes; `morpheme prefs export` hands unrated
-pairs to the AI rater (Claude, in session, under docs/rubric.md) and `morpheme prefs import` takes the
+docs/prefs.md). The studio writes pairs and the user's votes; `mote prefs export` hands unrated
+pairs to the AI rater (Claude, in session, under docs/rubric.md) and `mote prefs import` takes the
 verdicts back. Two append-only JSONL files under data/prefs/ (gitignored with the rest of data/):
 
     pairs.jsonl   {"id", "ts", "messages": [...context...], "a", "b", "a_source", "b_source", "origin"}

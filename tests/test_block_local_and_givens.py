@@ -4,8 +4,8 @@ view-based Givens == index/scatter Givens; cached RoPE == recomputed RoPE."""
 import torch
 import torch.nn.functional as F
 
-from morpheme.model import mbp as M
-from morpheme.model.relation import FullRelation, _rope_cos_sin, rope_tables
+from mote.model import mbp as M
+from mote.model.relation import FullRelation, _rope_cos_sin, rope_tables
 
 
 def _random_chunks(B: int, L: int, p_boundary: float, seed: int, long_chunk: bool = False) -> torch.Tensor:

@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..config import MorphemeConfig
+from ..config import MoteConfig
 from .blocks import Isotropic, make_mamba3_stack, make_relation_stack
 from .dc import ChunkLayer, DeChunkLayer, DeChunkState, RoutingModule, RoutingOutput, RoutingState, ste_ones
 from .mbp import LCAHead
@@ -50,7 +50,7 @@ class InferenceState:
 
 
 class HNetForCausalLM(nn.Module):
-    def __init__(self, cfg: MorphemeConfig, device=None, dtype=None):
+    def __init__(self, cfg: MoteConfig, device=None, dtype=None):
         super().__init__()
         fk = {"device": device, "dtype": dtype}
         self.cfg = cfg

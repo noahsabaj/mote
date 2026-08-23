@@ -2,7 +2,7 @@
 
 import torch
 
-from morpheme.serve.engine import _dist, _draw, verify_draft
+from mote.serve.engine import _dist, _draw, verify_draft
 
 
 def _simulate(p, q, n=40000, seed=0):

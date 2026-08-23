@@ -16,7 +16,7 @@ from typing import Optional, Callable, Dict, List, Optional, Sequence
 import torch
 import torch.nn.functional as F
 
-from ..config import MorphemeConfig
+from ..config import MoteConfig
 from ..model.hnet import HNetForCausalLM
 from ..model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
 from ..model.dc import HAS_SSD_KERNEL
@@ -123,13 +123,13 @@ def _sample(logits: torch.Tensor, temperature: float, top_p: float):
 class Engine:
     def __init__(self, ckpt_path: str | Path, device: Optional[str] = None, prefix_cache_mb: Optional[int] = None):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        # Prefix-state cache (morpheme/serve/prefix_cache.py): CPU-resident snapshots under a byte budget.
-        mb = int(os.environ.get("MORPHEME_PREFIX_CACHE_MB", 1024)) if prefix_cache_mb is None else int(prefix_cache_mb)
+        # Prefix-state cache (mote/serve/prefix_cache.py): CPU-resident snapshots under a byte budget.
+        mb = int(os.environ.get("MOTE_PREFIX_CACHE_MB", 1024)) if prefix_cache_mb is None else int(prefix_cache_mb)
         self.prefix_cache = PrefixCache(mb << 20)
         self.pin = self.device.type == "cuda"
         self.ckpt_path = Path(ckpt_path)
         ck = torch.load(self.ckpt_path, map_location="cpu", weights_only=False)
-        self.cfg = MorphemeConfig.from_dict(ck["config"])
+        self.cfg = MoteConfig.from_dict(ck["config"])
         self.model = HNetForCausalLM(self.cfg)
         self.model.load_state_dict(ck["model"])
         self.model.to(self.device).eval()
@@ -200,7 +200,7 @@ class Engine:
         return CheckpointInfo(str(path), step, bytes_seen, val_bpb, minutes, created, status, note)
 
     def probe_results(self):
-        """identity/pushback probe numbers if `probe.json` sits next to the checkpoint (see morpheme.eval.probe)."""
+        """identity/pushback probe numbers if `probe.json` sits next to the checkpoint (see mote.eval.probe)."""
         p = Path(self.ckpt_path).parent / "probe.json"
         if not p.exists():
             return None
@@ -322,7 +322,7 @@ class Engine:
     @torch.no_grad()
     def generate(self, messages: Sequence[dict], params: GenParams, emit: Callable[[dict], None], stop: threading.Event,
                  context: Optional[dict] = None) -> None:
-        """`context`: {"fold": "auto" | "now" | "off", "card": <edited card or None>} — see morpheme.serve.context."""
+        """`context`: {"fold": "auto" | "now" | "off", "card": <edited card or None>} — see mote.serve.context."""
         with self.lock:
             self._generate(messages, params, emit, stop, context or {})
 

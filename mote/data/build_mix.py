@@ -1,7 +1,7 @@
 """Build the flagship pretraining mix as packed uint16 shards.
 
-    python -m morpheme.data.build_mix --out data/pretrain_mix --target-gb 8 --val-mb 32
-    python -m morpheme.data.build_mix --out data/mix_probe --target-gb 0.02 --val-mb 1   # quick probe of every source
+    python -m mote.data.build_mix --out data/pretrain_mix --target-gb 8 --val-mb 32
+    python -m mote.data.build_mix --out data/mix_probe --target-gb 0.02 --val-mb 1   # quick probe of every source
 
 Streams every source in `sources.PRETRAIN`, keeps documents within the byte window, interleaves
 them according to the mix shares, and writes train/val shards with BOS/EOS separators.

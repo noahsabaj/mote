@@ -6,17 +6,17 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from morpheme.config import MBPCfg, Mamba3Cfg, MorphemeConfig, RelationCfg
-from morpheme.model.dc import ratio_loss, atdc_target_ratio
-from morpheme.model.hnet import HNetForCausalLM
-from morpheme.model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
-from morpheme.model.relation import FullRelation
+from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.model.dc import ratio_loss, atdc_target_ratio
+from mote.model.hnet import HNetForCausalLM
+from mote.model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
+from mote.model.relation import FullRelation
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def small_cfg() -> MorphemeConfig:
-    return MorphemeConfig(
+def small_cfg() -> MoteConfig:
+    return MoteConfig(
         d_model_outer=64,
         encoder_layers=1,
         decoder_layers=1,
@@ -78,7 +78,7 @@ def test_mamba3_step_matches_forward_and_state_continuation():
 
 
 def test_chunked_ema_matches_sequential_recurrence():
-    from morpheme.model.dc import DeChunkLayer
+    from mote.model.dc import DeChunkLayer
 
     torch.manual_seed(0)
     B, M, D = 2, 203, 16  # not a multiple of the 64-step block on purpose
@@ -146,7 +146,7 @@ def test_hnet_forward_backward_and_decode_equivalence():
 
 
 def test_param_count_pilot_and_stage_groups():
-    cfg = MorphemeConfig.pilot()
+    cfg = MoteConfig.pilot()
     model = HNetForCausalLM(cfg)
     n = model.num_params()
     assert 5e6 < n < 30e6, n

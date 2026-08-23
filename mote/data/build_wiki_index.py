@@ -1,7 +1,7 @@
 """Offline search index: English Wikipedia intros -> SQLite FTS5 with BM25 (docs/search.md).
 
-    python -m morpheme.data.build_wiki_index --out data/wiki_intros.sqlite          # build (resumable)
-    python -m morpheme.data.build_wiki_index --out data/wiki_intros.sqlite --query "capital of burkina faso"
+    python -m mote.data.build_wiki_index --out data/wiki_intros.sqlite          # build (resumable)
+    python -m mote.data.build_wiki_index --out data/wiki_intros.sqlite --query "capital of burkina faso"
 
 Downloads FineWiki's 15 enwiki parquet files one at a time (each ~2.5 GB, deleted after indexing
 unless --keep), keeps each article's intro - the text between the title heading and the first

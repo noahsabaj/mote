@@ -1,7 +1,7 @@
 // Thin, failure-tolerant localStorage wrapper. Private-mode browsers and quota errors
 // must never take the app down; the conversation just stops surviving reloads.
 
-const PREFIX = 'morpheme.';
+const PREFIX = 'mote.';
 
 export function read<T>(key: string, fallback: T): T {
   try {

@@ -50,7 +50,7 @@ hundred, leaving about 1 KB for what it reads. Everything below is sized to that
 
 ## Measurement
 
-1. **Reading probe** — `python -m morpheme.eval.read_probe --checkpoint <pt>`: SQuAD passages
+1. **Reading probe** — `python -m mote.eval.read_probe --checkpoint <pt>`: SQuAD passages
    (≤ 1024 bytes) in the user turn, greedy answers, exact match and F1 against the gold spans, plus
    the no-passage baseline on the same questions. Runs on the 35M as soon as `overnight_sft` lands.
 2. **Search eval** — end to end on held-out NQ questions against the offline index: exact match,

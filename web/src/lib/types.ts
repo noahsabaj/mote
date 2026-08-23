@@ -1,4 +1,4 @@
-// Types for the Morpheme Studio backend contract (docs/api.md v1).
+// Types for the Mote Studio backend contract (docs/api.md v1).
 // Every field here is produced by the real backend; nothing is invented client-side.
 
 export type HonestyStatus = 'pilot' | 'undertrained' | 'flagship';
@@ -55,7 +55,7 @@ export interface ModelInfo {
   device: DeviceInfo;
   kernels: Kernels;
   defaults: SamplingParams;
-  /** identity / pushback probe (morpheme.eval.probe), measured on this checkpoint; absent until run */
+  /** identity / pushback probe (mote.eval.probe), measured on this checkpoint; absent until run */
   probe?: {
     /** primary scores: held-out prompts, facts and pushback wordings absent from the identity training data */
     identity_acc: number; hold_rate: number; concede_rate: number; n_identity: number; n_facts: number;

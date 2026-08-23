@@ -5,10 +5,10 @@ import threading
 import pytest
 import torch
 
-from morpheme.config import MBPCfg, Mamba3Cfg, MorphemeConfig, RelationCfg
-from morpheme.model.hnet import HNetForCausalLM
-from morpheme.serve.engine import Engine, GenParams
-from morpheme.tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer
+from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.model.hnet import HNetForCausalLM
+from mote.serve.engine import Engine, GenParams
+from mote.tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer
 
 
 def test_chat_template_and_loss_mask():
@@ -37,7 +37,7 @@ def test_utf8_streamer_assembles_multibyte_and_survives_garbage():
 
 
 def _tiny_engine(tmp_path):
-    cfg = MorphemeConfig(
+    cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
         mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3),
@@ -54,7 +54,7 @@ def _tiny_engine(tmp_path):
 @pytest.fixture
 def no_stop_ids(monkeypatch):
     # a random-init model samples EOS/role ids almost immediately; neutralize them so the stream has length
-    import morpheme.serve.engine as E
+    import mote.serve.engine as E
 
     monkeypatch.setattr(E, "STOP_IDS", set())
 

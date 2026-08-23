@@ -4,13 +4,13 @@ boundaries inside the segment. `clone_state` must be a true snapshot."""
 
 import torch
 
-from morpheme.config import MBPCfg, Mamba3Cfg, MorphemeConfig, RelationCfg
-from morpheme.model.hnet import HNetForCausalLM
+from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.model.hnet import HNetForCausalLM
 
 
 def _model(seed=0):
     torch.manual_seed(seed)
-    cfg = MorphemeConfig(
+    cfg = MoteConfig(
         d_model_outer=32, encoder_layers=2, decoder_layers=1,
         mamba3=Mamba3Cfg(d_state=16, expand=2, headdim=16),
         main=RelationCfg(n_layers=2, d_model=32, n_heads=2, d_ff=64),

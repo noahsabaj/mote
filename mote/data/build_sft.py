@@ -4,8 +4,8 @@ Output: ``{out}.sft.train.bin`` (uint16 ids), ``{out}.sft.train.mask.bin`` (uint
 same for val, and ``{out}.sft.meta.json`` with per-conversation offsets. Conversations are packed back to back;
 the loader cuts fixed windows and the mask decides which positions train.
 
-    python -m morpheme.data.build_sft --out data/sft_mix --target-mb 300 --val-mb 8
-    python -m morpheme.data.build_sft --out data/sft_probe --target-mb 2 --val-mb 0.5   # probe every source
+    python -m mote.data.build_sft --out data/sft_mix --target-mb 300 --val-mb 8
+    python -m mote.data.build_sft --out data/sft_probe --target-mb 2 --val-mb 0.5   # probe every source
 """
 
 from __future__ import annotations

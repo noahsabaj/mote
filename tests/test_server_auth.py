@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-import morpheme.serve.app as A
+import mote.serve.app as A
 
 
 @pytest.fixture

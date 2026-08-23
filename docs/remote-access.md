@@ -12,10 +12,10 @@ public, TLS is handled for you, and no router or firewall changes are needed.
    **HTTPS certificates** are enabled (both are one click; MagicDNS is on by default).
 3. Install the studio as a login item and start it (PowerShell, repo root):
    ```powershell
-   .\morpheme service install
+   .\mote service install
    ```
-   This creates the access token (`.morpheme/token`), the config (`.morpheme/config.json`: checkpoint, device,
-   port 7861) and a Startup-folder entry; a supervisor keeps the server alive and `.\morpheme build` rebuilds,
+   This creates the access token (`.mote/token`), the config (`.mote/config.json`: checkpoint, device,
+   port 7861) and a Startup-folder entry; a supervisor keeps the server alive and `.\mote build` rebuilds,
    tests and restarts it. The server listens on `127.0.0.1` only — Tailscale does the exposure.
 4. Publish the port to your tailnet (PowerShell, once; survives reboots):
    ```powershell
@@ -40,7 +40,7 @@ public internet, and the studio is not hardened for it.
 ## Home Wi-Fi only (no install)
 
 ```powershell
-.\.venv\Scripts\python.exe -m morpheme.serve.app --checkpoint runs/pilot_sft/last.pt --device cpu --port 7861 --host 0.0.0.0 --token <token>
+.\.venv\Scripts\python.exe -m mote.serve.app --checkpoint runs/pilot_sft/last.pt --device cpu --port 7861 --host 0.0.0.0 --token <token>
 ```
 then `http://192.168.1.135:7861` from any device on the LAN (Windows Firewall already allows
 Python inbound; the IP is the PC's current Ethernet address). WSL2 servers are NAT'd and are
@@ -52,6 +52,6 @@ not reachable this way — run the Windows server, or publish via Tailscale as a
 * WebSocket (`/ws/generate`): first frame must be `{"type": "auth", "token": "<token>"}`; the
   server answers `{"type": "auth_ok"}` or closes with code `4401`.
 * `/api/health`, `/api/pair` (code redemption) and the static frontend stay open so the UI can load and pair.
-* `/pair` and `/pair/code` answer only loopback clients; `--public-url` (or `MORPHEME_URL`) overrides the
+* `/pair` and `/pair/code` answer only loopback clients; `--public-url` (or `MOTE_URL`) overrides the
   address encoded in the QR (default: detected from `tailscale serve status`).
 * Comparison is constant-time; the token is never put in a URL.

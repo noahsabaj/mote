@@ -1,6 +1,6 @@
-# Morpheme — web client
+# Mote — web client
 
-The front end for Morpheme Studio: a single page for talking to a byte-level H-Net and, when
+The front end for Mote Studio: a single page for talking to a byte-level H-Net and, when
 you want it, looking inside the stream it produces.
 
 ## Commands
@@ -18,7 +18,7 @@ npm run preview # serve the built bundle (no mock — needs the real backend)
 
 ## How it talks to the backend
 
-Same origin, always. In production the FastAPI app (`morpheme.serve.app`, port 7860) serves
+Same origin, always. In production the FastAPI app (`mote.serve.app`, port 7860) serves
 `web/dist` at `/` and answers `/api`, `/v1` and `/ws/generate` itself, so no proxy or base URL
 is configured anywhere.
 
@@ -106,7 +106,7 @@ a 272-byte reply keeps the whole page at ~86 elements. Structure view adds one s
 rows.
 
 **Chunk spans.** `chunk` events are used only as "a chunk closed" signals. Their `start`/`end`
-come from `morpheme/serve/engine.py` in whole-context coordinates (prompt included) and its
+come from `mote/serve/engine.py` in whole-context coordinates (prompt included) and its
 `end` is one short of its own `bytes` count, while `byte.i` is reply-local — so chunk spans are
 rebuilt from the `chunk` index that every byte already carries, which is unambiguous and in the
 same frame as everything else. The dev mock emits the same awkward values on purpose, so this

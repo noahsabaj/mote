@@ -1,6 +1,6 @@
 """Summarize a run's log.jsonl in the terminal: curves as sparklines + the latest chunk samples.
 
-    python -m morpheme.train.report runs/pilot_1h
+    python -m mote.train.report runs/pilot_1h
 """
 
 from __future__ import annotations
