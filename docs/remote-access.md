@@ -20,10 +20,11 @@ public, TLS is handled for you, and no router or firewall changes are needed.
    Without a token the server refuses to bind anything but loopback (`--no-auth` overrides).
 4. Publish the port to your tailnet (PowerShell, once; survives reboots):
    ```powershell
-   tailscale serve --bg http://127.0.0.1:7861
+   & "C:\Program Files\Tailscale	ailscale.exe" serve --bg http://127.0.0.1:7861
    ```
-   It prints the URL, `https://<old-node>.<tailnet>.ts.net`. This also reaches a server
-   running inside WSL2, because WSL2 forwards its ports to Windows `localhost`.
+   (plain `tailscale` works in any terminal opened after the install). It prints the URL —
+   `https://<your-node>.<your-tailnet>.ts.net/` on this tailnet. This also reaches a server running
+   inside WSL2, because WSL2 forwards its ports to Windows `localhost`.
 5. On the phone, open that URL and paste the token when asked. It is stored in the browser;
    change the token on the server to revoke every device at once.
 6. Optional: Safari share sheet → **Add to Home Screen**. The studio ships a web-app manifest and
@@ -31,7 +32,7 @@ public, TLS is handled for you, and no router or firewall changes are needed.
    needs its backend, and a cached shell is the one thing that could go stale after a rebuild. The
    Home Screen app has its own storage, so it asks for the token once more.
 
-`tailscale serve reset` removes the publication. Never use `tailscale funnel` — that is the
+`tailscale serve --https=443 off` removes the publication. Never use `tailscale funnel` — that is the
 public internet, and the studio is not hardened for it.
 
 ## Home Wi-Fi only (no install)
