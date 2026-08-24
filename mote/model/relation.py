@@ -178,7 +178,7 @@ class FullRelation(nn.Module):
             if return_cache:
                 extras.append(new_cache)
             if self.telemetry is not None:
-                self.telemetry["exchange_mass"] = float(g[0, :, -1].mean())
+                self.telemetry["exchange_mass"] = float(g[0, :, -1].detach().mean())  # also runs under grad (RL updates)
             if return_gates:
                 extras.append(g)
             return (out, *extras) if extras else out
@@ -208,7 +208,7 @@ class FullRelation(nn.Module):
         if return_gates or self.telemetry is not None:
             g = flow.masked_fill(~is_past, 0.0).sum(-1)  # [B,H,T] exchange mass
             if self.telemetry is not None:
-                self.telemetry["exchange_mass"] = float(g[0, :, -1].mean())
+                self.telemetry["exchange_mass"] = float(g[0, :, -1].detach().mean())  # also runs under grad (RL updates)
             if return_gates:
                 extras.append(g)
         if extras:

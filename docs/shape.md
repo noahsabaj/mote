@@ -137,8 +137,12 @@ arm boundary) → mixes B and C (building 2026-08-24 on CPU; `data/sim_plain` + 
 sim-QA probe + branch funnel (built 2026-08-24: `mote/eval/sim_probe.py` held-out worlds, EM + pass@k;
 `mote/eval/val_bpb.py` shared + per-domain val; `mote/eval/branch_gate.py` submits the identical SFT per
 branch to the daemon, measures, applies the verdict rule, writes docs/results; the 35M scores 0 EM on
-held-out sim QA — the baseline) → `<|call|>/<|result|>` ids + the shared tool hook → env tasks, verifier,
-planners, expert traces → `mote/train/rlvr.py` as a daemon job type.
+held-out sim QA — the baseline) → `<|call|>/<|result|>` ids + the shared tool hook (built 2026-08-24:
+`mote/tokenizer.py`, engine hook + scripted-id tests) → env tasks, verifier, pruned experts, expert traces
+(built 2026-08-24: `mote/sim/tasks.py`, `data/sim_traces` 19.6 k traces) → `mote/train/rlvr.py` as the
+daemon job type `rlvr` (built 2026-08-24). Everything in the list exists; what each piece has and has not
+been measured on is in `docs/results/2026-08-24-pipeline-build.md`. What remains is operational: mixes B/C
+finish → the pre-launch queue → "launch" → trunk → branches → gate → SFT-1 → DPO stages → RLVR-1.
 
 ## Serving root (grilled and signed 2026-08-24, BUILT the same day; results in docs/results/2026-08-24-serving-root.md)
 
