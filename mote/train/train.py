@@ -237,7 +237,7 @@ def load_checkpoint(path: Path, model, opt=None):
 
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preset", default="pilot", choices=["pilot", "local", "flagship"])
+    ap.add_argument("--preset", default="pilot", choices=["smoke", "pilot", "local", "flagship"])
     ap.add_argument("--config", default=None, help="JSON config overriding the preset")
     ap.add_argument("--data", required=True, help="shard prefix, e.g. data/fineweb_edu_pilot")
     ap.add_argument("--out", required=True)
@@ -272,6 +272,8 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--bf16-residual", action="store_true", help="A/B: keep the residual stream in bf16 instead of fp32")
     ap.add_argument("--relation-window", type=int, default=None, help="A/B: each chunk sees at most the last N chunks (materialized path)")
     ap.add_argument("--attention-main", action="store_true", help="ablation: parameter-matched causal attention instead of Relation in the main network")
+    ap.add_argument("--jepa", choices=["minimal", "ema", "sigreg"], default=None, help="JEPA aux loss on the byte encoder (lab arms, docs/shape.md 2026-08-24)")
+    ap.add_argument("--jepa-weight", type=float, default=0.05, help="weight of the JEPA aux loss")
     ap.add_argument("--no-flash", action="store_true", help="A/B: materialized Relation instead of the Triton kernel")
     ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
     return ap
@@ -332,6 +334,16 @@ class Trainer:
         print(f"params: {self.n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('mote.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('mote.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
         self.opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, betas=(0.9, args.beta2), optimizer=args.optimizer)
 
+        self.jepa, self.jepa_opt, self._enc_h = None, None, None
+        if args.jepa:
+            from .jepa import JepaAux
+
+            self.jepa = JepaAux(model, args.jepa, cfg.d_model_outer).to(device)
+            model.encoder.register_forward_hook(
+                lambda m, i, o: setattr(self, "_enc_h", o if torch.is_tensor(o) else o[0]))
+            self.jepa_opt = torch.optim.AdamW(self.jepa.parameters(), lr=args.lr, betas=(0.9, args.beta2), weight_decay=0.0)
+            print(f"jepa aux: {args.jepa}, weight {args.jepa_weight}, {sum(q.numel() for q in self.jepa.parameters())/1e6:.2f}M aux params", flush=True)
+
         train_shard = ByteShard(args.data, "train", sft=args.sft)
         self.val_shard = ByteShard(args.data, "val", sft=args.sft)
         if args.mix:
@@ -351,6 +363,9 @@ class Trainer:
             self.step, extra = load_checkpoint(self.ckpt_path, model, self.opt)
             if "generator_state" in extra:
                 self.gen.set_state(torch.tensor(extra["generator_state"], dtype=torch.uint8))
+            if self.jepa is not None and "jepa" in extra:
+                self.jepa.load_state_dict(extra["jepa"])
+                self.jepa_opt.load_state_dict(extra["jepa_opt"])
             print(f"resumed from step {self.step}", flush=True)
 
         self.fwd = torch.compile(model) if args.compile else model
@@ -376,9 +391,12 @@ class Trainer:
         self.stopped_reason = reason
 
     def save(self):
-        save_checkpoint(self.ckpt_path, self.model, self.opt, self.step, self.cfg,
-                        {"generator_state": self.gen.get_state().tolist(), "total_steps": self.total_steps,
-                         "n_params": self.n_params, "bytes_seen": self.step * self.tokens_per_step})
+        extra = {"generator_state": self.gen.get_state().tolist(), "total_steps": self.total_steps,
+                 "n_params": self.n_params, "bytes_seen": self.step * self.tokens_per_step}
+        if self.jepa is not None:
+            extra["jepa"] = self.jepa.state_dict()
+            extra["jepa_opt"] = self.jepa_opt.state_dict()
+        save_checkpoint(self.ckpt_path, self.model, self.opt, self.step, self.cfg, extra)
 
     def _train_step(self, target_ratio: float):
         """One optimizer step as a generator: yields ("slice", None) after each accumulation micro-batch
@@ -386,6 +404,8 @@ class Trainer:
         float() on them is the one sync per logging interval, as before."""
         args, device = self.args, self.device
         self.opt.zero_grad(set_to_none=True)
+        if self.jepa_opt is not None:
+            self.jepa_opt.zero_grad(set_to_none=True)
         agg = {}
         total_n = None
         for _ in range(args.grad_accum):
@@ -393,17 +413,33 @@ class Trainer:
             batch = batch.to(device, non_blocking=True)
             lmask = lmask.to(device, non_blocking=True) if lmask is not None else None
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                loss, n, stats, _ = compute_losses(self.fwd, batch, target_ratio, self.cfg.mbp.loss_weight, self.cfg.dc.ratio_loss_weight, lmask)
+                loss, n, stats, out_fwd = compute_losses(self.fwd, batch, target_ratio, self.cfg.mbp.loss_weight, self.cfg.dc.ratio_loss_weight, lmask)
+                if self.jepa is not None:
+                    aux, jstats = self.jepa(batch[:, :-1], self._enc_h)
+                    loss = loss + args.jepa_weight * aux * n  # same sum-normalisation as CE
+                    bp = out_fwd.routing.boundary_prob
+                    pb = (bp[..., 1] if bp.dim() == 3 else bp).float().clamp(1e-6, 1 - 1e-6)
+                    jstats["jepa_bent"] = (-(pb * pb.log() + (1 - pb) * (1 - pb).log())).mean().detach()
+                    stats = {**stats, **jstats}
             loss.backward()  # unnormalised sum; normalised once below
             total_n = n if total_n is None else total_n + n
             for k, v in stats.items():
                 agg[k] = v if k not in agg else agg[k] + v
             yield ("slice", None)
         grads = [p.grad for p in self.model.parameters() if p.grad is not None]
+        if self.jepa is not None:
+            grads += [p.grad for p in self.jepa.parameters() if p.grad is not None]
         torch._foreach_div_(grads, total_n)
         gnorm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), args.clip)
         self.opt.step()
+        if self.jepa is not None:
+            torch.nn.utils.clip_grad_norm_(self.jepa.parameters(), args.clip)
+            self.jepa_opt.step()
+            self.jepa.ema_update(self.model)
         out = {"ce": agg["ce_sum"] / total_n, "ratio": agg["ratio"] / args.grad_accum, "bpic": agg["bpic"] / args.grad_accum, "grad_norm": gnorm}
+        for k in agg:
+            if k.startswith("jepa_"):
+                out[k] = agg[k] / args.grad_accum
         if "ce_mbp_sum" in agg:
             out["ce_mbp"] = agg["ce_mbp_sum"] / total_n
         return out

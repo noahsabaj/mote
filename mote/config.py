@@ -133,6 +133,19 @@ class MoteConfig:
         )
 
     @classmethod
+    def smoke(cls) -> "MoteConfig":
+        """~2M params: the T1 bug gate (docs/shape.md 2026-08-24). Ten-minute runs that answer
+        "is this broken" — never "is this better"; tiny scale issues no quality verdicts."""
+        return cls(
+            d_model_outer=128,
+            encoder_layers=1,
+            decoder_layers=1,
+            main=RelationCfg(n_layers=2, d_model=192, n_heads=4, d_ff=384),
+            mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=256),
+            max_seq_len=2048,
+        )
+
+    @classmethod
     def local(cls) -> "MoteConfig":
         """~35M params: the largest comfortable overnight run on the 8 GB RTX 4060 Ti (5.9 GB peak at batch 4x2048)."""
         return cls(
