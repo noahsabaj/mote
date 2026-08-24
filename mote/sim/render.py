@@ -221,7 +221,8 @@ def _place_en(ans) -> str:
     if tag == "room":
         return f"in {EN['rooms'][v]}"
     if tag == "cont":
-        return f"in {EN['containers'][v]}"
+        c, room = (v if isinstance(v, tuple) else (v, None))
+        return f"in {EN['containers'][c]}" + (f", in {EN['rooms'][room]}" if room else "")
     return f"with {_cap(v)}"  # held
 
 
@@ -240,7 +241,7 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
     if q.qtype == "count_loose_in_room":
         def there(n):
             return f"There is {n}." if n == 1 else f"There are {n}."
-        return (f"How many objects are lying in {EN['rooms'][a['room']]} (not held, not in a container)?",
+        return (f"How many objects are lying loose in {EN['rooms'][a['room']]} (not held, not inside a container, and not counting the containers themselves)?",
                 there(q.answer[1]), there(q.wrong[1]))
     if q.qtype == "count_goods":
         return (f"How many {EN['goods'][a['goods']]} does {_cap(a['who'])} have now?",
@@ -281,7 +282,8 @@ def _place_ru(ans) -> str:
     if tag == "room":
         return f"{ru_room_in(v)}"
     if tag == "cont":
-        return f"в {RU_CONT[v][2]}"
+        c, room = (v if isinstance(v, tuple) else (v, None))
+        return f"в {RU_CONT[c][2]}" + (f" ({ru_room_in(room)})" if room else "")
     return f"у {_cap(v)}"
 
 
@@ -303,7 +305,7 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
         return (f"Где сейчас {_cap(a['who'])}?", f"{_cap(a['who'])} {ru_room_in(q.answer[1])}.",
                 f"{_cap(a['who'])} {ru_room_in(q.wrong[1])}.")
     if q.qtype == "count_loose_in_room":
-        return (f"Сколько предметов лежит {ru_room_in(a['room'])} (не в руках и не в ёмкости)?",
+        return (f"Сколько предметов лежит {ru_room_in(a['room'])} просто так (не в руках, не внутри ёмкости; сами ёмкости не считаются)?",
                 f"Там {q.answer[1]}.", f"Там {q.wrong[1]}.")
     if q.qtype == "count_goods":
         return (f"Сколько {RU_GOODS[a['goods']]} сейчас у {_cap(a['who'])}?",
@@ -347,7 +349,8 @@ def _place_ja(ans) -> str:
     if tag == "room":
         return f"{JA['rooms'][v]}にある"
     if tag == "cont":
-        return f"{JA['containers'][v]}の中にある"
+        c, room = (v if isinstance(v, tuple) else (v, None))
+        return (f"{JA['rooms'][room]}の" if room else "") + f"{JA['containers'][c]}の中にある"
     return f"{_cap(v)}が持っている"
 
 
@@ -369,8 +372,10 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
         return (f"{_cap(a['who'])}は今どこにいる？", f"{_cap(a['who'])}は{JA['rooms'][q.answer[1]]}にいる。",
                 f"{_cap(a['who'])}は{JA['rooms'][q.wrong[1]]}にいる。")
     if q.qtype == "count_loose_in_room":
-        return (f"{JA['rooms'][a['room']]}に置いてある物はいくつ？（誰も手に持っておらず、入れ物にも入っていない物）",
-                f"{q.answer[1]}つ。", f"{q.wrong[1]}つ。")
+        def ja_cnt(n):
+            return f"{n}つ。" if 1 <= n <= 9 else f"{n}個。"
+        return (f"{JA['rooms'][a['room']]}に直接置いてある物はいくつ？（誰も手に持っておらず、入れ物にも入っていない物。入れ物自体は数えない）",
+                ja_cnt(q.answer[1]), ja_cnt(q.wrong[1]))
     if q.qtype == "count_goods":
         c = JA_COUNTER[a['goods']]
         return (f"{_cap(a['who'])}は今{JA['goods'][a['goods']]}をいくつ持っている？",
@@ -378,11 +383,11 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
     if q.qtype == "count_coins":
         return (f"{_cap(a['who'])}は今コインを何枚持っている？", f"{q.answer[1]}枚。", f"{q.wrong[1]}枚。")
     if q.qtype == "who_has_more":
-        return (f"{JA['goods'][a['goods']]}を多く持っているのは{_cap(a['a'])}と{_cap(a['b'])}のどちら？",
+        return (f"{JA['goods'][a['goods']]}をより多く持っているのは{_cap(a['a'])}と{_cap(a['b'])}のどちら？",
                 f"{_cap(q.answer[1])}。", f"{_cap(q.wrong[1])}。")
     if q.qtype == "grandparent":
         pair = lambda v: f"{_cap(v[0])}と{_cap(v[1])}"
-        return (f"{_cap(a['via'])}側の{_cap(a['who'])}の祖父母は誰？", f"{pair(q.answer[1])}。", f"{pair(q.wrong[1])}。")
+        return (f"{_cap(a['who'])}の{_cap(a['via'])}側の祖父母は誰？", f"{pair(q.answer[1])}。", f"{pair(q.wrong[1])}。")
     if q.qtype == "count_siblings":
         return (f"{_cap(a['who'])}の兄弟姉妹は何人？", f"{q.answer[1]}人。", f"{q.wrong[1]}人。")
     if q.qtype == "count_children":

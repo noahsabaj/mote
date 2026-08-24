@@ -170,15 +170,18 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
                         ("person", rngq.choice([p for p in people if p != s["held"]])), "wrong_entity"))
             continue
         elif s["cont"]:
-            ans = ("cont", s["cont"])
+            ans = ("cont", (s["cont"], cont_room[s["cont"]]))
             wrong, wk = ("room", first["room"]), "stale"
         else:
             ans = ("room", s["room"])
-            stale = first["room"] if first["room"] != s["room"] else rngq.choice([r for r in rooms if r != s["room"]])
-            wrong, wk = ("room", stale), ("stale" if first["room"] != s["room"] else "wrong_entity")
+            visited = {h[2]["room"] for h in history if h[1] == o} - {s["room"]}
+            if visited:
+                wrong, wk = ("room", sorted(visited)[0]), "stale"
+            else:
+                wrong, wk = ("room", rngq.choice([r for r in rooms if r != s["room"]])), "wrong_entity"
         qs.append(Q("where_obj", {"obj": o}, ans, wrong, wk))
         if first["room"] != s["room"] or s["cont"]:
-            now = ("cont", s["cont"]) if s["cont"] else ("room", s["room"])
+            now = ("cont", (s["cont"], cont_room[s["cont"]])) if s["cont"] else ("room", s["room"])
             qs.append(Q("where_obj_start", {"obj": o}, ("room", first["room"]), now, "current"))
     p = rngq.choice(people)
     n_here = sum(1 for o, s in obj_state.items() if s["room"] == loc[p] and not s["held"] and not s["cont"])
@@ -337,7 +340,9 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
         if cal[p].slots and rng.random() < 0.3:  # move a booking (keeps its length, never self-overlaps)
             i = rng.randrange(len(cal[p].slots))
             s, e, title = cal[p].slots[i]
-            cands = [h for h in range(8, 17) if h != s and not clashes(h, h + (e - s), skip=i)]
+            windows = {"standup": range(8, 11), "lunch": range(11, 14), "workshop": range(9, 16),
+                       "review": range(9, 17), "planning": range(9, 17), "call": range(8, 17)}
+            cands = [h for h in range(8, 17) if h != s and h in windows[title] and not clashes(h, h + (e - s), skip=i)]
             if not cands:
                 continue
             ns = rng.choice(cands)
@@ -348,11 +353,14 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
             if not free_titles:
                 continue  # a repeated title would make a later "moved X" ambiguous
             dur = rng.choice([1, 2])
+            windows = {"standup": range(8, 11), "lunch": range(11, 14), "workshop": range(9, 16),
+                       "review": range(9, 17), "planning": range(9, 17), "call": range(8, 17)}
             cands = [h for h in range(8, 17) if not clashes(h, h + dur)]
             if not cands:
                 continue
-            s = rng.choice(cands)
             title = rng.choice(free_titles)
+            cands = [h for h in cands if h in windows[title]] or cands
+            s = rng.choice(cands)
             cal[p].slots.append((s, s + dur, title))
             events.append(Event(t, "booked", {"who": p, "title": title, "start_h": s, "end_h": cal[p].slots[-1][1]}))
     qs: List[Q] = []
