@@ -498,87 +498,82 @@ def _tiles(kind: str, device, itemsize: int) -> Tuple[int, int, int, int]:
     return bm, bn, nw, ns
 
 
-class _FlashRelationFn(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, p1, p2, info, lam, tau_s: float, q_start: int):
-        # p1: [B,H,TQ,D] queries (absolute positions q_start..); p2, info: [B,H,TK,D] with TK = q_start + TQ
-        B, H, TQ, D = p1.shape
-        TK = p2.shape[2]
-        assert TK == q_start + TQ, "keys must cover exactly the cached prefix plus the new positions"
-        p1 = p1.contiguous()
-        # Inference reads P2/I straight out of the decode arena (a [1,H,capacity,D] buffer sliced to TK
-        # rows): rows are contiguous, heads are `capacity*D` apart. Pass that stride instead of copying.
-        # Training (grad enabled) keeps the contiguous layout the backward kernels write into.
-        strided_ok = (
-            not torch.is_grad_enabled() and B == 1
-            and p2.stride(3) == 1 and p2.stride(2) == D and info.stride(3) == 1 and info.stride(2) == D
-            and p2.stride(1) == info.stride(1) and p2.stride(1) >= TK * D
-        )
-        if strided_ok:
-            sk = p2.stride(1)
-        else:
-            p2, info = p2.contiguous(), info.contiguous()
-            sk = TK * D
-        lam32 = lam.detach().to(torch.float32).reshape(1).contiguous()
-        y = torch.empty_like(p1, dtype=info.dtype)
-        ibar = torch.empty(B, H, TQ, D, device=p1.device, dtype=torch.float32)
-        lse = torch.empty(B, H, TQ, device=p1.device, dtype=torch.float32)
-        g = torch.empty(B, H, TQ, device=p1.device, dtype=torch.float32)
-        ieee = p1.dtype == torch.float32
-        d0, bd0, d1, bd1, has_d1 = _split_d(D)
-        bm, bn, nw, ns = _tiles("fwd", p1.device, p1.element_size())
-        grid = (triton.cdiv(TQ, bm), B * H)
-        _fwd_kernel[grid](
-            p1, p2, info, y, ibar, lse, g, lam32,
-            TQ, TK, sk, q_start, 1.0 / math.sqrt(D), 1.0 / tau_s,
-            D=D, D0=d0, BLOCK_D0=bd0, BLOCK_D1=bd1, HAS_D1=has_d1,
-            BLOCK_M=bm, BLOCK_N=bn, IEEE=ieee, num_warps=nw, num_stages=ns,
-        )
-        ctx.save_for_backward(p1, p2, info, ibar, lse, g)
-        ctx.tau_s, ctx.q_start, ctx.ieee = tau_s, q_start, ieee
-        ctx.mark_non_differentiable(g)
-        return y, g
-
-    @staticmethod
-    def backward(ctx, dy, _dg):
-        if DETERMINISTIC:
-            return _backward_two_pass(ctx, dy)
-        p1, p2, info, ibar, lse, g = ctx.saved_tensors
-        tau_s, q_start, ieee = ctx.tau_s, ctx.q_start, ctx.ieee
-        B, H, TQ, D = p1.shape
-        TK = p2.shape[2]
-        scale = 1.0 / math.sqrt(D)
-        dy = dy.contiguous()
-        dibar = torch.empty(B, H, TQ, D, device=p1.device, dtype=p1.dtype)
-        delta = torch.empty(B, H, TQ, device=p1.device, dtype=torch.float32)
-        da = torch.empty_like(delta)
-        duii = torch.empty_like(delta)
-        dp1 = torch.empty(B, H, TQ, D, device=p1.device, dtype=torch.float32)  # initialised by the row kernel
-        dp2 = torch.empty(B, H, TK, D, device=p1.device, dtype=p2.dtype)
-        di = torch.empty(B, H, TK, D, device=p1.device, dtype=info.dtype)
-        dlam = torch.zeros(1, device=p1.device, dtype=torch.float32)
-        d0, bd0, d1, bd1, has_d1 = _split_d(D)
-        dims = dict(D=D, D0=d0, BLOCK_D0=bd0, BLOCK_D1=bd1, HAS_D1=has_d1)
-        rm, _, rw, rs = _tiles("rows", p1.device, p1.element_size())
-        _bwd_rows_kernel[(triton.cdiv(TQ, rm), B * H)](
-            p1, p2, info, dy, ibar, g, dibar, delta, da, duii, dp1, dlam,
-            TQ, TK, q_start, scale, 1.0 / tau_s, BLOCK_M=rm, num_warps=rw, num_stages=rs, **dims,
-        )
-        bm, bn, nw, ns = _tiles("bwd", p1.device, p1.element_size())
-        _bwd_kernel[(triton.cdiv(TK, bn), B * H)](
-            p1, p2, info, dy, dibar, lse, delta, da, duii, g, dp1, dp2, di,
-            TQ, TK, q_start, scale, BLOCK_M=bm, BLOCK_N=bn, IEEE=ieee, num_warps=nw, num_stages=ns, **dims,
-        )
-        return dp1.to(p1.dtype), dp2, di, dlam.reshape(()), None, None
+# ---- autograd through torch.library custom ops: one code path for eager and torch.compile (the ops are
+# opaque to Dynamo, so a compiled Relation block has no graph break at the kernel) --------------------------
+def _launch_fwd(p1, p2, info, lam, tau_s: float, q_start: int):
+    # p1: [B,H,TQ,D] queries (absolute positions q_start..); p2, info: [B,H,TK,D] with TK = q_start + TQ
+    B, H, TQ, D = p1.shape
+    TK = p2.shape[2]
+    assert TK == q_start + TQ, "keys must cover exactly the cached prefix plus the new positions"
+    p1 = p1.contiguous()
+    # Inference reads P2/I straight out of the decode arena (a [1,H,capacity,D] buffer sliced to TK
+    # rows): rows are contiguous, heads are `capacity*D` apart. Pass that stride instead of copying.
+    # The backward makes its own contiguous views, so this is safe under grad as well.
+    strided_ok = (
+        B == 1
+        and p2.stride(3) == 1 and p2.stride(2) == D and info.stride(3) == 1 and info.stride(2) == D
+        and p2.stride(1) == info.stride(1) and p2.stride(1) >= TK * D
+    )
+    if strided_ok:
+        sk = p2.stride(1)
+    else:
+        p2, info = p2.contiguous(), info.contiguous()
+        sk = TK * D
+    lam32 = lam.detach().to(torch.float32).reshape(1).contiguous()
+    y = torch.empty_like(p1, dtype=info.dtype)
+    ibar = torch.empty(B, H, TQ, D, device=p1.device, dtype=torch.float32)
+    lse = torch.empty(B, H, TQ, device=p1.device, dtype=torch.float32)
+    g = torch.empty(B, H, TQ, device=p1.device, dtype=torch.float32)
+    ieee = p1.dtype == torch.float32
+    d0, bd0, d1, bd1, has_d1 = _split_d(D)
+    bm, bn, nw, ns = _tiles("fwd", p1.device, p1.element_size())
+    grid = (triton.cdiv(TQ, bm), B * H)
+    _fwd_kernel[grid](
+        p1, p2, info, y, ibar, lse, g, lam32,
+        TQ, TK, sk, q_start, 1.0 / math.sqrt(D), 1.0 / tau_s,
+        D=D, D0=d0, BLOCK_D0=bd0, BLOCK_D1=bd1, HAS_D1=has_d1,
+        BLOCK_M=bm, BLOCK_N=bn, IEEE=ieee, num_warps=nw, num_stages=ns,
+    )
+    return y, g, ibar, lse
 
 
-def _backward_two_pass(ctx, dy):
-    """v1 backward: row terms in PyTorch, one kernel for dP2/dĨ and one for dP1 — no atomics."""
-    p1, p2, info, ibar, lse, g = ctx.saved_tensors
-    tau_s, q_start, ieee = ctx.tau_s, ctx.q_start, ctx.ieee
+def _launch_bwd_one_pass(p1, p2, info, ibar, lse, g, dy, tau_s: float, q_start: int):
     B, H, TQ, D = p1.shape
     TK = p2.shape[2]
     scale = 1.0 / math.sqrt(D)
+    ieee = p1.dtype == torch.float32
+    p1, p2, info, dy = p1.contiguous(), p2.contiguous(), info.contiguous(), dy.contiguous()
+    ibar, lse, g = ibar.contiguous(), lse.contiguous(), g.contiguous()
+    dibar = torch.empty(B, H, TQ, D, device=p1.device, dtype=p1.dtype)
+    delta = torch.empty(B, H, TQ, device=p1.device, dtype=torch.float32)
+    da = torch.empty_like(delta)
+    duii = torch.empty_like(delta)
+    dp1 = torch.empty(B, H, TQ, D, device=p1.device, dtype=torch.float32)  # initialised by the row kernel
+    dp2 = torch.empty(B, H, TK, D, device=p1.device, dtype=p2.dtype)
+    di = torch.empty(B, H, TK, D, device=p1.device, dtype=info.dtype)
+    dlam = torch.zeros(1, device=p1.device, dtype=torch.float32)
+    d0, bd0, d1, bd1, has_d1 = _split_d(D)
+    dims = dict(D=D, D0=d0, BLOCK_D0=bd0, BLOCK_D1=bd1, HAS_D1=has_d1)
+    rm, _, rw, rs = _tiles("rows", p1.device, p1.element_size())
+    _bwd_rows_kernel[(triton.cdiv(TQ, rm), B * H)](
+        p1, p2, info, dy, ibar, g, dibar, delta, da, duii, dp1, dlam,
+        TQ, TK, q_start, scale, 1.0 / tau_s, BLOCK_M=rm, num_warps=rw, num_stages=rs, **dims,
+    )
+    bm, bn, nw, ns = _tiles("bwd", p1.device, p1.element_size())
+    _bwd_kernel[(triton.cdiv(TK, bn), B * H)](
+        p1, p2, info, dy, dibar, lse, delta, da, duii, g, dp1, dp2, di,
+        TQ, TK, q_start, scale, BLOCK_M=bm, BLOCK_N=bn, IEEE=ieee, num_warps=nw, num_stages=ns, **dims,
+    )
+    return dp1.to(p1.dtype), dp2, di, dlam.reshape(())
+
+
+def _launch_bwd_two_pass(p1, p2, info, ibar, lse, g, dy, tau_s: float, q_start: int):
+    """v1 backward: row terms in PyTorch, one kernel for dP2/dĨ and one for dP1 — no atomics."""
+    B, H, TQ, D = p1.shape
+    TK = p2.shape[2]
+    scale = 1.0 / math.sqrt(D)
+    ieee = p1.dtype == torch.float32
+    p1, p2, info = p1.contiguous(), p2.contiguous(), info.contiguous()
     dy32 = dy.to(torch.float32)
     iself = info[:, :, q_start:].to(torch.float32)
     p2self = p2[:, :, q_start:]
@@ -613,15 +608,55 @@ def _backward_two_pass(ctx, dy):
     dp1 = dp1 + dp1_self
     dp2[:, :, q_start:] += dp2_self
     di[:, :, q_start:] += di_direct
-    return dp1.to(p1.dtype), dp2.to(p2.dtype), di.to(info.dtype), dlam.to(torch.float32), None, None
+    return dp1.to(p1.dtype), dp2.to(p2.dtype), di.to(info.dtype), dlam.to(torch.float32)
+
+
+if HAS_TRITON:
+
+    @torch.library.custom_op("mote::relation_fwd", mutates_args=())
+    def _relation_fwd(p1: torch.Tensor, p2: torch.Tensor, info: torch.Tensor, lam: torch.Tensor, tau_s: float, q_start: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return _launch_fwd(p1, p2, info, lam, tau_s, q_start)
+
+    @_relation_fwd.register_fake
+    def _relation_fwd_fake(p1, p2, info, lam, tau_s, q_start):
+        B, H, TQ, D = p1.shape
+        return (
+            p1.new_empty((B, H, TQ, D), dtype=info.dtype),
+            p1.new_empty((B, H, TQ), dtype=torch.float32),
+            p1.new_empty((B, H, TQ, D), dtype=torch.float32),
+            p1.new_empty((B, H, TQ), dtype=torch.float32),
+        )
+
+    @torch.library.custom_op("mote::relation_bwd", mutates_args=())
+    def _relation_bwd(p1: torch.Tensor, p2: torch.Tensor, info: torch.Tensor, ibar: torch.Tensor, lse: torch.Tensor, g: torch.Tensor, dy: torch.Tensor, tau_s: float, q_start: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        fn = _launch_bwd_two_pass if DETERMINISTIC else _launch_bwd_one_pass
+        return fn(p1, p2, info, ibar, lse, g, dy, tau_s, q_start)
+
+    @_relation_bwd.register_fake
+    def _relation_bwd_fake(p1, p2, info, ibar, lse, g, dy, tau_s, q_start):
+        return p1.new_empty(p1.shape), p2.new_empty(p2.shape), info.new_empty(info.shape), p1.new_empty((), dtype=torch.float32)
+
+    def _setup_context(ctx, inputs, output):
+        p1, p2, info, lam, tau_s, q_start = inputs
+        y, g, ibar, lse = output
+        ctx.save_for_backward(p1, p2, info, ibar, lse, g)
+        ctx.tau_s, ctx.q_start = tau_s, q_start
+
+    def _backward(ctx, dy, _dg, _dibar, _dlse):
+        p1, p2, info, ibar, lse, g = ctx.saved_tensors
+        dp1, dp2, di, dlam = _relation_bwd(p1, p2, info, ibar, lse, g, dy, ctx.tau_s, ctx.q_start)
+        return dp1, dp2, di, dlam, None, None
+
+    _relation_fwd.register_autograd(_backward, setup_context=_setup_context)
 
 
 def flash_relation(p1: torch.Tensor, p2: torch.Tensor, info: torch.Tensor, lam: torch.Tensor, tau_s: float = 2.0, q_start: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused Full Relation. p1 [B,H,T,D] (RoPE applied), p2/info [B,H,S+T,D] (RoPE / Givens applied).
-    Returns (Y [B,H,T,D] in info's dtype, g [B,H,T] fp32 exchange mass)."""
+    Returns (Y [B,H,T,D] in info's dtype, g [B,H,T] fp32 exchange mass; no gradient flows through g)."""
     if not HAS_TRITON or not (p1.is_cuda or os.environ.get("TRITON_INTERPRET") == "1"):
         raise RuntimeError("flash_relation needs CUDA + Triton")
-    return _FlashRelationFn.apply(p1, p2, info, lam, float(tau_s), int(q_start))
+    y, g, _ibar, _lse = _relation_fwd(p1, p2, info, lam, float(tau_s), int(q_start))
+    return y, g.detach()
 
 
 def relation_reference(p1, p2, info, lam, tau_s: float = 2.0, q_start: int = 0):

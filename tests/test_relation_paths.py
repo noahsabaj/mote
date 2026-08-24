@@ -3,6 +3,7 @@ outputs and the same parameter gradients (the model-level exactness gate for ker
 "Kernel and compile workstreams"). GPU, or the CPU Triton interpreter with TRITON_INTERPRET=1."""
 
 import os
+import shutil
 
 import pytest
 import torch
@@ -45,3 +46,33 @@ def test_flash_and_materialized_paths_agree(d_model, n_heads, T, layer_idx):
     for n in a[3]:
         scale = b[3][n].abs().max().clamp(min=1e-3)
         assert ((a[3][n] - b[3][n]).abs().max() / scale) < 2e-3, (n, ((a[3][n] - b[3][n]).abs().max() / scale).item())
+
+
+@pytest.mark.skipif(shutil.which("g++") is None and DEV == "cpu", reason="Inductor on CPU needs a C++ compiler")
+def test_compiled_relation_block_has_no_graph_breaks():
+    """The kernel is a torch.library custom op, so torch.compile(fullgraph=True) must trace the whole
+    Relation forward + backward without a break and match eager."""
+    torch._dynamo.reset()
+    torch.manual_seed(0)
+    mod = FullRelation(128, 2, layer_idx=1, device=DEV, dtype=torch.float32)
+    with torch.no_grad():
+        mod.theta.uniform_(-0.3, 0.3)
+    x = torch.randn(2, 48, 128, device=DEV) * 0.8
+    old = R.USE_FLASH
+    R.USE_FLASH = True
+    try:
+        xe = x.clone().requires_grad_(True)
+        ye = mod(xe)
+        ye.sum().backward()
+        ge = {n: p.grad.clone() for n, p in mod.named_parameters()}
+        mod.zero_grad()
+        cm = torch.compile(mod, fullgraph=True)
+        xc = x.clone().requires_grad_(True)
+        yc = cm(xc)
+        yc.sum().backward()
+    finally:
+        R.USE_FLASH = old
+    assert torch.allclose(ye, yc, atol=1e-4, rtol=1e-4), (ye - yc).abs().max()
+    assert torch.allclose(xe.grad, xc.grad, atol=2e-4, rtol=1e-3), (xe.grad - xc.grad).abs().max()
+    for n, p in mod.named_parameters():
+        assert torch.allclose(ge[n], p.grad, atol=2e-4, rtol=1e-3), (n, (ge[n] - p.grad).abs().max().item())
