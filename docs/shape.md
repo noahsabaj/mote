@@ -64,6 +64,31 @@ equivalence, stop/resume, queue/cancel/interrupt, gate pause, EMA math, engine h
 Still deferred from the original list: online updates from votes (v1 is batch DPO), and the
 process-boundary alternatives (moot — one process shipped).
 
+## CUDA graphs for serving decode (grilled 2026-08-24; spike done, build after flagship launch)
+
+Decode is host-launch-bound: every byte is ~50–100 tiny kernel launches driven from Python, and the
+GPU idles between them. The settled design:
+
+- **Scope**: flagship plain steps only. The 35M's speculative rounds (`forward_from_state`,
+  variable draft length) stay eager — that path needs the MBP head, which the flagship doesn't have.
+- **Branch**: two captured graphs — boundary step (runs the main network + dechunk) and non-boundary
+  step — selected per byte by the router bit on the host. That bit is synced today anyway; one
+  sync/byte is the floor regardless (the byte must reach the host to stream text and check STOP).
+- **Sampling stays on the host**: the graph writes logits into a static output buffer; `multinomial`
+  over the 259-vocab runs eager, so temperature/top_p never get baked into a capture.
+- **Cache arena**: decided by the win128 gate. Window adopted → the Relation decode cache is a fixed
+  128-chunk ring, static for free. Full attention → preallocate the full-context arena (~3200 chunks,
+  order 100–300 MB). Either way the engine copies incoming prefix-cache states into the static arena
+  at reply start, and the build-time surgery is making `step()` write states **in place** (today each
+  step returns fresh tensors, which breaks graph replay addresses).
+- **Recapture policy**: in-place EMA weight sync needs none (graphs read current memory); a model
+  rebuild on cfg change recaptures.
+- **Spike result (2026-08-24)**: capture + replay verified under `expandable_segments:True` on torch
+  2.13 beside the live trainer — the one environment risk is clear. A 3-op toy step replays 1.8×
+  faster; the real step should gain more (launch overhead dominates it far harder).
+- **Why after launch**: serving has no pain (12–45 ms warm vs the ~1 s contract) and the freeze/launch
+  is the critical path; the build happens on the serving margin during the 7-day pretrain.
+
 ## Questions the numbers decide (deferred, in dependency order)
 
 1. Preemption: step-level (a reply waits one step) or micro-batch-level (gradient accumulation slices
