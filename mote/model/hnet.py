@@ -19,6 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..config import MoteConfig
+from .arena import ArenaState, RelationArena
 from .blocks import Isotropic, make_mamba3_stack, make_relation_stack
 from .dc import ChunkLayer, DeChunkLayer, DeChunkState, RoutingModule, RoutingOutput, RoutingState, ste_ones
 from .mbp import LCAHead
@@ -37,7 +38,7 @@ class HNetOutput:
 class InferenceState:
     encoder: List[Any]
     routing: RoutingState
-    main: List[Any]
+    main: ArenaState  # the Relation per-chunk cache lives in a shared arena (arena.py); this holds the fill count
     dechunk: DeChunkState
     decoder: List[Any]
     # multi-byte head bookkeeping (batch 1)
@@ -154,15 +155,33 @@ class HNetForCausalLM(nn.Module):
         return HNetOutput(logits, mbp_logits, routing, chunk_id, offset)
 
     # ------------------------------------------------------------------------------
+    def new_arena(self, device, capacity: Optional[int] = None) -> RelationArena:
+        """A decode arena for this model: rows for `capacity` chunks (default max_seq_len/4 — ~4 bytes a
+        chunk covers every measured router; `RelationArena.ensure` grows it if a context needs more)."""
+        m = self.cfg.main
+        cap = int(capacity) if capacity else max(self.cfg.max_seq_len // 4, 16)
+        dtype = next(self.main_network.parameters()).dtype
+        return RelationArena(m.n_layers, m.n_heads, cap, m.d_model // m.n_heads, device, dtype)
+
     @torch.no_grad()
-    def allocate_inference_state(self, device, dtype=None) -> InferenceState:
+    def allocate_inference_state(self, device, dtype=None, arena: Optional[RelationArena] = None) -> InferenceState:
+        """A fresh state. `arena` is the shared decode arena (the engine passes its own); without one a
+        private arena is allocated, which is what tests and one-off reads want."""
         return InferenceState(
             encoder=self.encoder.allocate_inference_cache(1, device, dtype),
             routing=self.routing_module.allocate_inference_cache(1, device, dtype),
-            main=self.main_network.allocate_inference_cache(1, device, dtype),
+            main=ArenaState(arena if arena is not None else self.new_arena(device), 0),
             dechunk=self.dechunk_layer.allocate_inference_cache(1, device, dtype),
             decoder=self.decoder.allocate_inference_cache(1, device, dtype),
         )
+
+    def _run_main(self, hc: torch.Tensor, state: InferenceState) -> torch.Tensor:
+        """Main network over T new chunks, written into the arena at rows [n, n+T); advances n."""
+        T = hc.shape[1]
+        state.main.arena.ensure(state.main.n + T)
+        zc, _ = self.main_network(self._pad(hc), caches=state.main, return_caches=True)
+        state.main.advance(T)
+        return zc[..., : self.cfg.d_model_outer]
 
     @torch.no_grad()
     def prefill(self, input_ids: torch.Tensor, state: InferenceState) -> HNetOutput:
@@ -172,13 +191,13 @@ class HNetForCausalLM(nn.Module):
         D0 = self.cfg.d_model_outer
         mask = torch.ones(B, L, dtype=torch.bool, device=input_ids.device)
 
+        assert state.main.n == 0, "prefill wants a fresh state; continue a read with forward_from_state"
         h = self.embeddings(input_ids)
         h, state.encoder = self.encoder(h, caches=None, return_caches=True)
         residual = self.residual_proj(h.float())
         routing = self.routing_module(h, mask, state.routing)
         hc, _ = self.chunk_layer(h, routing.boundary_mask, exact=True)  # caches must hold only real chunks
-        zc, state.main = self.main_network(self._pad(hc), caches=None, return_caches=True)
-        zc = zc[..., :D0]
+        zc = self._run_main(hc, state)
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)
         h2 = (z.float() + residual).to(h.dtype)
         h3, state.decoder = self.decoder(h2, caches=None, return_caches=True)
@@ -220,8 +239,7 @@ class HNetForCausalLM(nn.Module):
         routing = self.routing_module(h, mask, state.routing)
         hc, _ = self.chunk_layer(h, routing.boundary_mask, exact=True)
         if hc.shape[1] > 0:
-            zc, state.main = self.main_network(self._pad(hc), caches=state.main, return_caches=True)
-            zc = zc[..., :D0]
+            zc = self._run_main(hc, state)
         else:
             zc = h[:, :0]
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)
@@ -267,6 +285,8 @@ class HNetForCausalLM(nn.Module):
         def cl(o):
             if isinstance(o, torch.Tensor):
                 return fn(o)
+            if isinstance(o, ArenaState):
+                return o.copy()  # the fill count travels; the arena itself is shared, never copied
             if isinstance(o, list):
                 return [cl(x) for x in o]
             if isinstance(o, tuple):
@@ -280,13 +300,15 @@ class HNetForCausalLM(nn.Module):
 
     @staticmethod
     def clone_state(state: InferenceState) -> InferenceState:
-        """Deep copy of every tensor in the inference state (snapshot before a speculative round)."""
+        """Deep copy of every tensor in the inference state (snapshot before a speculative round). The
+        arena is shared: rolling back restores the fill count, and rows past it are scratch by contract."""
         return HNetForCausalLM._map_state(state, lambda t: t.clone())
 
     @staticmethod
     def move_state(state: InferenceState, device, pin: bool = False) -> InferenceState:
-        """A copy of the state on `device` — always a copy, so the source stays usable (the serving
-        engine's prefix cache parks snapshots on the CPU; `pin` page-locks them for the trip back)."""
+        """A copy of every tensor in the state on `device` — always a copy, so the source stays usable
+        (the serving engine parks anchors on the CPU; `pin` page-locks them for the trip back). The
+        arena reference is kept as is: its rows are moved by the prefix store, page by page."""
         dev = torch.device(device)
         def mv(t: torch.Tensor) -> torch.Tensor:
             if pin and dev.type == "cpu" and t.is_cuda:
@@ -308,7 +330,9 @@ class HNetForCausalLM(nn.Module):
         is_boundary = bool(routing.boundary_mask[0])
         if is_boundary:
             hc = self.chunk_layer.step(h, routing.boundary_mask)  # [1,1,D0]
-            zc, state.main = self.main_network.step(self._pad(hc), state.main)
+            state.main.arena.ensure(state.main.n + 1)
+            zc, _ = self.main_network.step(self._pad(hc), state.main)
+            state.main.advance(1)
             zc = zc[..., :D0]
         else:
             zc = h[:0]

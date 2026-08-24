@@ -18,14 +18,16 @@ import torch
 import torch.nn.functional as F
 
 from ..config import MoteConfig
-from ..model.hnet import HNetForCausalLM
+from ..model.arena import ArenaState
+from ..model.hnet import HNetForCausalLM, InferenceState
 from ..model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
 from ..model.dc import HAS_SSD_KERNEL
 from ..model.relation import FullRelation
 from .context import fold
+from .graph import BUCKET, GraphDecoder
 from .identity import identity_card, with_system_card
 from ..tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer
-from .prefix_cache import PrefixCache
+from .prefix_cache import Hit, PrefixStore
 
 STOP_IDS = {EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ASSISTANT_ID, BOS_ID}
 
@@ -124,10 +126,11 @@ def _sample(logits: torch.Tensor, temperature: float, top_p: float):
 class Engine:
     def __init__(self, ckpt_path: str | Path, device: Optional[str] = None, prefix_cache_mb: Optional[int] = None):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        # Prefix-state cache (mote/serve/prefix_cache.py): CPU-resident snapshots under a byte budget.
-        mb = int(os.environ.get("MOTE_PREFIX_CACHE_MB", 1024)) if prefix_cache_mb is None else int(prefix_cache_mb)
-        self.prefix_cache = PrefixCache(mb << 20)
         self.pin = self.device.type == "cuda"
+        # Prefix store (mote/serve/prefix_cache.py): branches of arena pages + ~3 MB anchors on the CPU
+        # under a byte budget; the Relation arena itself (model/arena.py) stays on the device.
+        mb = int(os.environ.get("MOTE_PREFIX_CACHE_MB", 1024)) if prefix_cache_mb is None else int(prefix_cache_mb)
+        self.prefix_cache = PrefixStore(mb << 20, pin=self.pin)
         # Set by the server: a lock shared with the training worker (docs/shape.md). A reply holds it
         # for its whole generation, so training yields at its next accumulation slice.
         self.gpu_gate = None
@@ -147,6 +150,20 @@ class Engine:
         self.defaults = GenParams(max_bytes=min(512, self.cfg.max_seq_len // 2))
         self._telemetry: Dict[str, dict] = {}
         self._attach_telemetry()
+        self._last_card: List[int] = []  # the identity-card bytes of the last prompt (rewarm reads them)
+        self._setup_decode()
+
+    def _setup_decode(self) -> None:
+        """The decode arena and (on CUDA, for models without a multi-byte head) the graph decoder."""
+        self.arena = self.model.new_arena(self.device, capacity=int(os.environ["MOTE_ARENA_CHUNKS"]) if os.environ.get("MOTE_ARENA_CHUNKS") else None)
+        self._gd: Optional[GraphDecoder] = None
+        self._graph_ok = (self.device.type == "cuda" and self.model.mbp_head is None
+                          and os.environ.get("MOTE_GRAPH_DECODE", "1") != "0")
+
+    def _graph_decoder(self) -> GraphDecoder:
+        if self._gd is None:
+            self._gd = GraphDecoder(self.model, self.arena, self.device, STOP_IDS, ring_size=self.cfg.max_seq_len)
+        return self._gd
 
     # ------------------------------------------------------------------------------
     @torch.no_grad()
@@ -158,13 +175,21 @@ class Engine:
             for L in (5, 16, 33, 128, 257, 512, 640, 1024, 2048, 4096):
                 L = min(L, self.cfg.max_seq_len - 4)
                 ids = torch.randint(0, 256, (1, L), device=self.device)
-                state = self.model.allocate_inference_state(self.device)
+                state = self.model.allocate_inference_state(self.device, arena=self.arena)
                 self.model.prefill(ids, state)
                 self.model.step(torch.tensor([[65]], device=self.device), state)
                 if L >= 128:
                     # resumed prefill compiles its own kernel variants (Input_States != None,
                     # 2026-08-24): warm them too, or the first cache-hit turn pays the compile
-                    self.model.prefill(ids[:, : L // 2], state)
+                    warm = self.model.allocate_inference_state(self.device, arena=self.arena)
+                    self.model.prefill(ids[:, : L // 2], warm)
+                    self.model.forward_from_state(ids[:, L // 2 :], warm)
+            if self._graph_ok:  # capture the first decode width now, not on the first reply
+                gd = self._graph_decoder()
+                state = self.model.allocate_inference_state(self.device, arena=self.arena)
+                gd.load(state, torch.zeros(gd.V, device=self.device))
+                gd._graph(BUCKET)
+            self.arena.invalidate()
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()  # give the warm-up's transient buffers back (training may share this GPU)
@@ -228,13 +253,18 @@ class Engine:
         states were computed under the old weights."""
         new_cfg = MoteConfig.from_dict(cfg_dict)
         with self.lock:
-            if new_cfg.to_dict() != self.cfg.to_dict():
+            rebuilt = new_cfg.to_dict() != self.cfg.to_dict()
+            if rebuilt:
                 self.cfg = new_cfg
                 self.model = HNetForCausalLM(new_cfg)
                 self.defaults = GenParams(max_bytes=min(512, new_cfg.max_seq_len // 2))
-            self.model.load_state_dict(state_dict)
+            self.model.load_state_dict(state_dict)  # in place: captured graphs keep reading the same memory
             self.model.to(self.device).eval()
+            if rebuilt:
+                self._attach_telemetry()
+                self._setup_decode()
             self.prefix_cache.clear()
+            self.arena.invalidate()
             self.serving_live = f"{name}@{step}"
 
     @property
@@ -270,6 +300,8 @@ class Engine:
             "probe": self.probe_results(),
             "identity_card": identity_card(self.model.num_params()),
             "prefix_cache": self.prefix_cache.report(),
+            "arena": {"chunks": self.arena.capacity, "bytes": self.arena.nbytes(), "hot_branch": self.arena.owner,
+                      "hot_chunks": self.arena.n_valid, "graph_decode": self._graph_ok},
         }
 
     # ------------------------------------------------------------------------------
@@ -279,38 +311,50 @@ class Engine:
             return self.tok.format_chat([ChatMessage("system", messages[0]["content"])], add_generation_prompt=False)
         return []
 
-    def _snapshot(self, kind: str, ids: Sequence[int], state, logits: torch.Tensor, n_chunks: int) -> None:
-        if self.prefix_cache.budget:
-            self.prefix_cache.put(kind, ids, self.model.move_state(state, "cpu", pin=self.pin),
-                                  logits.detach().float().cpu(), n_chunks)
+    # A session = (branch the read started on or None, arena rows that were valid at that point).
+    # Commits extend the branch when the bytes continue it and fork at `from_chunks` when they diverge.
+    def _commit(self, kind: str, ids: Sequence[int], state: InferenceState, logits: torch.Tensor, session):
+        if not self.prefix_cache.budget:
+            return session
+        branch, from_chunks = session
+        anchor_state = self.model.move_state(state, "cpu", pin=self.pin)  # everything but the arena rows
+        target = self.prefix_cache.commit(branch, from_chunks, kind, ids, anchor_state,
+                                          logits.detach().float().cpu(), state.main.n, self.arena)
+        return (target, state.main.n)
+
+    def _restore(self, hit: Hit) -> InferenceState:
+        state = self.model.move_state(hit.anchor.state, self.device)
+        self.prefix_cache.hydrate(hit.branch, hit.anchor.n_chunks, self.arena)  # free when the arena is hot
+        state.main = ArenaState(self.arena, hit.anchor.n_chunks)
+        return state
 
     @torch.no_grad()
-    def _prefill_with_cache(self, messages: Sequence[dict], prompt_ids: List[int]):
-        """Read the prompt, reusing the longest cached prefix. Returns (state, next-byte logits [V],
-        n_chunks, reused bytes, boundary mask of the freshly read suffix or None)."""
+    def _read_prompt(self, prompt_ids: List[int], card: List[int]):
+        """Read the prompt, reusing the longest anchor. Returns (state, next-byte logits [V], n_chunks,
+        reused bytes, boundary mask of the freshly read suffix or None, session)."""
         P = len(prompt_ids)
-        snap = self.prefix_cache.lookup(prompt_ids)
-        if snap is not None:
-            state = self.model.move_state(snap.state, self.device)
-            if snap.n_ids == P:  # e.g. a regenerate: nothing new to read
-                return state, snap.logits.to(self.device), snap.n_chunks, P, None
-            lg, bm, _ = self.model.forward_from_state(torch.tensor([prompt_ids[snap.n_ids:]], device=self.device), state)
-            return state, lg[0, -1], snap.n_chunks + int(bm.sum()), snap.n_ids, bm
-        state = self.model.allocate_inference_state(self.device)
-        card = self._card_ids(messages)
+        hit = self.prefix_cache.lookup(prompt_ids)
+        if hit is not None:
+            state = self._restore(hit)
+            session = (hit.branch, hit.anchor.n_chunks)
+            if hit.n_ids == P:  # e.g. a regenerate: nothing new to read
+                return state, hit.anchor.logits.to(self.device), state.main.n, P, None, session
+            lg, bm, _ = self.model.forward_from_state(torch.tensor([prompt_ids[hit.n_ids:]], device=self.device), state)
+            return state, lg[0, -1], state.main.n, hit.n_ids, bm, session
+        self.arena.invalidate()
+        state = self.model.allocate_inference_state(self.device, arena=self.arena)
         if card and len(card) < P and prompt_ids[:len(card)] == card:
             # cold start: read the identity card on its own first, so every later conversation starts warm
             out = self.model.prefill(torch.tensor([card], device=self.device), state)
-            n_card = int(out.chunk_id[0, -1]) + 1
-            self._snapshot("card", card, state, out.logits[0, -1], n_card)
+            session = self._commit("card", card, state, out.logits[0, -1], (None, 0))
             lg, bm, _ = self.model.forward_from_state(torch.tensor([prompt_ids[len(card):]], device=self.device), state)
-            return state, lg[0, -1], n_card + int(bm.sum()), 0, bm
+            return state, lg[0, -1], state.main.n, 0, bm, session
         out = self.model.prefill(torch.tensor([prompt_ids], device=self.device), state)
-        return state, out.logits[0, -1], int(out.chunk_id[0, -1]) + 1, 0, None
+        return state, out.logits[0, -1], state.main.n, 0, None, (None, 0)
 
     @torch.no_grad()
     def _verify_prefix(self, prompt_ids: List[int], reused: int, warm_logits: torch.Tensor, warm_bm, warm_chunks: int) -> dict:
-        """Debug toggle: read the whole prompt cold and compare with the warm continuation."""
+        """Debug toggle: read the whole prompt cold (in a private arena) and compare with the warm continuation."""
         t = time.perf_counter()
         cold = self.model.allocate_inference_state(self.device)
         out = self.model.prefill(torch.tensor([prompt_ids], device=self.device), cold)
@@ -318,8 +362,37 @@ class Engine:
         flips = int((cold_bm[reused:] != warm_bm.to(cold_bm.device)).sum()) if warm_bm is not None else 0
         diff = out.logits[0, -1].float() - warm_logits.float()
         return {"reused": reused, "prefilled": len(prompt_ids) - reused, "boundary_flips": flips,
-                "chunks_cold": int(out.chunk_id[0, -1]) + 1, "chunks_warm": warm_chunks,
+                "chunks_cold": cold.main.n, "chunks_warm": warm_chunks,
                 "max_logit_diff": float(diff.abs().max()), "cold_ms": (time.perf_counter() - t) * 1000}
+
+    @torch.no_grad()
+    def rewarm(self, max_age_s: float = 600.0, max_branches: int = 3) -> dict:
+        """After a weight swap (decided 2026-08-24): re-read the conversations used in the last
+        `max_age_s` so their anchors are warm again before the next message. One prefill per branch."""
+        store = self.prefix_cache
+        if not store.budget:
+            return {"branches": 0, "bytes": 0, "ms": 0.0}
+        t0 = time.perf_counter()
+        plan = store.rewarm_plan(max_age_s, max_branches)
+        store.clear()
+        self.arena.invalidate()
+        n_bytes = 0
+        with self.lock:
+            for ids, anchors in plan:
+                if not anchors:
+                    continue
+                kind0, n0 = anchors[0]
+                state, logits, _, _, _, session = self._read_prompt(ids[:n0], self._last_card)
+                session = self._commit(kind0, ids[:n0], state, logits, session)
+                prev = n0
+                for kind, n in anchors[1:]:
+                    if n > prev:
+                        lg, _, _ = self.model.forward_from_state(torch.tensor([ids[prev:n]], device=self.device), state)
+                        logits = lg[0, -1]
+                    session = self._commit(kind, ids[:n], state, logits, session)
+                    prev = n
+                n_bytes += len(ids)
+        return {"branches": len(plan), "bytes": n_bytes, "ms": (time.perf_counter() - t0) * 1000}
 
     # ------------------------------------------------------------------------------
     def build_prompt(self, messages: Sequence[dict], limit: int, reserve: int):
@@ -364,7 +437,8 @@ class Engine:
         prompt_ids, truncated = folded.ids, folded.truncated
         P = len(prompt_ids)
         t0 = time.perf_counter()
-        state, logits, n_chunks, reused, warm_bm = self._prefill_with_cache(messages, prompt_ids)
+        self._last_card = self._card_ids(messages)
+        state, logits, n_chunks, reused, warm_bm, session = self._read_prompt(prompt_ids, self._last_card)
         prefill_ms = (time.perf_counter() - t0) * 1000
         emit({"type": "start", "prompt_bytes": P, "context_bytes": P, "context_limit": limit, "truncated": truncated,
               "fold": folded.report(),
@@ -373,7 +447,7 @@ class Engine:
         if reused and context.get("verify_prefix"):
             check = self._verify_prefix(prompt_ids, reused, logits, warm_bm, n_chunks)
             emit({"type": "diagnostics", **self._diagnostics([]), "prefix_check": check})
-        self._snapshot("prompt", prompt_ids, state, logits, n_chunks)  # S1: this turn's prompt (a regenerate reuses it)
+        session = self._commit("prompt", prompt_ids, state, logits, session)  # S1: this turn's prompt (a regenerate reuses it)
 
         streamer = Utf8Streamer()
         boundary_probs: List[float] = []
@@ -446,7 +520,11 @@ class Engine:
             return mbp[0, :n_draft]
 
         draft = None
-        while len(generated) < params.max_bytes:
+        use_graph = self._graph_ok and n_draft <= 0
+        if use_graph:
+            # one CUDA graph per byte, sampling on the device, K bytes per host sync (mote/serve/graph.py)
+            reason, state, logits = self._graph_decode(state, logits, params, P, limit, record, stop, timing)
+        while not use_graph and len(generated) < params.max_bytes:
             if stop.is_set():
                 reason = "stopped"
                 break
@@ -535,8 +613,33 @@ class Engine:
             if len(generated) - last_stats_bytes >= 16:
                 last_stats_bytes = len(generated)
                 emit({"type": "stats", **stats()})
-        self._snapshot("reply", prompt_ids + generated, state, logits, chunk_index + 1)  # S2: the next turn starts here
+        self._commit("reply", prompt_ids + generated, state, logits, session)  # S2: the next turn starts here
         emit({"type": "done", "reason": reason, "text": "".join(text_parts), "stats": stats()})
+
+    def _graph_decode(self, state, logits, params: GenParams, P: int, limit: int, record, stop: threading.Event, timing: dict):
+        gd = self._graph_decoder()
+        max_out = max(min(params.max_bytes, limit - 1 - P), 0)
+        outer = [n for n, m in self.model.named_modules() if isinstance(m, Mamba3Mixer)]
+        rel = [n for n, m in self.model.named_modules() if isinstance(m, FullRelation)]
+        count = [0]
+
+        def on_bytes(recs):
+            for r in recs:
+                for name, ret in zip(outer, r["retention"]):
+                    self._telemetry[name]["retention"] = ret
+                if r["exchange"] is not None:
+                    for name, xm in zip(rel, r["exchange"]):
+                        self._telemetry[name]["exchange_mass"] = xm
+                record(r["byte"], r["p"], r["entropy"], r["boundary"], r["boundary_p"], "nbp", r["t_ms"])
+                count[0] += 1
+
+        t0 = time.perf_counter()
+        reason, st, lg = gd.run(state, logits, params.temperature, params.top_p, max_out, stop, on_bytes)
+        timing["plain_s"] += time.perf_counter() - t0
+        timing["plain_bytes"] += count[0]
+        if reason == "max_bytes" and count[0] < params.max_bytes:
+            reason = "context"
+        return reason, st, lg
 
 
 def discover_checkpoints(root: Path) -> List[Path]:

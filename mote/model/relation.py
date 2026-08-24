@@ -24,9 +24,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .arena import ArenaLayer
 from .flash_relation import HAS_TRITON, flash_relation
 
-RelationCache = Tuple[torch.Tensor, torch.Tensor]  # (P2 [B,H,S,dh], I~ [B,H,S,dh])
+RelationCache = Tuple[torch.Tensor, torch.Tensor]  # (P2 [B,H,S,dh], I~ [B,H,S,dh]) — or an ArenaLayer (arena.py)
 USE_FLASH = True  # fused Triton kernel (flash_relation.py) on CUDA; the materialized path is the reference
 FLASH_MIN_T = 16  # below this the launch costs more than the tiny matmuls
 
@@ -144,7 +145,11 @@ class FullRelation(nn.Module):
         """
         B, T, D = x.shape
         H, dh = self.n_heads, self.d_head
-        S = 0 if cache is None else cache[0].shape[2]
+        arena = isinstance(cache, ArenaLayer)  # append-only rows in the shared decode arena (arena.py)
+        if arena:
+            S = cache.n
+        else:
+            S = 0 if cache is None else cache[0].shape[2]
 
         p1 = self.w1(x).view(B, T, H, dh).transpose(1, 2)
         p2 = self.w2(x).view(B, T, H, dh).transpose(1, 2)
@@ -155,19 +160,23 @@ class FullRelation(nn.Module):
         p2 = _apply_rope(p2, cos, sin)
         info = self._givens(info)
 
-        if cache is not None:
+        if arena:
+            cache.write(p2, info)  # rows [S, S+T); the caller advances n after every layer wrote
+            p2_all, info_all = cache.views(S + T)
+        elif cache is not None:
             p2_all = torch.cat([cache[0], p2], dim=2)
             info_all = torch.cat([cache[1], info], dim=2)
         else:
             p2_all, info_all = p2, info
         Sall = S + T
+        new_cache = cache if arena else (p2_all, info_all)
 
         if USE_FLASH and HAS_TRITON and x.is_cuda and T >= FLASH_MIN_T and self.window is None:
             y, g = flash_relation(p1, p2_all, info_all, self.lam, self.tau_s, q_start=S)
             out = self.wo(y.transpose(1, 2).reshape(B, T, D))
             extras = []
             if return_cache:
-                extras.append((p2_all, info_all))
+                extras.append(new_cache)
             if self.telemetry is not None:
                 self.telemetry["exchange_mass"] = float(g[0, :, -1].mean())
             if return_gates:
@@ -195,7 +204,7 @@ class FullRelation(nn.Module):
 
         extras = []
         if return_cache:
-            extras.append((p2_all, info_all))
+            extras.append(new_cache)
         if return_gates or self.telemetry is not None:
             g = flow.masked_fill(~is_past, 0.0).sum(-1)  # [B,H,T] exchange mass
             if self.telemetry is not None:

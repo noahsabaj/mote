@@ -1,15 +1,17 @@
-"""Prefix-state cache (mote/serve/prefix_cache.py, Engine._prefill_with_cache): a warm continuation
-equals a cold prefill up to float rounding, the cache honours its budget and picks the longest usable
-snapshot, and the engine reports what it reused and verifies it on request."""
+"""Prefix store (mote/serve/prefix_cache.py, Engine._read_prompt): a warm continuation equals a cold
+prefill up to float rounding, anchors cost only the small states (the arena rows live in pages), branches
+extend / refresh / fork correctly and honour the budget, the hot arena is not re-copied, and the engine
+reports what it reused and verifies it on request."""
 
 import threading
 
 import torch
 
 from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.model.arena import RelationArena
 from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams
-from mote.serve.prefix_cache import PrefixCache
+from mote.serve.prefix_cache import PAGE, PrefixStore, state_nbytes
 
 
 def _cfg():
@@ -44,10 +46,11 @@ def test_split_prefill_matches_cold_prefill():
         out = model.prefill(ids, cold)
         warm = model.allocate_inference_state("cpu")
         model.prefill(ids[:, :23], warm)
-        parked = HNetForCausalLM.move_state(warm, "cpu")  # the cache's round trip is a copy, never an alias
+        parked = HNetForCausalLM.move_state(warm, "cpu")  # the anchor's round trip is a copy, never an alias
         lg, bm, _ = model.forward_from_state(ids[:, 23:], parked)
         assert bm.tolist() == out.routing.boundary_mask[0, 23:].tolist(), seed
         assert torch.allclose(lg[0, -1], out.logits[0, -1], atol=1e-4, rtol=1e-4), (lg[0, -1] - out.logits[0, -1]).abs().max()
+        assert parked.main.n == cold.main.n
         nb = torch.tensor([[65]])
         a, _, _, _ = model.step(nb, cold)
         b, _, _, _ = model.step(nb, parked)
@@ -58,25 +61,56 @@ def test_split_prefill_matches_cold_prefill():
         assert bm2.tolist() == bm.tolist() and torch.allclose(lg2, lg, atol=1e-5, rtol=1e-5)
 
 
-def test_prefix_cache_picks_longest_prefix_and_keeps_budget():
-    c = PrefixCache(budget_bytes=4096)
-    st = lambda n: [torch.zeros(n, dtype=torch.uint8)]
+def _fill(arena: RelationArena, n: int, value: float):
+    arena.buf[:, :, :, :n] = value
+
+
+def test_store_branches_anchors_pages_and_budget():
+    arena = RelationArena(n_layers=1, n_heads=1, capacity=4 * PAGE, d_head=2, device="cpu", dtype=torch.float32)
+    st = lambda: [torch.zeros(64)]  # a stand-in for the CPU state (256 B)
     lg = torch.zeros(4)
-    c.put("card", [1, 2, 3], st(100), lg, 1)
-    c.put("prompt", [1, 2, 3, 4, 5], st(100), lg, 2)
-    c.put("reply", [1, 2, 3, 9], st(100), lg, 2)
-    assert c.peek([1, 2, 3, 4, 5, 6]).n_ids == 5
-    assert c.peek([1, 2, 3, 9, 9]).n_ids == 4
-    assert c.peek([1, 2, 3]).kind == "card"
-    assert c.peek([1, 2]) is None and c.peek([7, 7, 7, 7]) is None
-    assert c.lookup([1, 2, 3, 4, 5]).n_ids == 5 and c.hits == 1 and c.items[0].n_ids == 5
-    c.put("prompt", [1, 2, 3, 4, 5], st(100), lg, 2)  # same bytes: replaced, not duplicated
-    assert len(c.items) == 3
-    c.put("reply", [5, 5, 5], st(3900), lg, 1)  # over budget: least recently used snapshots go
-    assert c.used <= 4096 and c.peek([5, 5, 5, 1]) is not None and len(c.items) < 4
-    assert c.put("big", [8], st(5000), lg, 0) is None  # larger than the whole budget: not stored
-    assert PrefixCache(0).put("x", [1], st(1), lg, 0) is None
-    assert c.report()["snapshots"] == len(c.items)
+    store = PrefixStore(budget_bytes=1 << 30)
+    # cold read of the card: 10 chunks, pinned branch
+    _fill(arena, 10, 1.0)
+    card = store.commit(None, 0, "card", [1, 2, 3], st(), lg, 10, arena)
+    assert card.pinned and card.n_chunks == 10 and len(card.pages) == 1 and arena.owner == card.id
+    # a conversation continues the card: forks from it (the card branch is never extended)
+    _fill(arena, 300, 2.0)
+    conv = store.commit(card, 10, "prompt", [1, 2, 3, 4, 5], st(), lg, 300, arena)
+    assert conv is not card and conv.n_chunks == 300 and len(conv.pages) == 2 and card.n_chunks == 10
+    assert store.peek([1, 2, 3, 4, 5, 6]).n_ids == 5 and store.peek([1, 2, 3]).anchor.kind == "card"
+    assert store.peek([1, 2]) is None and store.peek([7, 7, 7, 7]) is None
+    # the reply extends the conversation in place: rows appended, same branch
+    _fill(arena, 400, 3.0)
+    reply = store.commit(conv, 300, "reply", [1, 2, 3, 4, 5, 9], st(), lg, 400, arena)
+    assert reply is conv and conv.n_chunks == 400 and [a.kind for a in conv.anchors] == ["prompt", "reply"]
+    # a regenerate: the prompt anchor is an exact hit, refreshed in place, nothing copied
+    hit = store.lookup([1, 2, 3, 4, 5])
+    assert hit.branch is conv and hit.anchor.kind == "prompt"
+    same = store.commit(conv, 300, "prompt", [1, 2, 3, 4, 5], st(), lg, 300, arena)
+    assert same is conv and len(conv.anchors) == 2
+    # ... and a different reply forks at the prompt's rows: shared full page, copied partial page
+    _fill(arena, 350, 4.0)
+    fork = store.commit(conv, 300, "reply", [1, 2, 3, 4, 5, 8], st(), lg, 350, arena)
+    assert fork is not conv and fork.n_chunks == 350 and fork.pages[0] is conv.pages[0] and fork.pages[1] is not conv.pages[1]
+    assert torch.equal(fork.pages[1][..., : 300 - PAGE, :], conv.pages[1][..., : 300 - PAGE, :])
+    assert float(fork.pages[1][0, 0, 0, 300 - PAGE, 0]) == 4.0 and float(conv.pages[1][0, 0, 0, 300 - PAGE, 0]) == 3.0
+    # hydrate: the arena is hot for the fork (it just committed) -> no rows copied; another branch -> copied
+    before = store.rows_copied_in
+    store.hydrate(fork, 350, arena)
+    assert store.rows_copied_in == before and arena.owner == fork.id
+    arena.buf.zero_()
+    arena.invalidate()
+    store.hydrate(conv, 400, arena)
+    assert store.rows_copied_in == before + 400 and float(arena.buf[0, 0, 0, 399, 0]) == 3.0 and float(arena.buf[0, 0, 0, 5, 0]) == 1.0
+    # budget: shared pages are counted once; eviction drops whole unpinned branches, never the card
+    page_bytes = conv.pages[0].numel() * conv.pages[0].element_size()
+    assert store.used_bytes() < 5 * page_bytes + 6 * state_nbytes(st()) + 6 * 16
+    store.budget = page_bytes + 4096
+    store._evict()
+    assert card in store.branches and all(b.pinned for b in store.branches)
+    assert PrefixStore(0).commit(None, 0, "card", [1], st(), lg, 1, arena) is None
+    assert store.report()["snapshots"] == sum(len(b.anchors) for b in store.branches)
 
 
 def test_engine_reuses_the_previous_turn_and_verifies(tmp_path, monkeypatch):
@@ -94,29 +128,49 @@ def test_engine_reuses_the_previous_turn_and_verifies(tmp_path, monkeypatch):
     msgs = [{"role": "system", "content": "You are a test."}, {"role": "user", "content": "hello there"}]
     _, start1, done1 = run(msgs)
     assert start1["prefix"]["reused"] == 0 and start1["prefix"]["prefilled"] == start1["prompt_bytes"]
-    kinds = {s.kind for s in eng.prefix_cache.items}
+    kinds = {a.kind for b in eng.prefix_cache.branches for a in b.anchors}
     assert kinds == {"card", "prompt", "reply"}
+    card_branch = next(b for b in eng.prefix_cache.branches if b.pinned)
+    assert len(card_branch.anchors) == 1 and card_branch.anchors[0].kind == "card"
+    # an anchor holds the small states only: far smaller than the arena rows it would have copied before
+    anchor = max((a for b in eng.prefix_cache.branches for a in b.anchors), key=lambda a: a.n_ids)
+    assert anchor.nbytes < 0.05 * eng.arena.nbytes() + 64 * 1024
 
     msgs2 = msgs + [{"role": "assistant", "content": done1["text"]}, {"role": "user", "content": "and again"}]
+    copied = eng.prefix_cache.rows_copied_in
     evs2, start2, done2 = run(msgs2, context={"verify_prefix": True})
-    assert start2["prefix"]["reused"] >= start1["prompt_bytes"]  # at least the whole first prompt came from the cache
+    assert start2["prefix"]["reused"] >= start1["prompt_bytes"]  # at least the whole first prompt came from the store
     assert start2["prefix"]["prefilled"] == start2["prompt_bytes"] - start2["prefix"]["reused"]
+    assert eng.prefix_cache.rows_copied_in == copied  # the arena was hot: nothing hydrated
     check = next(e["prefix_check"] for e in evs2 if e["type"] == "diagnostics" and "prefix_check" in e)
     assert check["boundary_flips"] == 0 and check["chunks_cold"] == check["chunks_warm"]
     assert check["max_logit_diff"] < 1e-3
 
-    # a regenerate finds the prompt snapshot itself: nothing to read
+    # a regenerate finds the prompt anchor itself: nothing to read
     _, start3, done3 = run(msgs2)
     assert start3["prefix"]["reused"] == start3["prompt_bytes"] and start3["prefix"]["prefilled"] == 0
     assert done3["text"] == done2["text"]  # greedy, so the warm and the re-warm replies agree
 
-    # a different conversation falls back to the shared card snapshot
+    # a different conversation falls back to the shared card anchor, and hydrating it copies rows
     other = [msgs[0], {"role": "user", "content": "something else entirely"}]
     _, start4, _ = run(other)
     card_len = len(eng._card_ids(other))
     assert start4["prefix"]["reused"] == card_len
 
-    # budget 0 disables the cache without changing the output
-    eng.prefix_cache = PrefixCache(0)
+    # a swap re-warms the recent conversations: their anchors come back without any user message
+    eng.prefix_cache.clear()
+    eng.arena.invalidate()
+    assert eng.prefix_cache.peek(eng.tok.format_chat([E.ChatMessage(m["role"], m["content"]) for m in msgs2], add_generation_prompt=True)) is None
+    # (rewarm plans from the store's own records, so re-run one turn first to have a branch to plan from)
+    run(msgs2)
+    plan = eng.prefix_cache.rewarm_plan(600.0, 3)
+    assert plan and plan[0][1][-1][0] == "reply"
+    rep = eng.rewarm()
+    assert rep["branches"] >= 1
     _, start5, done5 = run(msgs2)
-    assert start5["prefix"]["reused"] == 0 and done5["text"] == done2["text"]
+    assert start5["prefix"]["reused"] == start5["prompt_bytes"] and done5["text"] == done2["text"]
+
+    # budget 0 disables the store without changing the output
+    eng.prefix_cache = PrefixStore(0)
+    _, start6, done6 = run(msgs2)
+    assert start6["prefix"]["reused"] == 0 and done6["text"] == done2["text"]

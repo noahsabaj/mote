@@ -89,6 +89,12 @@ def main():
         "replies_differ": sum(1 for r in rows if not r["same_reply"]),
         "warm_prefill_ms_mean": sum(r["warm_prefill_ms"] for r in rows) / n,
         "cold_prefill_ms_mean": sum(r["cold_prefill_ms"] or 0 for r in rows) / n,
+        # the worst turn is the availability number (a harness times out on the tail, not the mean)
+        "warm_prefill_ms_max": max(r["warm_prefill_ms"] for r in rows),
+        "cold_prefill_ms_max": max(r["cold_prefill_ms"] or 0 for r in rows),
+        "warm_turn_s_max": max(r["warm_turn_s"] for r in rows),
+        "worst_turn": max(rows, key=lambda r: r["warm_prefill_ms"])["turn"],
+        "rows_copied_in": warm.prefix_cache.rows_copied_in,  # arena rows hydrated from CPU pages (0 = every turn was hot)
         "device": args.device, "checkpoint": args.checkpoint,
     }
     print(json.dumps(summary, indent=1))

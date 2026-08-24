@@ -33,33 +33,42 @@ meter in the studio, `mote.eval.needle_probe`), and how long the window is and w
 * **Probe**: needle-in-chat — a fact stated in turn 1, asked after 2 / 4 / 8 KB of filler turns;
   answer rate with folding vs plain truncation, on the 35M. Numbers, not claims.
 
-## Studio: the prefix cache
+## Studio: the prefix store
 
-Settled 2026-08-23 (grilling, after CacheRoute 2608.19677 made the point at fleet scale): the engine
-used to re-read the whole conversation every turn — on the Windows studio (served on the CPU while
-training holds the GPU; reference Mamba-3 and Relation paths) that was 0.35 s at 50 B, 1.3 s at 900 B
-and 3.5 s at 1800 B before the first byte, superlinear because the Relation reference is O(S²). The router is causal, so an identical byte
-prefix gives identical chunks and an identical state: `mote/serve/prefix_cache.py` keeps snapshots
-of the inference state and `Engine._prefill_with_cache` reads only the bytes after the longest one.
+Settled 2026-08-23 (grilling, after CacheRoute 2608.19677 made the point at fleet scale) and rebuilt
+at the root 2026-08-24 (after FreeToken 2608.16157; docs/shape.md § "Serving root"): the engine used
+to re-read the whole conversation every turn — on the Windows studio that was 0.35 s at 50 B, 1.3 s
+at 900 B and 3.5 s at 1800 B before the first byte. The router is causal, so an identical byte prefix
+gives identical chunks and an identical state: `mote/serve/prefix_cache.py` keeps what it takes to
+continue, and `Engine._read_prompt` reads only the bytes after the longest anchor.
 
-* **Snapshots**: `card` — after the identity card, shared by every conversation (a cold start reads the
-  card on its own first); `prompt` — the end of a turn's prompt (a regenerate reads nothing);
-  `reply` — the end of the reply, where the next turn starts. A stopped reply whose transcript lacks
-  the streamer's pending UTF-8 bytes simply matches the `prompt` snapshot instead.
-* **Storage**: CPU memory (pinned when the model is on CUDA), most-recently-used first, under a byte
-  budget — `MOTE_PREFIX_CACHE_MB`, default 1024, 0 disables. ~10 MB a snapshot on the 35M at 2048,
-  ~100–190 MB on the flagship at 16384. Nothing stays on the GPU between turns, since training shares it.
-  Cleared with the engine on a checkpoint swap.
-* **Reporting**: the `start` event carries `prefix: {reused, prefilled, prefill_ms, snapshots, …}`; the
-  stats line under a reply says "N B reused"; the composer meter says "N already read"; `/api/context`
-  reports `reusable`. **Verify cache** (sampling panel) re-reads each prompt cold after the warm
-  continuation and reports moved cuts and the largest next-byte logit difference (`prefix_check` on a
-  diagnostics event) — it doubles the read time, so it is a debug toggle, off by default.
-* **Measured**: `python -m mote.eval.prefix_probe` — a 40-turn greedy conversation on the 35M,
-  warm vs cold per turn (`docs/results/2026-08-23-prefix-cache.md`).
-* **Fedora follow-up**: the upstream Mamba-3 kernel accepts `Input_States`
-  (`mamba3_siso_combined.py`), but the wrapper gates the kernel on `initial_states is None`, so a warm
-  continuation runs the reference path there too; wire the states through with a GPU exactness test.
+* **Two kinds of state**: the Relation per-chunk cache (the only thing that grows with the context)
+  lives in the device **arena** and is paged to the CPU per **branch** (one per linear conversation;
+  256-chunk pages, full pages shared when a regenerate or an edit forks a branch). Everything else —
+  Mamba-3 encoder/decoder, routing and dechunk states, the next-byte logits — is an **anchor**
+  (~3 MB on the flagship, against ~108 MB for the full snapshots of the first version).
+* **Anchors**: `card` — after the identity card, shared by every conversation, pinned (a cold start
+  reads the card on its own first); `prompt` — the end of a turn's prompt (a regenerate reads
+  nothing); `reply` — the end of the reply, where the next turn starts. Tool-result boundaries are
+  reserved for search. A stopped reply's transcript is exactly what the engine consumed (the graph
+  path drains whole batches), so its `reply` anchor is exact.
+* **Hot arena**: the arena's contents stay valid between turns of the same conversation — a
+  continue copies nothing, a switch copies the other branch's pages up once. Gated on the flagship
+  memory measurement; the fallback flushes between turns.
+* **Storage**: CPU memory (pinned when the model is on CUDA) under a byte budget over unique pages +
+  anchors — `MOTE_PREFIX_CACHE_MB`, default 1024, 0 disables — eviction drops whole least-recently-used
+  branches. Cleared on every weight swap, then `Engine.rewarm()` re-reads the conversations used in
+  the last 10 minutes so the next message is warm.
+* **Reporting**: the `start` event carries `prefix: {reused, prefilled, prefill_ms, snapshots, branches,
+  …}`; the stats line under a reply says "N B reused"; the composer meter says "N already read";
+  `/api/context` reports `reusable`; `/api/model.arena` shows the hot branch. **Verify cache**
+  (sampling panel) re-reads each prompt cold in a private arena and reports moved cuts and the largest
+  next-byte logit difference (`prefix_check` on a diagnostics event) — a debug toggle, off by default.
+* **Measured**: `python -m mote.eval.prefix_probe` — 40 greedy turns on the 35M, warm vs cold per
+  turn, mean and worst turn (`docs/results/2026-08-24-serving-root.md`; the first version's numbers are
+  in `docs/results/2026-08-23-prefix-cache.md`).
+* Input_States: wired 2026-08-24 (the Mamba-3 kernel now takes the cached states on a warm
+  continuation; `tests/test_mamba3_states.py`).
 
 ## Flagship: the window
 

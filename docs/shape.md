@@ -75,30 +75,45 @@ no window kernel gets built); head off; EMA 0.999; batch 1 x accum 4 @ 16384; fu
 Launch gated on the pre-launch queue (JEPA round 1+2, attention ablation, seed-noise calibration)
 and Noah's word.
 
-## CUDA graphs for serving decode (grilled 2026-08-24; spike done, build after flagship launch)
+## Serving root (grilled and signed 2026-08-24, BUILT the same day; results in docs/results/2026-08-24-serving-root.md)
 
-Decode is host-launch-bound: every byte is ~50–100 tiny kernel launches driven from Python, and the
-GPU idles between them. The settled design:
+Reading FreeToken (2608.16157, edge MoE serving) settled two things at once. The transferable part of
+that paper is (a) checkpoints of recurrent state at the semantic boundaries where a harness edits
+context, kept apart from the append-only per-position cache, and (b) every routing-dependent decision
+living on the device as data inside a captured graph. Applied to Mote:
 
-- **Scope**: flagship plain steps only. The 35M's speculative rounds (`forward_from_state`,
-  variable draft length) stay eager — that path needs the MBP head, which the flagship doesn't have.
-- **Branch**: two captured graphs — boundary step (runs the main network + dechunk) and non-boundary
-  step — selected per byte by the router bit on the host. That bit is synced today anyway; one
-  sync/byte is the floor regardless (the byte must reach the host to stream text and check STOP).
-- **Sampling stays on the host**: the graph writes logits into a static output buffer; `multinomial`
-  over the 259-vocab runs eager, so temperature/top_p never get baked into a capture.
-- **Cache arena**: RESOLVED 2026-08-24 — the window lost, so the arena is the full-context preallocation (~3200 chunks, order 100-300 MB). Original fork: Window adopted → the Relation decode cache is a fixed
-  128-chunk ring, static for free. Full attention → preallocate the full-context arena (~3200 chunks,
-  order 100–300 MB). Either way the engine copies incoming prefix-cache states into the static arena
-  at reply start, and the build-time surgery is making `step()` write states **in place** (today each
-  step returns fresh tensors, which breaks graph replay addresses).
-- **Recapture policy**: in-place EMA weight sync needs none (graphs read current memory); a model
-  rebuild on cfg change recaptures.
-- **Spike result (2026-08-24)**: capture + replay verified under `expandable_segments:True` on torch
-  2.13 beside the live trainer — the one environment risk is clear. A 3-op toy step replays 1.8×
-  faster; the real step should gain more (launch overhead dominates it far harder).
-- **Why after launch**: serving has no pain (12–45 ms warm vs the ~1 s contract) and the freeze/launch
-  is the critical path; the build happens on the serving margin during the 7-day pretrain.
+- **Arena** (`mote/model/arena.py`): the Relation {P2, I~} per-chunk cache — the only state that grows
+  with the context — is one static `[layers, 2, H, capacity, dh]` tensor. Prefill and continuation
+  write rows `[n, n+T)` in place and read views; `flash_relation` takes the head stride so no copy is
+  made. Capacity defaults to max_seq_len/4 rows (147 MB on the flagship) and grows ×2 on demand.
+- **Store** (`mote/serve/prefix_cache.py`): branches (one per linear history) own arena rows as CPU
+  pages of 256 chunks — full pages are immutable and shared when a regenerate or an edit forks a
+  branch — plus anchors of everything else (Mamba-3/routing/dechunk states, logits: ~3 MB on the
+  flagship instead of the ~108 MB a full snapshot cost). Anchors at card / prompt end / reply end;
+  tool-result boundaries are reserved for search. The card anchor is pinned; eviction drops whole
+  LRU branches. **The arena stays hot** between turns of the same conversation (zero copies on
+  continue; one copy up on a switch) — gated on the flagship memory measurement, fallback flag flushes.
+- **One CUDA graph per byte** (`mote/serve/graph.py`): rand (parent) → IF ¬done: nucleus sample by
+  inverse CDF on the device → IF ¬done: encoder → router → **IF boundary** (a conditional node keyed on
+  the device router bit, `CUDAGraph.begin_capture_to_if_node`, torch 2.13) → main over the arena at a
+  static bucket width, masked past S → dechunk → decoder → head. `done |= stop id | max_bytes` freezes
+  the step exactly; the host drains rings every K=8 replays (one sync per 8 bytes). Graph mode is for
+  models without a multi-byte head (the flagship); the 35M's speculative rounds stay eager.
+  Spike facts: RNG ops are refused inside a conditional body (hence u in the parent); 0-d tensor
+  indexing `.item()`s (hence scatter/index_copy); the first-capture warm-up must restore every
+  buffer it touches and may only write arena rows ≥ n.
+- **Swap + re-warm**: every EMA sync still drops all anchors (states depend on the weights) and then
+  `Engine.rewarm()` re-reads the conversations used in the last 10 min (≤3), so the next message is
+  warm; ~one prefill per branch per swap.
+- **Measured (35M, CPU, 40 turns)**: 92.5 % reuse, 0 moved cuts, 0/40 replies differ, warm 63 ms mean
+  / 531 ms worst (a fold) vs 921 ms cold; 3 arena rows hydrated in 40 turns. Per-byte flagship timing
+  and the memory gate wait for an idle GPU (the pre-launch arms hold it).
+- **Deferred, explicitly**: `/v1/chat/completions` fold stickiness (still reuses only the card after
+  the window fills); batched multi-stream decode for concurrent agents.
+- Superseded here: the 2026-08-24 morning plan of two host-picked graphs with host sampling. The
+  toy spike had measured 10.8/23.5 µs per replay for one graph + IF node against 1.4 ms/byte for two
+  host-picked graphs while a trainer shared the GPU (under the daemon's gate the trainer is paused,
+  so the uncontended gap is one sync per byte).
 
 ## Questions the numbers decide (deferred, in dependency order)
 

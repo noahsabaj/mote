@@ -39,10 +39,18 @@ STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "tok
 
 
 def _serve_sync(cfg_dict: dict, state_dict, name: str, step: int) -> None:
-    """A running job's EMA becomes the served weights (called under the GPU gate)."""
+    """A running job's EMA becomes the served weights (called under the GPU gate). The swap drops every
+    anchor (they were computed under the old weights), so the recent conversations are re-read right
+    away — the next message finds them warm (decided 2026-08-24)."""
     e = STATE["engine"]
     if e is not None and not STATE["swapping"]:
         e.apply_run_weights(cfg_dict, state_dict, name, step)
+        try:
+            rep = e.rewarm()
+            if rep["branches"]:
+                print(f"swap {name}@{step}: re-warmed {rep['branches']} conversation(s), {rep['bytes']} B in {rep['ms']:.0f} ms", flush=True)
+        except Exception as ex:  # a cold next turn is the only cost
+            print(f"rewarm after swap failed: {ex!r}", flush=True)
 
 
 def _job_finished(rec) -> None:

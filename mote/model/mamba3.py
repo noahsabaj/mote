@@ -124,6 +124,9 @@ class Mamba3Mixer(nn.Module):
         self.D._no_weight_decay = True
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False, **fk)
         self.telemetry: Optional[dict] = None  # set to a dict by the serving engine to collect live values
+        # Decode-graph telemetry: {"retention": [H], "trapezoid": [H]} device buffers the step writes with
+        # copy_ instead of .tolist() — nothing may synchronise inside a CUDA-graph capture (serve/graph.py).
+        self.telemetry_dev: Optional[dict] = None
 
     # ------------------------------------------------------------------------------
     def _preprocess(self, u: torch.Tensor):
@@ -274,7 +277,10 @@ class Mamba3Mixer(nn.Module):
         k_rot = _rotary_pairs(k, cos, sin)
 
         alpha = torch.exp(adt)
-        if self.telemetry is not None:
+        if self.telemetry_dev is not None:
+            self.telemetry_dev["retention"].copy_(alpha[0])
+            self.telemetry_dev["trapezoid"].copy_(tr[0])
+        elif self.telemetry is not None:
             self.telemetry["retention"] = alpha[0].tolist()  # per-head exp(A·Δt) for this byte
             self.telemetry["trapezoid"] = tr[0].tolist()
         beta = (1 - tr) * dt * alpha

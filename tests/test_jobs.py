@@ -130,12 +130,13 @@ def test_ema_math_and_engine_hot_swap(tmp_path):
     run.mkdir(parents=True)
     torch.save({"model": model.state_dict(), "step": 1, "config": cfg.to_dict(), "extra": {}}, run / "last.pt")
     eng = Engine(run / "last.pt", device="cpu")
-    eng.prefix_cache.put("card", [1, 2, 3], [torch.zeros(8)], torch.zeros(4), 1)
+    eng.prefix_cache.commit(None, 0, "card", [1, 2, 3], [torch.zeros(8)], torch.zeros(4), 1, eng.arena)
+    assert len(eng.prefix_cache.branches) == 1 and eng.arena.owner is not None
     torch.manual_seed(1)
     other = HNetForCausalLM(cfg)
     eng.apply_run_weights(cfg.to_dict(), other.state_dict(), "runX/ema", 42)
     assert eng.serving_live == "runX/ema@42" and eng.info()["live"] == "runX/ema@42"
-    assert len(eng.prefix_cache.items) == 0
+    assert len(eng.prefix_cache.branches) == 0 and eng.arena.owner is None  # states under old weights are gone
     p_eng = dict(eng.model.named_parameters())
     p_oth = dict(other.named_parameters())
     k = next(iter(p_oth))

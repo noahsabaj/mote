@@ -1,21 +1,38 @@
-"""Prefix-state cache for the serving engine (decided 2026-08-23, docs/context.md).
+"""Prefix store for the serving engine (root design 2026-08-24, docs/context.md; v1 was 2026-08-23).
 
-Snapshots of the model's inference state after byte sequences it has already read, kept in CPU memory
-under a byte budget. A new prompt reuses the longest snapshot whose consumed bytes are a prefix of the
-prompt, and only the remainder is read (`HNetForCausalLM.forward_from_state`). Three kinds of snapshot:
-``card`` (after the identity card — shared by every conversation), ``prompt`` (end of a turn's prompt)
-and ``reply`` (end of the generated reply). Keyed by bytes only: the router is causal, so an identical
-byte prefix gives identical chunks and an identical state, up to float rounding (the studio's
-"verify prefix cache" toggle measures that rounding; see Engine._verify_prefix).
+What survives between turns is split in two, the way FreeToken (2608.16157) splits KV pages from
+recurrent-state checkpoints:
+
+* **Branches** — one per linear conversation history. A branch owns the bytes it has read and the
+  Relation arena rows for them, stored on the CPU in pages of `PAGE` chunks. Full pages are immutable
+  and may be shared between branches (a regenerate or an edit forks a branch: it inherits the full
+  pages up to the fork point by reference and copies only the partial page).
+* **Anchors** — checkpoints of everything that is *not* the arena (Mamba-3 encoder/decoder states,
+  routing, dechunk, the next-byte logits, the multi-byte bookkeeping) at semantic positions: after the
+  identity card (`card`, shared by every conversation, never evicted), at the end of a turn's prompt
+  (`prompt`, a regenerate reads nothing) and at the end of the reply (`reply`, where the next turn
+  starts). ~3 MB each on the flagship instead of the ~108 MB a full snapshot cost.
+
+A new prompt restores the longest anchor whose bytes are a prefix of it, hydrates the arena from the
+branch's pages unless the arena already holds that branch (the hot case — zero copies), and reads only
+the remainder. Budget: `MOTE_PREFIX_CACHE_MB` over unique pages + anchors; eviction drops whole
+least-recently-used branches. Keyed by bytes only: the router is causal, so an identical byte prefix
+gives identical chunks and an identical state up to float rounding (Engine._verify_prefix measures it).
 """
 
 from __future__ import annotations
 
+import itertools
+import time
 from array import array
-from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
+
+from ..model.arena import RelationArena
+
+PAGE = 256  # chunks per CPU page (~9 MB on the flagship)
 
 
 def _pack(ids: Sequence[int]) -> bytes:
@@ -33,68 +50,206 @@ def state_nbytes(o: Any) -> int:
 
 
 @dataclass
-class Snapshot:
-    kind: str                 # card | prompt | reply
-    ids: bytes                # the consumed byte ids (packed)
-    n_ids: int
-    state: Any                # InferenceState on the CPU
+class Anchor:
+    kind: str                 # card | prompt | reply | tool
+    n_ids: int                # prefix length (in ids) of the branch's bytes this anchor sits at
+    n_chunks: int             # arena rows written up to here
+    state: Any                # InferenceState on the CPU (arena rows excluded — they live in the pages)
     logits: torch.Tensor      # [V] next-byte logits after the last consumed byte (CPU)
-    n_chunks: int             # chunks closed so far (engine bookkeeping)
     nbytes: int
+    created: float = field(default_factory=time.time)
 
 
-class PrefixCache:
-    """Most-recently-used first; evicts from the tail once the byte budget is exceeded. budget 0 disables."""
+class Branch:
+    _ids = itertools.count(1)
 
-    def __init__(self, budget_bytes: int = 1 << 30):
+    def __init__(self, pinned: bool = False):
+        self.id = next(Branch._ids)
+        self.ids: bytes = b""          # packed ids of everything stored on this branch
+        self.pages: List[torch.Tensor] = []
+        self.n_chunks = 0
+        self.anchors: List[Anchor] = []  # sorted by n_ids
+        self.pinned = pinned           # the card: never evicted, never extended (conversations fork from it)
+        self.last_used = time.time()
+
+    @property
+    def n_ids(self) -> int:
+        return len(self.ids) // 2
+
+    def anchor_at(self, n_ids: int) -> Optional[Anchor]:
+        return next((a for a in self.anchors if a.n_ids == n_ids), None)
+
+
+@dataclass
+class Hit:
+    branch: Branch
+    anchor: Anchor
+
+    @property
+    def n_ids(self) -> int:
+        return self.anchor.n_ids
+
+
+class PrefixStore:
+    """Branches + anchors under a byte budget. budget 0 disables everything (lookups miss, commits no-op)."""
+
+    def __init__(self, budget_bytes: int = 1 << 30, pin: bool = False):
         self.budget = max(int(budget_bytes), 0)
-        self.items: List[Snapshot] = []
-        self.used = 0
+        self.pin = pin
+        self.branches: List[Branch] = []
         self.hits = 0
         self.misses = 0
+        self.rows_copied_in = 0   # arena rows hydrated from pages (0 on a hot continue — a test counts them)
+        self.rows_copied_out = 0
 
-    def peek(self, ids: Sequence[int]) -> Optional[Snapshot]:
-        """The longest snapshot whose bytes are a prefix of `ids` (no bookkeeping)."""
+    # ---- lookup -----------------------------------------------------------------------
+    def peek(self, ids: Sequence[int]) -> Optional[Hit]:
+        """The longest anchor whose bytes are a prefix of `ids` (no bookkeeping)."""
+        if not self.budget:
+            return None
         key = _pack(ids)
-        best = None
-        for s in self.items:
-            if s.n_ids <= len(ids) and key.startswith(s.ids) and (best is None or s.n_ids > best.n_ids):
-                best = s
+        best: Optional[Hit] = None
+        for b in self.branches:
+            if b.n_ids == 0:
+                continue
+            for a in b.anchors:
+                if a.n_ids <= len(ids) and key.startswith(b.ids[: 2 * a.n_ids]):
+                    if best is None or a.n_ids > best.n_ids or (a.n_ids == best.n_ids and b.last_used > best.branch.last_used):
+                        best = Hit(b, a)
         return best
 
-    def lookup(self, ids: Sequence[int]) -> Optional[Snapshot]:
-        best = self.peek(ids)
-        if best is None:
-            self.misses += 1
+    def lookup(self, ids: Sequence[int]) -> Optional[Hit]:
+        hit = self.peek(ids)
+        if hit is None:
+            if self.budget:
+                self.misses += 1
             return None
         self.hits += 1
-        self.items.remove(best)
-        self.items.insert(0, best)
-        return best
+        hit.branch.last_used = time.time()
+        return hit
 
-    def put(self, kind: str, ids: Sequence[int], state: Any, logits: torch.Tensor, n_chunks: int) -> Optional[Snapshot]:
-        if self.budget == 0:
+    # ---- arena <-> pages ----------------------------------------------------------------
+    def _new_page(self, arena: RelationArena) -> torch.Tensor:
+        shape = (arena.n_layers, 2, arena.n_heads, PAGE, arena.d_head)
+        return torch.empty(shape, dtype=arena.dtype, device="cpu", pin_memory=self.pin and arena.device.type == "cuda")
+
+    def _store_rows(self, b: Branch, arena: RelationArena, c0: int, c1: int) -> None:
+        """Copy arena rows [c0, c1) into the branch's pages (c0 == b.n_chunks: append)."""
+        assert c0 == b.n_chunks, (c0, b.n_chunks)
+        c = c0
+        while c < c1:
+            pi, off = divmod(c, PAGE)
+            if pi == len(b.pages):
+                b.pages.append(self._new_page(arena))
+            take = min(PAGE - off, c1 - c)
+            b.pages[pi][:, :, :, off : off + take].copy_(arena.rows(c, c + take))
+            c += take
+        b.n_chunks = c1
+        self.rows_copied_out += max(c1 - c0, 0)
+
+    def hydrate(self, b: Branch, n_chunks: int, arena: RelationArena) -> None:
+        """Make arena rows [0, n_chunks) hold this branch's chunks. Free when the arena is already hot."""
+        assert n_chunks <= b.n_chunks, (n_chunks, b.n_chunks)
+        if arena.owner == b.id and arena.n_valid >= n_chunks:
+            arena.n_valid = n_chunks
+            return
+        arena.ensure(n_chunks)
+        c = 0
+        while c < n_chunks:
+            pi, off = divmod(c, PAGE)
+            take = min(PAGE - off, n_chunks - c)
+            arena.rows(c, c + take).copy_(b.pages[pi][:, :, :, off : off + take])
+            c += take
+        arena.owner, arena.n_valid = b.id, n_chunks
+        self.rows_copied_in += n_chunks
+
+    def _fork(self, parent: Branch, at_chunks: int, arena: RelationArena) -> Branch:
+        """A new branch sharing the parent's full pages below `at_chunks`; the partial page is copied."""
+        nb = Branch()
+        full, rem = divmod(at_chunks, PAGE)
+        nb.pages = list(parent.pages[:full])
+        if rem:
+            nb.pages.append(parent.pages[full].clone())
+        nb.n_chunks = at_chunks
+        return nb
+
+    # ---- commit --------------------------------------------------------------------------
+    def commit(self, branch: Optional[Branch], from_chunks: int, kind: str, ids: Sequence[int],
+               state_cpu: Any, logits: torch.Tensor, n_chunks: int, arena: RelationArena) -> Optional[Branch]:
+        """Record an anchor after reading `ids` (state_cpu = the CPU copy of everything but the arena).
+        `branch` is where the read started (None = cold), `from_chunks` the arena rows that were valid
+        for it at that point. Extends the branch when `ids` continues it, forks when they diverge (or
+        the branch is pinned), refreshes the anchor when `ids` is already stored. Returns the branch
+        the anchor lives on (None when the store is disabled)."""
+        if not self.budget:
             return None
         key = _pack(ids)
-        for s in [s for s in self.items if s.ids == key]:
-            self._drop(s)  # same bytes: the newer snapshot replaces the older one
-        snap = Snapshot(kind, key, len(ids), state, logits, n_chunks, state_nbytes(state) + logits.numel() * logits.element_size())
-        if snap.nbytes > self.budget:
-            return None
-        self.items.insert(0, snap)
-        self.used += snap.nbytes
-        while self.used > self.budget and len(self.items) > 1:
-            self._drop(self.items[-1])
-        return snap
+        n_ids = len(ids)
+        if branch is None:
+            target = Branch(pinned=(kind == "card"))
+            self.branches.insert(0, target)
+            self._store_rows(target, arena, 0, n_chunks)
+            target.ids = key
+        elif branch.ids.startswith(key) and not branch.pinned:
+            target = branch  # already stored: refresh the anchor only
+        elif key.startswith(branch.ids) and not branch.pinned:
+            target = branch
+            if n_chunks > target.n_chunks:
+                self._store_rows(target, arena, target.n_chunks, n_chunks)
+            target.ids = key
+        else:
+            target = self._fork(branch, from_chunks, arena)
+            self.branches.insert(0, target)
+            self._store_rows(target, arena, from_chunks, n_chunks)
+            target.ids = key
+        old = target.anchor_at(n_ids)
+        if old is not None:
+            target.anchors.remove(old)
+        anc = Anchor(kind, n_ids, n_chunks, state_cpu, logits, state_nbytes(state_cpu) + logits.numel() * logits.element_size())
+        target.anchors.append(anc)
+        target.anchors.sort(key=lambda a: a.n_ids)
+        target.last_used = time.time()
+        arena.owner, arena.n_valid = target.id, n_chunks
+        self._evict()
+        return target
 
-    def _drop(self, s: Snapshot) -> None:
-        self.items.remove(s)
-        self.used -= s.nbytes
+    # ---- budget ----------------------------------------------------------------------------
+    def used_bytes(self) -> int:
+        seen: Dict[int, int] = {}
+        anchors = 0
+        for b in self.branches:
+            for p in b.pages:
+                seen[id(p)] = p.numel() * p.element_size()
+            anchors += sum(a.nbytes for a in b.anchors)
+        return sum(seen.values()) + anchors
+
+    def _evict(self) -> None:
+        while self.used_bytes() > self.budget:
+            victims = [b for b in self.branches if not b.pinned]
+            if not victims:
+                break
+            oldest = min(victims, key=lambda b: b.last_used)
+            self.branches.remove(oldest)
 
     def clear(self) -> None:
-        self.items.clear()
-        self.used = 0
+        self.branches.clear()
+
+    # ---- swap re-warm ---------------------------------------------------------------------
+    def rewarm_plan(self, max_age_s: float, max_branches: int) -> List[Tuple[List[int], List[Tuple[str, int]]]]:
+        """Which conversations to re-read after a weight swap: (ids, [(kind, n_ids), ...]) for the
+        branches used within `max_age_s`, most recent first, the card excluded (it is re-read anyway)."""
+        now = time.time()
+        recent = sorted((b for b in self.branches if not b.pinned and now - b.last_used <= max_age_s),
+                        key=lambda b: -b.last_used)[:max_branches]
+        out = []
+        for b in recent:
+            ids = list(array("H", b.ids))
+            out.append((ids, [(a.kind, a.n_ids) for a in b.anchors]))
+        return out
 
     def report(self) -> dict:
-        return {"snapshots": len(self.items), "cache_bytes": self.used, "cache_budget": self.budget,
-                "hits": self.hits, "misses": self.misses}
+        return {
+            "snapshots": sum(len(b.anchors) for b in self.branches), "branches": len(self.branches),
+            "cache_bytes": self.used_bytes(), "cache_budget": self.budget,
+            "hits": self.hits, "misses": self.misses,
+        }

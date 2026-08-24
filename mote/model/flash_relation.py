@@ -53,13 +53,14 @@ if HAS_TRITON:
     @triton.jit
     def _fwd_kernel(
         P1, P2, I, Y, IBAR, LSE, G, LAM,
-        TQ, TK, q_start, sm_scale, tau_inv,
+        TQ, TK, sk, q_start, sm_scale, tau_inv,
         D: tl.constexpr, BLOCK_D: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, IEEE: tl.constexpr,
     ):
+        # sk = row stride between heads of P2/I (TK*D when contiguous; the arena's capacity*D for a
+        # prefix view of the decode arena, so no copy is made to read the cached chunks)
         pid_m = tl.program_id(0)
         pid_bh = tl.program_id(1)
         sq = TQ * D
-        sk = TK * D
         offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         offs_d = tl.arange(0, BLOCK_D)
         mmask = offs_m < TQ
@@ -220,7 +221,20 @@ class _FlashRelationFn(torch.autograd.Function):
         B, H, TQ, D = p1.shape
         TK = p2.shape[2]
         assert TK == q_start + TQ, "keys must cover exactly the cached prefix plus the new positions"
-        p1, p2, info = p1.contiguous(), p2.contiguous(), info.contiguous()
+        p1 = p1.contiguous()
+        # Inference reads P2/I straight out of the decode arena (a [1,H,capacity,D] buffer sliced to TK
+        # rows): rows are contiguous, heads are `capacity*D` apart. Pass that stride instead of copying.
+        # Training (grad enabled) keeps the contiguous layout the backward kernels write into.
+        strided_ok = (
+            not torch.is_grad_enabled() and B == 1
+            and p2.stride(3) == 1 and p2.stride(2) == D and info.stride(3) == 1 and info.stride(2) == D
+            and p2.stride(1) == info.stride(1) and p2.stride(1) >= TK * D
+        )
+        if strided_ok:
+            sk = p2.stride(1)
+        else:
+            p2, info = p2.contiguous(), info.contiguous()
+            sk = TK * D
         lam32 = lam.detach().to(torch.float32).reshape(1).contiguous()
         y = torch.empty_like(p1, dtype=info.dtype)
         ibar = torch.empty(B, H, TQ, D, device=p1.device, dtype=torch.float32)
@@ -232,7 +246,7 @@ class _FlashRelationFn(torch.autograd.Function):
         grid = (triton.cdiv(TQ, bm), B * H)
         _fwd_kernel[grid](
             p1, p2, info, y, ibar, lse, g, lam32,
-            TQ, TK, q_start, 1.0 / math.sqrt(D), 1.0 / tau_s,
+            TQ, TK, sk, q_start, 1.0 / math.sqrt(D), 1.0 / tau_s,
             D=D, BLOCK_D=bd, BLOCK_M=bm, BLOCK_N=bm, IEEE=ieee,
             num_warps=4, num_stages=2,
         )
