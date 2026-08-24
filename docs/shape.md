@@ -193,6 +193,31 @@ Newton–Schulz step (`torch.optim.Muon` is the same math as ours with no batchi
 as a 30-min arm pair (`--tf32` vs a fresh control) before launch, adopted only within noise. fp8, the
 CuTeDSL/CUTLASS Inductor backends and Gluon are 1B / H100-only material.
 
+## Daemon: serving beside training (grilled and signed 2026-08-24 evening)
+
+Today the studio's GPU gate is one lock: a reply holds it for its whole duration and training takes it
+per accumulation slice (~0.35 s at the flagship), so a chat pauses the run for the length of the reply
+and a request waits up to one slice. Signed replacement: **decode runs on its own high-priority CUDA
+stream concurrently with the training slice** — a decode kernel waits only for training thread-blocks to
+retire, training loses ~nothing. The gate survives only for model construction, EMA swaps, checkpoint
+loads, arena growth and rewarm, each a short hold at a slice boundary with the serving stream drained.
+Serving allocations (arena, anchors, decode graphs) live in their own `torch.cuda.MemPool` so training's
+churn cannot fragment them; the service unit sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+The decode graph's conditional nodes move to `torch.cond` capture (torch 2.12) if the per-byte replay time
+holds. Gates: reply equality with today's path; under a running training slice, first byte < 1 s (the
+existing contract) and p95 per-byte decode ≤ 2× idle; trainer + serving peak ≤ 7.2 GB on the flagship
+preset (8.2 GB − the desktop's 0.7 − margin), measured in an idle window. Lands before launch if it passes,
+else at the first swap restart (a daemon restart; the trunk auto-resumes). A green-context SM partition
+(`torch.cuda.GreenContext`, works on cu126, even SM counts on Ada, no forward-progress guarantee) stays a
+measured later option (`--serve-sms k`) — hard isolation at a permanent k/34 training cost.
+
+Also settled the same evening: **fp8** linears parked until the 1B (`_scaled_mm` runs on the 4060 Ti;
+tensorwise e4m3 = 3.8 % relative GEMM error; GEMMs are 13–22 % of the step at d = 768/512, where torchao's
+own guidance says the cast overhead can make it a loss — the six-shape measurement lives in
+docs/results); **`F.rms_norm`**'s fused kernel replaces mamba_ssm's norm if the bench wins, under the
+kernel gate; CuTeDSL / CUTLASS Inductor backends and Gluon are H100-only one-flag experiments once the
+compile workstream runs there.
+
 ## Serving root (grilled and signed 2026-08-24, BUILT the same day; results in docs/results/2026-08-24-serving-root.md)
 
 Reading FreeToken (2608.16157, edge MoE serving) settled two things at once. The transferable part of
