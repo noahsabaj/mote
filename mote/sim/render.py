@@ -105,7 +105,7 @@ def _ev_en(e, kin_names=None) -> str:
         out = []
         for p, st in d["start"].items():
             goods = ", ".join(en_n(n, g) for g, n in st["goods"].items())
-            out.append(f"{_cap(p)} starts with {goods} and {st['coins']} coins.")
+            out.append(f"{_cap(p)} started with {goods} and {st['coins']} coins.")
         return " ".join(out)
     if k == "move":
         return f"{_cap(d['who'])} went to {EN['rooms'][d['to']]}."
@@ -120,11 +120,12 @@ def _ev_en(e, kin_names=None) -> str:
         return f"{_cap(d['buyer'])} bought {en_n(d['n'], d['goods'])} from {_cap(d['seller'])} for {coins}."
     if k == "harvest":
         n, g = d['n'], d['goods']
-        return f"{_cap(d['who'])} gathered {n} more {EN_GOODS_ONE[g] if n == 1 else EN['goods'][g]}."
+        verb = ("gathered", "found", "picked up")[d.get("v", 0)]
+        return f"{_cap(d['who'])} {verb} {n} more {EN_GOODS_ONE[g] if n == 1 else EN['goods'][g]}."
     if k == "booked":
         return f"{_cap(d['who'])} booked {EN['titles'][d['title']]} from {d['start_h']}:00 to {d['end_h']}:00."
     if k == "moved":
-        return f"{_cap(d['who'])} moved {EN['titles'][d['title']]} from {d['from_h']}:00 to {d['to_h']}:00."
+        return f"{_cap(d['who'])} moved {EN['titles'][d['title']]} to {d['to_h']}:00–{d['end_h']}:00."
     if k == "family":
         out = [f"{_cap(a)} and {_cap(b)} are married." for a, b in
                {tuple(sorted((x, y))) for x, y in d["spouses"].items() if y}]
@@ -160,11 +161,12 @@ def _ev_ru(e) -> str:
         return (f"{_cap(d['buyer'])} {_ru_v(('купил', 'купила'), d['buyer'])} {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)} "
                 f"у {_cap(d['seller'])} за {ru_n(d['cost'], RU_COIN_FORMS, acc=True)}.")
     if k == "harvest":
-        return f"{_cap(d['who'])} {_ru_v(('раздобыл', 'раздобыла'), d['who'])} ещё {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)}."
+        verb = (('раздобыл', 'раздобыла'), ('нашёл', 'нашла'), ('получил', 'получила'))[d.get("v", 0)]
+        return f"{_cap(d['who'])} {_ru_v(verb, d['who'])} ещё {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)}."
     if k == "booked":
-        return f"{_cap(d['who'])} {_ru_v(('назначил', 'назначила'), d['who'])} встречу «{RU_TITLES[d['title']]}» с {d['start_h']}:00 до {d['end_h']}:00."
+        return f"{_cap(d['who'])} {_ru_v(('назначил', 'назначила'), d['who'])} «{RU_TITLES[d['title']]}» с {d['start_h']}:00 до {d['end_h']}:00."
     if k == "moved":
-        return f"{_cap(d['who'])} {_ru_v(('перенёс', 'перенесла'), d['who'])} встречу «{RU_TITLES[d['title']]}» с {d['from_h']}:00 на {d['to_h']}:00."
+        return f"{_cap(d['who'])} {_ru_v(('перенёс', 'перенесла'), d['who'])} «{RU_TITLES[d['title']]}» на {d['to_h']}:00–{d['end_h']}:00."
     if k == "family":
         out = [f"{_cap(a)} и {_cap(b)} состоят в браке." for a, b in
                {tuple(sorted((x, y))) for x, y in d["spouses"].items() if y}]
@@ -199,11 +201,12 @@ def _ev_ja(e) -> str:
         c = JA_COUNTER[d['goods']]
         return f"{_cap(d['buyer'])}は{_cap(d['seller'])}から{JA['goods'][d['goods']]}を{d['n']}{c}、コイン{d['cost']}枚で買った。"
     if k == "harvest":
-        return f"{_cap(d['who'])}は{JA['goods'][d['goods']]}をさらに{d['n']}{JA_COUNTER[d['goods']]}集めた。"
+        verb = ("集めた", "見つけた", "手に入れた")[d.get("v", 0)]
+        return f"{_cap(d['who'])}は{JA['goods'][d['goods']]}をさらに{d['n']}{JA_COUNTER[d['goods']]}{verb}。"
     if k == "booked":
         return f"{_cap(d['who'])}は{d['start_h']}時から{d['end_h']}時まで{JA['titles'][d['title']]}を予定に入れた。"
     if k == "moved":
-        return f"{_cap(d['who'])}は{JA['titles'][d['title']]}を{d['from_h']}時から{d['to_h']}時に変更した。"
+        return f"{_cap(d['who'])}は{JA['titles'][d['title']]}を{d['to_h']}時〜{d['end_h']}時に変更した。"
     if k == "family":
         out = [f"{_cap(a)}と{_cap(b)}は結婚している。" for a, b in
                {tuple(sorted((x, y))) for x, y in d["spouses"].items() if y}]
@@ -229,6 +232,8 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
     if q.qtype == "where_obj_start":
         return (f"Where was {EN['objects'][a['obj']]} at the beginning?",
                 f"It was {_place_en(q.answer)}.", f"It was {_place_en(q.wrong)}.")
+    if q.qtype == "who_has_obj":
+        return (f"Who has {EN['objects'][a['obj']]} now?", f"{_cap(q.answer[1])}.", f"{_cap(q.wrong[1])}.")
     if q.qtype == "where_person":
         return (f"Where is {_cap(a['who'])} now?", f"{_cap(a['who'])} is in {EN['rooms'][q.answer[1]]}.",
                 f"{_cap(a['who'])} is in {EN['rooms'][q.wrong[1]]}.")
@@ -239,7 +244,7 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
                 there(q.answer[1]), there(q.wrong[1]))
     if q.qtype == "count_goods":
         return (f"How many {EN['goods'][a['goods']]} does {_cap(a['who'])} have now?",
-                f"{_cap(a['who'])} has {q.answer[1]}.", f"{_cap(a['who'])} has {q.wrong[1]}.")
+                f"{_cap(a['who'])} has {en_n(q.answer[1], a['goods'])}.", f"{_cap(a['who'])} has {en_n(q.wrong[1], a['goods'])}.")
     if q.qtype == "count_coins":
         return (f"How many coins does {_cap(a['who'])} have now?",
                 f"{_cap(a['who'])} has {q.answer[1]} coins.", f"{_cap(a['who'])} has {q.wrong[1]} coins.")
@@ -260,13 +265,13 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
         yes, no = "Yes.", "No."
         return (f"Is {_cap(a['who'])} free at {a['hour']}:00?", yes if q.answer[1] else no, yes if q.wrong[1] else no)
     if q.qtype == "first_meeting":
-        return (f"What is {_cap(a['who'])}'s first meeting of the day?",
+        return (f"What is {_cap(a['who'])}'s first booking of the day?",
                 f"{_cap(EN['titles'][q.answer[1]])}.", f"{_cap(EN['titles'][q.wrong[1]])}.")
     if q.qtype == "count_meetings":
-        return (f"How many meetings does {_cap(a['who'])} have?", f"{q.answer[1]}.", f"{q.wrong[1]}.")
+        return (f"How many bookings does {_cap(a['who'])} have?", f"{q.answer[1]}.", f"{q.wrong[1]}.")
     if q.qtype == "overlap":
         yes, no = "Yes.", "No."
-        return (f"Do {_cap(a['a'])} and {_cap(a['b'])} have overlapping meetings?",
+        return (f"Do {_cap(a['a'])} and {_cap(a['b'])} have overlapping bookings?",
                 yes if q.answer[1] else no, yes if q.wrong[1] else no)
     raise KeyError(q.qtype)
 
@@ -292,6 +297,8 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
         o = RU_OBJ[a["obj"]][0]
         was = RU_WAS[RU_OBJ_GENDER[a["obj"]]]
         return (f"Где изначально {was} {o}?", f"{_cap(o)} {was} {_place_ru(q.answer)}.", f"{_cap(o)} {was} {_place_ru(q.wrong)}.")
+    if q.qtype == "who_has_obj":
+        return (f"У кого сейчас {RU_OBJ[a['obj']][0]}?", f"У {_cap(q.answer[1])}.", f"У {_cap(q.wrong[1])}.")
     if q.qtype == "where_person":
         return (f"Где сейчас {_cap(a['who'])}?", f"{_cap(a['who'])} {ru_room_in(q.answer[1])}.",
                 f"{_cap(a['who'])} {ru_room_in(q.wrong[1])}.")
@@ -324,13 +331,13 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
         free = "Свободна" if GENDER.get(a['who']) == "f" else "Свободен"
         return (f"{free} ли {_cap(a['who'])} в {a['hour']}:00?", yes if q.answer[1] else no, yes if q.wrong[1] else no)
     if q.qtype == "first_meeting":
-        return (f"Какая первая встреча у {_cap(a['who'])}?", f"«{_cap(RU_TITLES[q.answer[1]])}».",
+        return (f"Какая первая запись в календаре у {_cap(a['who'])}?", f"«{_cap(RU_TITLES[q.answer[1]])}».",
                 f"«{_cap(RU_TITLES[q.wrong[1]])}».")
     if q.qtype == "count_meetings":
-        return (f"Сколько встреч у {_cap(a['who'])}?", f"{q.answer[1]}.", f"{q.wrong[1]}.")
+        return (f"Сколько записей в календаре у {_cap(a['who'])}?", f"{q.answer[1]}.", f"{q.wrong[1]}.")
     if q.qtype == "overlap":
         yes, no = "Да.", "Нет."
-        return (f"Пересекаются ли встречи {_cap(a['a'])} и {_cap(a['b'])}?",
+        return (f"Пересекаются ли записи в календарях {_cap(a['a'])} и {_cap(a['b'])}?",
                 yes if q.answer[1] else no, yes if q.wrong[1] else no)
     raise KeyError(q.qtype)
 
@@ -356,6 +363,8 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
                 return f"最初、{o}は{_cap(ans[1])}が持っていた。"
             return f"最初、{o}は{_place_ja(ans)[:-2]}あった。"
         return (f"{o}は最初どこにあった？", was(q.answer), was(q.wrong))
+    if q.qtype == "who_has_obj":
+        return (f"{JA['objects'][a['obj']]}を今持っているのは誰？", f"{_cap(q.answer[1])}。", f"{_cap(q.wrong[1])}。")
     if q.qtype == "where_person":
         return (f"{_cap(a['who'])}は今どこにいる？", f"{_cap(a['who'])}は{JA['rooms'][q.answer[1]]}にいる。",
                 f"{_cap(a['who'])}は{JA['rooms'][q.wrong[1]]}にいる。")

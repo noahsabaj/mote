@@ -121,6 +121,7 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         return {"room": w.get(byname[o], InRoom).room, "held": w.get(byname[o], Held).by,
                 "cont": w.get(byname[o], InContainer).container}
 
+    prev_room: Dict[str, str] = {}
     history: List[Tuple[int, str, Dict[str, str]]] = [(0, o, snap(o)) for o in objects]
     events: List[Event] = [Event(0, "init_household", {
         "people": {p: w.get(byname[p], InRoom).room for p in people},
@@ -135,7 +136,9 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         here = [o for o in objects if snap(o) == {"room": proom, "held": "", "cont": ""}]
         act = rng.random()
         if act < 0.4 or (not here and not held_by_p):
-            action = {"kind": "move", "who": p, "to": rng.choice([r for r in rooms if r != proom])}
+            options = [r for r in rooms if r != proom and r != prev_room.get(p)] or [r for r in rooms if r != proom]
+            action = {"kind": "move", "who": p, "to": rng.choice(options)}
+            prev_room[p] = proom
         elif (act < 0.7 and here) or not held_by_p:
             action = {"kind": "take", "who": p, "obj": rng.choice(here)}
         else:
@@ -163,8 +166,9 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         s = obj_state[o]
         first = next(h for h in history if h[1] == o)[2]
         if s["held"]:
-            ans, wrong = ("held", s["held"]), ("held", rngq.choice([p for p in people if p != s["held"]]))
-            wk = "wrong_entity"
+            qs.append(Q("who_has_obj", {"obj": o}, ("person", s["held"]),
+                        ("person", rngq.choice([p for p in people if p != s["held"]])), "wrong_entity"))
+            continue
         elif s["cont"]:
             ans = ("cont", s["cont"])
             wrong, wk = ("room", first["room"]), "stale"
@@ -173,10 +177,9 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
             stale = first["room"] if first["room"] != s["room"] else rngq.choice([r for r in rooms if r != s["room"]])
             wrong, wk = ("room", stale), ("stale" if first["room"] != s["room"] else "wrong_entity")
         qs.append(Q("where_obj", {"obj": o}, ans, wrong, wk))
-        if first["room"] != s["room"] or s["held"] or s["cont"]:
-            qs.append(Q("where_obj_start", {"obj": o}, ("room", first["room"]),
-                        ("room", s["room"] if not s["held"] and not s["cont"] else first["room"]) if not s["held"] and not s["cont"] else ("held", s["held"]) if s["held"] else ("cont", s["cont"]),
-                        "stale"))
+        if first["room"] != s["room"] or s["cont"]:
+            now = ("cont", s["cont"]) if s["cont"] else ("room", s["room"])
+            qs.append(Q("where_obj_start", {"obj": o}, ("room", first["room"]), now, "current"))
     p = rngq.choice(people)
     n_here = sum(1 for o, s in obj_state.items() if s["room"] == loc[p] and not s["held"] and not s["cont"])
     qs.append(Q("where_person", {"who": p}, ("room", loc[p]),
@@ -222,7 +225,7 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
             g2 = rng.choice(goods)
             n2 = rng.randint(1, 2)
             stock[buyer].goods[g2] += n2
-            events.append(Event(t, "harvest", {"who": buyer, "goods": g2, "n": n2}))
+            events.append(Event(t, "harvest", {"who": buyer, "goods": g2, "n": n2, "v": t % 3}))
     qs: List[Q] = []
     rngq = random.Random(seed + 1)
     for _ in range(3):
@@ -328,19 +331,29 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
     events: List[Event] = []
     for t in range(diff["ticks"]):
         p = rng.choice(people)
-        if cal[p].slots and rng.random() < 0.3:  # move a meeting
+        def clashes(start, end, skip=None):
+            return any(start < e2 and s2 < end for j, (s2, e2, _) in enumerate(cal[p].slots) if j != skip)
+
+        if cal[p].slots and rng.random() < 0.3:  # move a booking (keeps its length, never self-overlaps)
             i = rng.randrange(len(cal[p].slots))
             s, e, title = cal[p].slots[i]
-            ns = rng.choice([h for h in range(8, 17) if h != s])
+            cands = [h for h in range(8, 17) if h != s and not clashes(h, h + (e - s), skip=i)]
+            if not cands:
+                continue
+            ns = rng.choice(cands)
             cal[p].slots[i] = (ns, ns + (e - s), title)
-            events.append(Event(t, "moved", {"who": p, "title": title, "from_h": s, "to_h": ns}))
+            events.append(Event(t, "moved", {"who": p, "title": title, "from_h": s, "to_h": ns, "end_h": ns + (e - s)}))
         else:
             free_titles = [x for x in titles if x not in {t2 for _s, _e, t2 in cal[p].slots}]
             if not free_titles:
                 continue  # a repeated title would make a later "moved X" ambiguous
-            s = rng.randint(8, 16)
+            dur = rng.choice([1, 2])
+            cands = [h for h in range(8, 17) if not clashes(h, h + dur)]
+            if not cands:
+                continue
+            s = rng.choice(cands)
             title = rng.choice(free_titles)
-            cal[p].slots.append((s, s + rng.choice([1, 2]), title))
+            cal[p].slots.append((s, s + dur, title))
             events.append(Event(t, "booked", {"who": p, "title": title, "start_h": s, "end_h": cal[p].slots[-1][1]}))
     qs: List[Q] = []
     rngq = random.Random(seed + 1)
@@ -349,7 +362,7 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
     edges = {x for s_, e_, _ in cal[p].slots for x in (s_, e_)}
     h = rngq.choice([x for x in range(8, 18) if x not in edges] or list(range(8, 18)))  # never an endpoint
     busy = any(s <= h < e for s, e, _ in cal[p].slots)
-    qs.append(Q("free_at", {"who": p, "hour": h}, ("bool", not busy), ("bool", busy), "wrong_entity"))
+    qs.append(Q("free_at", {"who": p, "hour": h}, ("bool", not busy), ("bool", busy), "flip"))
     if cal[p].slots:
         first = min(cal[p].slots)
         others = [t2 for _s, _e, t2 in cal[p].slots if t2 != first[2]]
@@ -360,7 +373,7 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
                     ("num", len(cal[p].slots) + rngq.choice([1, -1])), "off_by_one"))
     a, b = rngq.sample(booked, 2) if len(booked) >= 2 else rngq.sample(people, 2)
     overlap = any(sa < eb and sb < ea for sa, ea, _ in cal[a].slots for sb, eb, _ in cal[b].slots)
-    qs.append(Q("overlap", {"a": a, "b": b}, ("bool", overlap), ("bool", not overlap), "wrong_entity"))
+    qs.append(Q("overlap", {"a": a, "b": b}, ("bool", overlap), ("bool", not overlap), "flip"))
     return Trace("schedule", seed, diff, w, events, qs)
 
 
