@@ -1,7 +1,13 @@
 """The four micro-domains. Each builds a world, scripts random actions, and derives questions
-whose answers are read off the true component state (correct by construction). Every question
-carries a plausible-wrong answer for DPO: a stale historical value or a same-type wrong entity —
-the corruptions that test state tracking rather than surface form.
+whose answers are read off the true world state (correct by construction). Every question
+carries a plausible-wrong answer for DPO: a stale historical value, a same-type wrong entity,
+an off-by-one, a yes/no flip, or the current state when the question asks about the start.
+
+Every domain's dynamics is a system on the world (`World.step(actions)`); the script only
+*chooses* actions from the true state + rng. Relationships (held_by, inside, parent_of,
+spouse_of) are first-class on the world instead of string fields. The scripting order of rng
+calls is the dataset's identity — the esper port (2026-08-24) reproduces the gated build
+byte for byte.
 
 Difficulty axes (logged per sample): n_entities, n_ticks (events between question), distractors.
 """
@@ -21,15 +27,18 @@ OBJECTS = ["key", "book", "lamp", "coin", "apple", "letter", "cup", "knife"]
 CONTAINERS = ["box", "basket", "drawer", "chest"]
 GOODS = ["apples", "loaves", "candles", "nails", "eggs"]
 KIN_NAMES = ["ada", "bruno", "cora", "dario", "elsa", "felix", "greta", "hugo", "irene", "janos", "katia", "luca"]
+TITLES = ["standup", "review", "lunch", "planning", "call", "workshop"]
+WINDOWS = {"standup": range(8, 11), "lunch": range(11, 14), "workshop": range(9, 16),
+           "review": range(9, 17), "planning": range(9, 17), "call": range(8, 17)}
 
 
 @dataclass
 class Q:
     qtype: str
     args: Dict[str, Any]     # entity keys the renderer needs
-    answer: Any              # structured truth (name key, number, bool)
+    answer: Any              # structured truth (name key, number, bool, pair)
     wrong: Any               # plausible-wrong for DPO
-    wrong_kind: str          # "stale" | "wrong_entity" | "off_by_one"
+    wrong_kind: str          # "stale" | "wrong_entity" | "off_by_one" | "flip" | "current"
 
 
 @dataclass
@@ -49,56 +58,54 @@ class InRoom:
 
 
 @dataclass
-class Held:
-    by: str  # person name, "" = not held
+class Person:
+    pass
 
 
 @dataclass
-class InContainer:
-    container: str  # "" = loose
+class Container:
+    pass
 
 
-def _household_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
-    """The one dynamics system: applies move/take/put_in/put_down actions to components.
-    The generator scripts the actions below; the agency layer may supply them instead."""
+@dataclass
+class Portable:
+    pass
+
+
+def household_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
+    """move / take / put_in / put_down against InRoom + the held_by and inside relations."""
     events: List[Event] = []
-    byname = {v: k for k, v in w.names.items()}
-
-    def state(o):
-        eid = byname[o]
-        return w.get(eid, InRoom), w.get(eid, Held), w.get(eid, InContainer)
-
     for a in actions:
-        who = a["who"]
+        who = w.eid(a["who"])
         if a["kind"] == "move":
-            w.get(byname[who], InRoom).room = a["to"]
-            for o, (room, held, _c) in ((n, state(n)) for n in byname if w.get(byname[n], Held)):
-                if held.by == who:
-                    room.room = a["to"]
-            events.append(Event(w.t, "move", {"who": who, "to": a["to"]}))
+            w.get(who, InRoom).room = a["to"]
+            for o in w.reverse(who, "held_by"):  # held objects travel with the holder
+                w.get(o, InRoom).room = a["to"]
+            events.append(Event(w.t, "move", {"who": a["who"], "to": a["to"]}))
         elif a["kind"] == "take":
-            room, held, cont = state(a["obj"])
-            if held.by == "" and cont.container == "" and room.room == w.get(byname[who], InRoom).room:
-                held.by = who
-                events.append(Event(w.t, "take", {"who": who, "obj": a["obj"]}))
+            o = w.eid(a["obj"])
+            if (w.one(o, "held_by") is None and w.one(o, "inside") is None
+                    and w.get(o, InRoom).room == w.get(who, InRoom).room):
+                w.relate(o, "held_by", who)
+                events.append(Event(w.t, "take", {"who": a["who"], "obj": a["obj"]}))
         elif a["kind"] == "put_in":
-            _room, held, cont = state(a["obj"])
-            if held.by == who:
-                held.by = ""
-                cont.container = a["cont"]
-                events.append(Event(w.t, "put_in", {"who": who, "obj": a["obj"], "cont": a["cont"]}))
+            o = w.eid(a["obj"])
+            if w.one(o, "held_by") == who:
+                w.unrelate(o, "held_by")
+                w.relate(o, "inside", w.eid(a["cont"]))
+                events.append(Event(w.t, "put_in", {"who": a["who"], "obj": a["obj"], "cont": a["cont"]}))
         elif a["kind"] == "put_down":
-            room, held, _cont = state(a["obj"])
-            if held.by == who:
-                held.by = ""
-                events.append(Event(w.t, "put_down", {"who": who, "obj": a["obj"], "room": room.room}))
+            o = w.eid(a["obj"])
+            if w.one(o, "held_by") == who:
+                w.unrelate(o, "held_by")
+                events.append(Event(w.t, "put_down", {"who": a["who"], "obj": a["obj"], "room": w.get(o, InRoom).room}))
     return events
 
 
 def _household(seed: int, diff: Dict[str, int]) -> Trace:
     rng = random.Random(seed)
     w = World(seed)
-    w.systems.append(_household_system)
+    w.add_system(household_system)
     people = rng.sample(PEOPLE, diff["people"])
     rooms = rng.sample(ROOMS, diff["rooms"])
     objects = rng.sample(OBJECTS, diff["objects"])
@@ -106,20 +113,23 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
     byname: Dict[str, int] = {}
     for p in people:
         byname[p] = w.spawn(p)
+        w.add(byname[p], Person())
         w.add(byname[p], InRoom(rng.choice(rooms)))
     cont_room = {c: rng.choice(rooms) for c in containers}
     for c in containers:
         byname[c] = w.spawn(c)
+        w.add(byname[c], Container())
         w.add(byname[c], InRoom(cont_room[c]))
     for o in objects:
         byname[o] = w.spawn(o)
+        w.add(byname[o], Portable())
         w.add(byname[o], InRoom(rng.choice(rooms)))
-        w.add(byname[o], Held(""))
-        w.add(byname[o], InContainer(""))
 
     def snap(o):
-        return {"room": w.get(byname[o], InRoom).room, "held": w.get(byname[o], Held).by,
-                "cont": w.get(byname[o], InContainer).container}
+        e = byname[o]
+        holder, cont = w.one(e, "held_by"), w.one(e, "inside")
+        return {"room": w.get(e, InRoom).room, "held": w.names[holder] if holder is not None else "",
+                "cont": w.names[cont] if cont is not None else ""}
 
     prev_room: Dict[str, str] = {}
     history: List[Tuple[int, str, Dict[str, str]]] = [(0, o, snap(o)) for o in objects]
@@ -132,7 +142,7 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         # script one action per tick from the true state, then let the SYSTEM apply it
         p = rng.choice(people)
         proom = w.get(byname[p], InRoom).room
-        held_by_p = [o for o in objects if w.get(byname[o], Held).by == p]
+        held_by_p = [o for o in objects if w.one(byname[o], "held_by") == byname[p]]
         here = [o for o in objects if snap(o) == {"room": proom, "held": "", "cont": ""}]
         act = rng.random()
         if act < 0.4 or (not here and not held_by_p):
@@ -155,7 +165,7 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
                 history.append((e.t, e.data["obj"], snap(e.data["obj"])))
             elif e.kind == "move":
                 for o in objects:
-                    if w.get(byname[o], Held).by == e.data["who"]:
+                    if w.one(byname[o], "held_by") == byname[e.data["who"]]:
                         history.append((e.t, o, snap(o)))
     obj_state = {o: snap(o) for o in objects}
     loc = {p: w.get(byname[p], InRoom).room for p in people}
@@ -198,9 +208,29 @@ class Stock:
     coins: int = 0
 
 
+def inventory_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
+    """trade / harvest against Stock (the script has already checked feasibility)."""
+    events: List[Event] = []
+    for a in actions:
+        if a["kind"] == "trade":
+            buyer, seller = w.get(w.eid(a["buyer"]), Stock), w.get(w.eid(a["seller"]), Stock)
+            g, n, cost = a["goods"], a["n"], a["cost"]
+            if seller.goods[g] >= n and buyer.coins >= cost:
+                seller.goods[g] -= n
+                buyer.goods[g] += n
+                buyer.coins -= cost
+                seller.coins += cost
+                events.append(Event(w.t, "trade", {"buyer": a["buyer"], "seller": a["seller"], "goods": g, "n": n, "cost": cost}))
+        elif a["kind"] == "harvest":
+            w.get(w.eid(a["who"]), Stock).goods[a["goods"]] += a["n"]
+            events.append(Event(w.t, "harvest", {"who": a["who"], "goods": a["goods"], "n": a["n"], "v": a["v"]}))
+    return events
+
+
 def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
     rng = random.Random(seed)
     w = World(seed)
+    w.add_system(inventory_system)
     people = rng.sample(PEOPLE, diff["people"])
     goods = rng.sample(GOODS, min(diff["objects"], len(GOODS)))
     price = {g: rng.randint(1, 5) for g in goods}
@@ -218,17 +248,12 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
         g = rng.choice(goods)
         n = rng.randint(1, 3)
         if stock[seller].goods[g] >= n and stock[buyer].coins >= n * price[g]:
-            stock[seller].goods[g] -= n
-            stock[buyer].goods[g] += n
-            cost = n * price[g]
-            stock[buyer].coins -= cost
-            stock[seller].coins += cost
-            events.append(Event(t, "trade", {"buyer": buyer, "seller": seller, "goods": g, "n": n, "cost": cost}))
+            action = {"kind": "trade", "buyer": buyer, "seller": seller, "goods": g, "n": n, "cost": n * price[g]}
         else:
             g2 = rng.choice(goods)
             n2 = rng.randint(1, 2)
-            stock[buyer].goods[g2] += n2
-            events.append(Event(t, "harvest", {"who": buyer, "goods": g2, "n": n2, "v": t % 3}))
+            action = {"kind": "harvest", "who": buyer, "goods": g2, "n": n2, "v": t % 3}
+        events.extend(w.step([action]))
     qs: List[Q] = []
     rngq = random.Random(seed + 1)
     for _ in range(3):
@@ -250,23 +275,13 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
     return Trace("inventory", seed, diff, w, events, qs)
 
 
-# ---------------------------------------------------------------- kinship
-@dataclass
-class Parent:
-    children: List[str] = field(default_factory=list)
-
-
-@dataclass
-class Spouse:
-    of: str = ""
-
-
+# ---------------------------------------------------------------- kinship (static relations)
 def _kinship(seed: int, diff: Dict[str, int]) -> Trace:
     rng = random.Random(seed)
     w = World(seed)
     n = max(6, diff["people"] + 4)
     names = rng.sample(KIN_NAMES, n)
-    # three generations: g0 couples -> g1 children (some married) -> g2 children
+    # three generations: g0 couple -> g1 children (married in from outside) -> g2 children
     g0 = names[:2]
     g1 = names[2 : 2 + max(2, n // 3)]
     g2 = names[2 + max(2, n // 3) :]
@@ -285,10 +300,14 @@ def _kinship(seed: int, diff: Dict[str, int]) -> Trace:
             break
         a, b = pairs[j % len(pairs)]
         parents[c] = (a, b)
+    byname = {name: w.spawn(name) for name in names}
     for name in names:
-        eid = w.spawn(name)
-        w.add(eid, Parent([c for c, ps in parents.items() if name in ps]))
-        w.add(eid, Spouse(spouses.get(name, "")))
+        w.add(byname[name], Person())
+    for c, (p1, p2) in parents.items():
+        w.relate(byname[p1], "parent_of", byname[c])
+        w.relate(byname[p2], "parent_of", byname[c])
+    for a, b in spouses.items():
+        w.relate(byname[a], "spouse_of", byname[b])
     events = [Event(0, "family", {"parents": parents, "spouses": spouses, "gens": [g0, g1, g2]})]
     qs: List[Q] = []
     rngq = random.Random(seed + 1)
@@ -305,7 +324,7 @@ def _kinship(seed: int, diff: Dict[str, int]) -> Trace:
         qs.append(Q("count_siblings", {"who": c}, ("num", len(sibs)),
                     ("num", len(sibs) + rngq.choice([1, -1]) if sibs else 1), "off_by_one"))
     p = rngq.choice(g1)
-    kids = [c for c, ps in parents.items() if p in ps]
+    kids = sorted(w.names[k] for k in w.related(byname[p], "parent_of"))
     qs.append(Q("count_children", {"who": p}, ("num", len(kids)),
                 ("num", len(kids) + rngq.choice([1, 2]) if not kids else len(kids) + rngq.choice([1, -1])), "off_by_one"))
     if spouses.get(p):
@@ -316,53 +335,63 @@ def _kinship(seed: int, diff: Dict[str, int]) -> Trace:
 
 # ---------------------------------------------------------------- schedule
 @dataclass
-class Meetings:
+class Calendar:
     slots: List[Tuple[int, int, str]] = field(default_factory=list)  # (start_h, end_h, title)
+
+
+def schedule_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
+    """book / move against Calendar (the script has already chosen a clash-free slot)."""
+    events: List[Event] = []
+    for a in actions:
+        cal = w.get(w.eid(a["who"]), Calendar)
+        if a["kind"] == "move":
+            s, e, title = cal.slots[a["i"]]
+            ns = a["to_h"]
+            cal.slots[a["i"]] = (ns, ns + (e - s), title)
+            events.append(Event(w.t, "moved", {"who": a["who"], "title": title, "from_h": s, "to_h": ns, "end_h": ns + (e - s)}))
+        elif a["kind"] == "book":
+            cal.slots.append((a["start_h"], a["start_h"] + a["dur"], a["title"]))
+            events.append(Event(w.t, "booked", {"who": a["who"], "title": a["title"], "start_h": a["start_h"], "end_h": a["start_h"] + a["dur"]}))
+    return events
 
 
 def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
     rng = random.Random(seed)
     w = World(seed)
+    w.add_system(schedule_system)
     people = rng.sample(PEOPLE, diff["people"])
-    titles = ["standup", "review", "lunch", "planning", "call", "workshop"]
-    cal: Dict[str, Meetings] = {}
+    cal: Dict[str, Calendar] = {}
     for p in people:
         eid = w.spawn(p)
-        m = Meetings()
+        m = Calendar()
         cal[p] = m
         w.add(eid, m)
     events: List[Event] = []
-    for t in range(diff["ticks"]):
+    for _ in range(diff["ticks"]):
         p = rng.choice(people)
+
         def clashes(start, end, skip=None):
             return any(start < e2 and s2 < end for j, (s2, e2, _) in enumerate(cal[p].slots) if j != skip)
 
         if cal[p].slots and rng.random() < 0.3:  # move a booking (keeps its length, never self-overlaps)
             i = rng.randrange(len(cal[p].slots))
             s, e, title = cal[p].slots[i]
-            windows = {"standup": range(8, 11), "lunch": range(11, 14), "workshop": range(9, 16),
-                       "review": range(9, 17), "planning": range(9, 17), "call": range(8, 17)}
-            cands = [h for h in range(8, 17) if h != s and h in windows[title] and not clashes(h, h + (e - s), skip=i)]
+            cands = [h for h in range(8, 17) if h != s and h in WINDOWS[title] and not clashes(h, h + (e - s), skip=i)]
             if not cands:
                 continue
-            ns = rng.choice(cands)
-            cal[p].slots[i] = (ns, ns + (e - s), title)
-            events.append(Event(t, "moved", {"who": p, "title": title, "from_h": s, "to_h": ns, "end_h": ns + (e - s)}))
+            action = {"kind": "move", "who": p, "i": i, "to_h": rng.choice(cands)}
         else:
-            free_titles = [x for x in titles if x not in {t2 for _s, _e, t2 in cal[p].slots}]
+            free_titles = [x for x in TITLES if x not in {t2 for _s, _e, t2 in cal[p].slots}]
             if not free_titles:
                 continue  # a repeated title would make a later "moved X" ambiguous
             dur = rng.choice([1, 2])
-            windows = {"standup": range(8, 11), "lunch": range(11, 14), "workshop": range(9, 16),
-                       "review": range(9, 17), "planning": range(9, 17), "call": range(8, 17)}
             cands = [h for h in range(8, 17) if not clashes(h, h + dur)]
             if not cands:
                 continue
             title = rng.choice(free_titles)
-            cands = [h for h in cands if h in windows[title]] or cands
-            s = rng.choice(cands)
-            cal[p].slots.append((s, s + dur, title))
-            events.append(Event(t, "booked", {"who": p, "title": title, "start_h": s, "end_h": cal[p].slots[-1][1]}))
+            cands = [h for h in cands if h in WINDOWS[title]] or cands
+            action = {"kind": "book", "who": p, "title": title, "start_h": rng.choice(cands), "dur": dur}
+        events.extend(w.step([action]))
     qs: List[Q] = []
     rngq = random.Random(seed + 1)
     booked = [p for p in people if cal[p].slots] or people  # only ask about people the text mentions
@@ -375,7 +404,7 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
         first = min(cal[p].slots)
         others = [t2 for _s, _e, t2 in cal[p].slots if t2 != first[2]]
         qs.append(Q("first_meeting", {"who": p}, ("title", first[2]),
-                    ("title", rngq.choice(others) if others else rngq.choice([t for t in titles if t != first[2]])),
+                    ("title", rngq.choice(others) if others else rngq.choice([t for t in TITLES if t != first[2]])),
                     "wrong_entity"))
         qs.append(Q("count_meetings", {"who": p}, ("num", len(cal[p].slots)),
                     ("num", len(cal[p].slots) + rngq.choice([1, -1])), "off_by_one"))

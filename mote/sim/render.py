@@ -128,7 +128,7 @@ def _ev_en(e, kin_names=None) -> str:
         return f"{_cap(d['who'])} moved {EN['titles'][d['title']]} to {d['to_h']}:00–{d['end_h']}:00."
     if k == "family":
         out = [f"{_cap(a)} and {_cap(b)} are married." for a, b in
-               {tuple(sorted((x, y))) for x, y in d["spouses"].items() if y}]
+               sorted({tuple(sorted((x, y))) for x, y in d["spouses"].items() if y})]
         out += [f"{_cap(p1)} and {_cap(p2)} are the parents of {_cap(c)}."
                 for c, (p1, p2) in sorted(d["parents"].items())]
         return " ".join(out)
@@ -169,7 +169,7 @@ def _ev_ru(e) -> str:
         return f"{_cap(d['who'])} {_ru_v(('перенёс', 'перенесла'), d['who'])} «{RU_TITLES[d['title']]}» на {d['to_h']}:00–{d['end_h']}:00."
     if k == "family":
         out = [f"{_cap(a)} и {_cap(b)} состоят в браке." for a, b in
-               {tuple(sorted((x, y))) for x, y in d["spouses"].items() if y}]
+               sorted({tuple(sorted((x, y))) for x, y in d["spouses"].items() if y})]
         out += [f"{_cap(p1)} и {_cap(p2)} — родители {_cap(c)}." for c, (p1, p2) in sorted(d["parents"].items())]
         return " ".join(out)
     return ""
@@ -209,7 +209,7 @@ def _ev_ja(e) -> str:
         return f"{_cap(d['who'])}は{JA['titles'][d['title']]}を{d['to_h']}時〜{d['end_h']}時に変更した。"
     if k == "family":
         out = [f"{_cap(a)}と{_cap(b)}は結婚している。" for a, b in
-               {tuple(sorted((x, y))) for x, y in d["spouses"].items() if y}]
+               sorted({tuple(sorted((x, y))) for x, y in d["spouses"].items() if y})]
         out += [f"{_cap(p1)}と{_cap(p2)}は{_cap(c)}の両親だ。" for c, (p1, p2) in sorted(d["parents"].items())]
         return "".join(out)
     return ""

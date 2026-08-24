@@ -51,6 +51,8 @@ def main():
         locale = rng.choices([l for l, _ in LOCALE_WEIGHTS], [w for _, w in LOCALE_WEIGHTS])[0]
         trace = make_trace(domain, seed)
         doc = narrative(trace, locale)
+        pairs = qa_pairs(trace, locale)
+        trace.world.close()  # esper worlds are global; free each one once rendered
         if not doc or not trace.questions:
             continue
         meta = {"domain": domain, "locale": locale, "seed": seed, **trace.difficulty}
@@ -58,7 +60,6 @@ def main():
             f_nar.write(json.dumps({"text": doc, "meta": meta}, ensure_ascii=False) + "\n")
             written += len(doc.encode("utf-8"))
             n_docs += 1
-        pairs = qa_pairs(trace, locale)
         for p in pairs:
             qtype_counts[p["qtype"]] += 1
             words = doc.split()[:50]
