@@ -43,13 +43,14 @@ class Muon(torch.optim.Optimizer):
         loss = closure() if closure is not None else None
         for group in self.param_groups:
             lr, mom, wd = group["lr"], group["momentum"], group["weight_decay"]
-            # momentum per parameter, then one batched Newton-Schulz per shape (the 12 Relation layers'
-            # 768² projections are one launch per iteration instead of 48)
+            # momentum per parameter, then one batched Newton-Schulz per matrix shape (the 12 Relation layers'
+            # 768² projections are one launch per iteration instead of 48). A 3-D parameter is a stack of
+            # matrices (MoE expert weights [E, m, n]): every slice is orthogonalised on its own, in the same launch.
             by_shape: dict = {}
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                assert p.ndim == 2, "Muon is for 2-D matrices only"
+                assert p.ndim in (2, 3), "Muon is for 2-D matrices (or 3-D stacks of them)"
                 g = p.grad
                 state = self.state[p]
                 if "momentum_buffer" not in state:
@@ -57,13 +58,17 @@ class Muon(torch.optim.Optimizer):
                 buf = state["momentum_buffer"]
                 buf.mul_(mom).add_(g)
                 upd = g.add(buf, alpha=mom) if group["nesterov"] else buf
-                by_shape.setdefault(tuple(p.shape), []).append((p, upd))
-            for shape, items in by_shape.items():
-                stacked = torch.stack([u for _, u in items]) if len(items) > 1 else items[0][1].unsqueeze(0)
+                m, n = p.shape[-2], p.shape[-1]
+                by_shape.setdefault((m, n), []).append((p, upd.reshape(-1, m, n)))
+            for (m, n), items in by_shape.items():
+                stacked = torch.cat([u for _, u in items], dim=0) if len(items) > 1 else items[0][1]
                 orth = newton_schulz(stacked, steps=group["ns_steps"])
-                scale = group["rms_scale"] * max(shape[0], shape[1]) ** 0.5
+                scale = group["rms_scale"] * max(m, n) ** 0.5
                 decay = (lr * lr / group["lr_max"] if group["sw_decay"] else lr) * wd if wd else 0.0
-                for (p, _), o in zip(items, orth.unbind(0)):
+                i = 0
+                for p, u in items:
+                    o = orth[i:i + u.shape[0]].reshape(p.shape)
+                    i += u.shape[0]
                     if decay:
                         p.mul_(1.0 - decay)
                     p.add_(o.to(p.dtype) * scale, alpha=-lr)
@@ -71,10 +76,11 @@ class Muon(torch.optim.Optimizer):
 
 
 def split_muon_params(model) -> tuple[list, list]:
-    """(muon_params, other_params): hidden 2-D matrices go to Muon; embeddings / tied head, everything
-    with ndim != 2, and Mamba-3's `in_proj` go to AdamW. `in_proj` row-stacks eight unrelated
-    sub-projections (z, x, B, C, dt, A, trap, angles); orthogonalising it as one matrix is measured to
-    be worse than AdamW on Mamba (2608.03941), while `out_proj` carries Muon's gain."""
+    """(muon_params, other_params): hidden 2-D matrices and MoE expert stacks (`_muon_stack`, [E, m, n]) go
+    to Muon; embeddings / tied head, everything else with ndim != 2, Mamba-3's `in_proj` and the MoE
+    router (`_no_muon`) go to AdamW. `in_proj` row-stacks eight unrelated sub-projections (z, x, B, C,
+    dt, A, trap, angles); orthogonalising it as one matrix is measured to be worse than AdamW on Mamba
+    (2608.03941), while `out_proj` carries Muon's gain."""
     from ..model.mamba3 import Mamba3Mixer
 
     skip = {id(model.embeddings.weight), id(model.lm_head.weight)}
@@ -87,7 +93,8 @@ def split_muon_params(model) -> tuple[list, list]:
         if id(p) in seen:
             continue
         seen.add(id(p))
-        if p.ndim == 2 and id(p) not in skip:
+        stack = p.ndim == 3 and getattr(p, "_muon_stack", False)
+        if (p.ndim == 2 or stack) and id(p) not in skip and not getattr(p, "_no_muon", False):
             muon.append(p)
         else:
             other.append(p)

@@ -13,6 +13,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 from .mamba3 import Mamba3Mixer
+from .moe import MoESwiGLU
 from .norm import RMSNorm
 from .relation import FullRelation, SwiGLU
 
@@ -26,12 +27,13 @@ class Block(nn.Module):
         self.mixer = mixer
         self.mlp = mlp
         self.norm2 = RMSNorm(d_model, eps=eps, **fk) if mlp is not None else None
+        self.moe = isinstance(mlp, MoESwiGLU)  # the FFN wants the chunk mask (padded rows leave the load stats)
 
     @property
     def height(self) -> int:
         return 2 if self.mlp is not None else 1
 
-    def forward(self, hidden: torch.Tensor, residual: Optional[torch.Tensor], cache: Any = None, return_cache: bool = False):
+    def forward(self, hidden: torch.Tensor, residual: Optional[torch.Tensor], cache: Any = None, return_cache: bool = False, token_mask: Optional[torch.Tensor] = None):
         hidden, residual = self.norm1(hidden, residual=residual, prenorm=True, residual_in_fp32=self.residual_in_fp32)
         new_cache = None
         if isinstance(self.mixer, FullRelation):
@@ -46,7 +48,7 @@ class Block(nn.Module):
                 hidden = self.mixer(hidden)
         if self.mlp is not None:
             hidden, residual = self.norm2(hidden, residual=residual, prenorm=True, residual_in_fp32=self.residual_in_fp32)
-            hidden = self.mlp(hidden)
+            hidden = self.mlp(hidden, token_mask) if self.moe else self.mlp(hidden)
         return hidden, residual, new_cache
 
     def step(self, hidden: torch.Tensor, residual: Optional[torch.Tensor], cache: Any):
@@ -79,16 +81,16 @@ class Isotropic(nn.Module):
     def height(self) -> int:
         return sum(b.height for b in self.layers)
 
-    def forward(self, hidden: torch.Tensor, caches: Optional[List[Any]] = None, return_caches: bool = False):
+    def forward(self, hidden: torch.Tensor, caches: Optional[List[Any]] = None, return_caches: bool = False, token_mask: Optional[torch.Tensor] = None):
         residual = None
         new_caches: List[Any] = []
         use_ckpt = self.grad_checkpoint and torch.is_grad_enabled() and caches is None and not return_caches
         for i, layer in enumerate(self.layers):
             cache = caches[i] if caches is not None else None
             if use_ckpt:
-                hidden, residual, c = checkpoint(layer, hidden, residual, use_reentrant=False)
+                hidden, residual, c = checkpoint(layer, hidden, residual, None, False, token_mask, use_reentrant=False)
             else:
-                hidden, residual, c = layer(hidden, residual, cache=cache, return_cache=return_caches)
+                hidden, residual, c = layer(hidden, residual, cache=cache, return_cache=return_caches, token_mask=token_mask)
             new_caches.append(c)
         hidden = self.rmsnorm(hidden, residual=residual, prenorm=False, residual_in_fp32=True)
         return (hidden, new_caches) if return_caches else hidden
@@ -129,8 +131,10 @@ def make_mamba3_stack(n_layers: int, d_model: int, cfg, eps: float, layer_offset
 
 
 def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=None, dtype=None) -> Isotropic:
-    """Main network: Full Relation mixers with SwiGLU FFNs ('R' blocks)."""
+    """Main network: Full Relation mixers with SwiGLU FFNs ('R' blocks); `cfg.moe_experts > 1` swaps the
+    FFN for `MoESwiGLU` (layer 0 stays dense under `moe_dense_first`)."""
     blocks = []
+    n_exp = int(getattr(cfg, "moe_experts", 0) or 0)
     for i in range(cfg.n_layers):
         mixer_cls = FullRelation
         if getattr(cfg, "mixer", "relation") == "attention":
@@ -149,6 +153,11 @@ def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=N
             dtype=dtype,
                     window=getattr(cfg, "window_chunks", None),
         )
-        mlp = SwiGLU(cfg.d_model, cfg.d_ff, device=device, dtype=dtype)
+        if n_exp > 1 and not (i == 0 and getattr(cfg, "moe_dense_first", False)):
+            f = cfg.moe_d_ff or max(cfg.d_ff // cfg.moe_topk, 1)
+            mlp = MoESwiGLU(cfg.d_model, f, n_exp, top_k=cfg.moe_topk, router=cfg.moe_router, aux_weight=cfg.moe_aux_weight,
+                            z_weight=cfg.moe_z_weight, bias_gamma=cfg.moe_bias_gamma, scale=cfg.moe_gate_scale, device=device, dtype=dtype)
+        else:
+            mlp = SwiGLU(cfg.d_model, cfg.d_ff, device=device, dtype=dtype)
         blocks.append(Block(cfg.d_model, mixer, mlp, eps=eps, residual_in_fp32=residual_in_fp32, device=device, dtype=dtype))
     return Isotropic(blocks, cfg.d_model, eps=eps, device=device, dtype=dtype)

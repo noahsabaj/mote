@@ -28,6 +28,8 @@ import torch.nn.functional as F
 from ..config import MoteConfig
 from ..data.loader import ByteShard, MixedShard
 from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
+from ..model.moe import collect_moe, moe_modules
+from .flops import _n as _n_active
 from ..model.hnet import HNetForCausalLM
 from ..tokenizer import ByteTokenizer
 from .flops import flops_per_byte, peak_tflops_for
@@ -167,6 +169,10 @@ def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: fl
     n_safe = n.clamp(min=1.0)
     loss = ce_sum + ratio_weight * lr_ * n_safe
     stats = {"ce_sum": ce_sum.detach(), "n": n.detach(), "ratio": lr_.detach(), "bpic": bytes_per_chunk(out.routing.boundary_mask, mask)}
+    moe_aux, moe_stats = collect_moe(model)
+    if moe_aux is not None:  # balance / z losses of the MoE FFNs, per-token like the ratio loss
+        loss = loss + moe_aux * n_safe
+        stats.update(moe_stats)
     if out.mbp_logits is not None and mbp_weight > 0:
         gamma = getattr(model.cfg.mbp, "position_gamma", 0.0) if hasattr(model, "cfg") else 0.0
         pw = torch.exp(-out.offset.float() / gamma) if gamma and gamma > 0 else None  # earlier draft slots matter more
@@ -185,6 +191,7 @@ def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len:
     model.eval()
     tot_nll, tot_tok, tot_bytes, tot_chunks, mbp_correct, mbp_tot = 0.0, 0, 0, 0, 0, 0
     word_hits, boundary_count = 0, 0
+    moe_loads, moe_batches = {}, 0
     for batch, lmask in shard.sequential_batches(batch_size, seq_len, max_batches, spread=spread):
         batch = batch.to(device, non_blocking=True)
         inputs, targets = batch[:, :-1], batch[:, 1:]
@@ -215,6 +222,9 @@ def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len:
             pred = out.mbp_logits.argmax(-1)
             mbp_correct += (pred == targets).sum().item()
             mbp_tot += targets.numel()
+        for i, m in enumerate(moe_modules(model)):  # expert usage per layer over the eval windows
+            moe_loads[i] = moe_loads.get(i, 0.0) + m.stats["load"].float().cpu()
+            moe_batches += 1
     model.train()
     res = {
         "val_bpb": tot_nll / max(tot_tok, 1) / LN2,
@@ -224,6 +234,13 @@ def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len:
     }
     if mbp_tot:
         res["mbp_top1_acc"] = mbp_correct / mbp_tot
+    if moe_loads:
+        n_layers = len(moe_loads)
+        loads = [moe_loads[i] / max(moe_batches // n_layers, 1) for i in range(n_layers)]
+        vio = [float((l.max() - l.mean()) / l.mean().clamp_min(1e-9)) for l in loads]
+        res["moe_maxvio"] = sum(vio) / n_layers
+        res["moe_maxvio_max"] = max(vio)
+        res["moe_load"] = [[round(float(v), 4) for v in l] for l in loads]
     return res
 
 
@@ -304,6 +321,14 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--bf16-residual", action="store_true", help="A/B: keep the residual stream in bf16 instead of fp32")
     ap.add_argument("--relation-window", type=int, default=None, help="A/B: each chunk sees at most the last N chunks (materialized path)")
     ap.add_argument("--attention-main", action="store_true", help="ablation: parameter-matched causal attention instead of Relation in the main network")
+    ap.add_argument("--moe", type=int, default=None, metavar="E", help="mixture of experts in the main-network FFNs: E experts (signed 2026-08-24, docs/shape.md \"MoE\")")
+    ap.add_argument("--moe-topk", type=int, default=2, help="active experts per chunk")
+    ap.add_argument("--moe-ff", type=int, default=None, help="expert hidden width (default d_ff // topk: active FLOPs match the dense FFN)")
+    ap.add_argument("--moe-router", default="lossfree", choices=["lossfree", "aux"], help="lossfree: DeepSeek-V3 bias balancing + seq-level balance loss; aux: Switch softmax + load-balance loss + z-loss")
+    ap.add_argument("--moe-dense-first", action="store_true", help="layer 0 keeps the dense FFN")
+    ap.add_argument("--moe-aux-weight", type=float, default=None, help="balance-loss weight (default 1e-4 lossfree / 1e-2 aux)")
+    ap.add_argument("--moe-gamma", type=float, default=None, help="lossfree: expert-bias step per optimizer step (default 1e-3)")
+    ap.add_argument("--moe-gate-scale", type=float, default=None, help="routed-output scale (default: Moonlight's computed factor for lossfree, 1.0 for aux)")
     ap.add_argument("--jepa", choices=["minimal", "ema", "sigreg"], default=None, help="JEPA aux loss on the byte encoder (lab arms, docs/shape.md 2026-08-24)")
     ap.add_argument("--jepa-weight", type=float, default=0.05, help="weight of the JEPA aux loss")
     ap.add_argument("--no-flash", action="store_true", help="A/B: materialized Relation instead of the Triton kernel")
@@ -311,6 +336,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--schedule", default="wsd", choices=["wsd", "trunk", "cooldown"], help="wsd: warmup-stable-decay over the budget (lab arms); trunk: warmup then constant, no decay (the flagship trunk); cooldown: decay only, lr -> 0.1x over the run (a branch started with --init-from a trunk snapshot). docs/shape.md pipeline")
     ap.add_argument("--snapshot-steps", type=int, default=0, help="also keep a weights-only snap_<step>.pt every N steps (the branch points for cooldowns)")
     ap.add_argument("--eval-spread", action="store_true", help="evaluate on windows spread over the whole val shard instead of its head (= first source only); use for the trunk and branches, never mid-queue")
+    ap.add_argument("--eval-ema", type=float, default=0.0, help="also evaluate an EMA of the weights (per-step decay; 0 = off): the decayed-quality stand-in for constant-LR runs that the LR-vs-horizon fit reads (2608.20061 §2.2.1; mote/train/lr_horizon.py); logs val_bpb_ema")
     return ap
 
 
@@ -357,6 +383,19 @@ class Trainer:
             cfg.main.window_chunks = args.relation_window
         if args.attention_main:
             cfg.main.mixer = "attention"
+        if args.moe:
+            cfg.main.moe_experts = args.moe
+            cfg.main.moe_topk = args.moe_topk
+            cfg.main.moe_router = args.moe_router
+            cfg.main.moe_dense_first = args.moe_dense_first
+            if args.moe_ff is not None:
+                cfg.main.moe_d_ff = args.moe_ff
+            if args.moe_aux_weight is not None:
+                cfg.main.moe_aux_weight = args.moe_aux_weight
+            if args.moe_gamma is not None:
+                cfg.main.moe_bias_gamma = args.moe_gamma
+            if args.moe_gate_scale is not None:
+                cfg.main.moe_gate_scale = args.moe_gate_scale
         if args.no_flash:
             from ..model import relation as _relation
             _relation.USE_FLASH = False
@@ -367,6 +406,11 @@ class Trainer:
         self.n_params = model.num_params()
         self.peak_tflops = peak_tflops_for(device) if device.type == "cuda" else None
         print(f"params: {self.n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('mote.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('mote.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
+        self._moe = moe_modules(model)
+        if self._moe:
+            m0 = self._moe[0]
+            print(f"moe: {len(self._moe)} layers x {m0.n_experts} experts, top-{m0.top_k}, d_ff {m0.d_ff}, router {m0.router_kind}, gate scale {m0.scale:.3f}, "
+                  f"active {_n_active(model)/1e6:.2f}M of {self.n_params/1e6:.2f}M params", flush=True)
         self.opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, betas=(0.9, args.beta2), optimizer=args.optimizer)
 
         self.jepa, self.jepa_opt, self._enc_h = None, None, None
@@ -407,8 +451,14 @@ class Trainer:
             if self.jepa is not None and "jepa" in extra:
                 self.jepa.load_state_dict(extra["jepa"])
                 self.jepa_opt.load_state_dict(extra["jepa_opt"])
+            self._ema_state = extra.get("ema")
             print(f"resumed from step {self.step}", flush=True)
 
+        self.ema_decay = float(getattr(args, "eval_ema", 0.0) or 0.0)
+        self.ema = [p.detach().clone() for p in model.parameters()] if self.ema_decay > 0 else None
+        if self.ema is not None and getattr(self, "_ema_state", None):
+            for e, s in zip(self.ema, self._ema_state):
+                e.copy_(s.to(e.device))
         self.fwd = torch.compile(model) if args.compile else model
         if getattr(args, "tf32", False):
             torch.set_float32_matmul_precision("high")  # TF32 for fp32 GEMMs; off (="highest") is the frozen default
@@ -440,7 +490,34 @@ class Trainer:
         if self.jepa is not None:
             extra["jepa"] = self.jepa.state_dict()
             extra["jepa_opt"] = self.jepa_opt.state_dict()
+        if self.ema is not None:
+            extra["ema"] = self.ema
         save_checkpoint(self.ckpt_path, self.model, self.opt, self.step, self.cfg, extra)
+
+    @torch.no_grad()
+    def _swap_in_ema(self):
+        """Put the EMA weights into the model and return the raw ones (swap back with `_restore`)."""
+        params = list(self.model.parameters())
+        raw = [p.detach().clone() for p in params]
+        for p, e in zip(params, self.ema):
+            p.copy_(e)
+        return raw
+
+    @torch.no_grad()
+    def _restore(self, raw):
+        for p, r in zip(self.model.parameters(), raw):
+            p.copy_(r)
+
+    def _evaluate(self, target_ratio: float) -> Dict:
+        args, device = self.args, self.device
+        ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio, spread=args.eval_spread)
+        if self.ema is not None:
+            raw = self._swap_in_ema()
+            try:
+                ev["val_bpb_ema"] = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio, spread=args.eval_spread)["val_bpb"]
+            finally:
+                self._restore(raw)
+        return ev
 
     def _train_step(self, target_ratio: float):
         """One optimizer step as a generator: yields ("slice", None) after each accumulation micro-batch
@@ -476,13 +553,18 @@ class Trainer:
         torch._foreach_div_(grads, total_n)
         gnorm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), args.clip)
         self.opt.step()
+        for m in self._moe:
+            m.update_bias()  # lossfree routing: the expert bias follows the step's load, never the gradient
+        if self.ema is not None:
+            with torch.no_grad():
+                torch._foreach_lerp_(self.ema, [p.detach() for p in self.model.parameters()], 1.0 - self.ema_decay)
         if self.jepa is not None:
             torch.nn.utils.clip_grad_norm_(self.jepa.parameters(), args.clip)
             self.jepa_opt.step()
             self.jepa.ema_update(self.model)
         out = {"ce": agg["ce_sum"] / total_n, "ratio": agg["ratio"] / args.grad_accum, "bpic": agg["bpic"] / args.grad_accum, "grad_norm": gnorm}
         for k in agg:
-            if k.startswith("jepa_"):
+            if k.startswith("jepa_") or k.startswith("moe_"):
                 out[k] = agg[k] / args.grad_accum
         if "ce_mbp_sum" in agg:
             out["ce_mbp"] = agg["ce_mbp_sum"] / total_n
@@ -563,7 +645,7 @@ class Trainer:
                     rec["mfu"] = rec["tflops"] / self.peak_tflops
                 self.log(rec)
             if self.step % args.eval_every == 0:
-                ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio, spread=args.eval_spread)
+                ev = self._evaluate(target_ratio)
                 ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
                 self.log({"eval": ev})
             if (time.time() - last_ckpt) / 60 >= args.ckpt_minutes:
@@ -577,7 +659,7 @@ class Trainer:
         if self._stop:
             self.log({"stopped": self.stopped_reason or "requested"})
 
-        ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, cfg.dc.target_ratio_final, spread=args.eval_spread)
+        ev = self._evaluate(cfg.dc.target_ratio_final)
         ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
         self.log({"eval": ev, "final": True})
 

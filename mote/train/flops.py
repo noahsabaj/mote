@@ -22,11 +22,17 @@ PEAK_TFLOPS = {
 
 
 def _n(module) -> int:
+    """Parameters a token touches: an MoE FFN counts its k active experts, not all E (mote/model/moe.py)."""
+    from ..model.moe import MoESwiGLU
+
     seen, n = set(), 0
     for p in module.parameters():
         if id(p) not in seen:
             seen.add(id(p))
             n += p.numel()
+    for m in module.modules():
+        if isinstance(m, MoESwiGLU):
+            n -= (m.w1.numel() + m.w2.numel()) - m.top_k * (m.w1[0].numel() + m.w2[0].numel())
     return n
 
 

@@ -130,7 +130,7 @@ class HNetForCausalLM(nn.Module):
 
         routing = self.routing_module(h, mask)
         hc, next_mask = self.chunk_layer(h, routing.boundary_mask)  # [B, M, D0]
-        zc = self.main_network(self._pad(hc))[..., :D0]  # [B, M, D0]
+        zc = self.main_network(self._pad(hc), token_mask=next_mask)[..., :D0]  # [B, M, D0]; the mask keeps pads out of MoE stats
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob)  # [B, L, D0]
 
         h2 = (z.float() * ste_ones(routing.selected_probs.float()) + residual).to(h.dtype)

@@ -46,6 +46,16 @@ class RelationCfg:
     lambda_init: float = 0.5  # count-calibration λ_ℓ, one FP32 scalar per layer
     rope_theta: float = 10000.0
     givens: bool = True  # learnable adjacent-head Givens rotations on the information branch
+    # Mixture of experts in the FFN slot (signed 2026-08-24, docs/shape.md "MoE"; mote/model/moe.py)
+    moe_experts: int = 0  # 0 = dense SwiGLU; E ≥ 2 = MoESwiGLU with E experts
+    moe_topk: int = 2
+    moe_d_ff: int | None = None  # expert hidden width; None = d_ff // moe_topk (active FLOPs match the dense FFN)
+    moe_router: str = "lossfree"  # "lossfree" (DeepSeek-V3 bias balancing + seq-level balance loss) | "aux" (Switch softmax + balance loss + z-loss)
+    moe_dense_first: bool = False  # layer 0 keeps the dense FFN (DeepSeek-V3 / Kakao 2608.20061 convention)
+    moe_aux_weight: float | None = None  # None = 1e-4 (lossfree) / 1e-2 (aux)
+    moe_z_weight: float = 1e-3  # router z-loss (aux router only)
+    moe_bias_gamma: float = 1e-3  # lossfree: expert-bias step per optimizer step
+    moe_gate_scale: float | None = None  # None = Moonlight's computed factor (lossfree) / 1.0 (aux)
 
 
 @dataclass
