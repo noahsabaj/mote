@@ -16,8 +16,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import torch
-import uvicorn
+# The caching allocator grows segments instead of fragmenting them (native Linux; signed 2026-08-24):
+# must be set before torch initialises CUDA. The supervisor sets it too; this covers a direct start.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import torch  # noqa: E402
+import uvicorn  # noqa: E402
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles

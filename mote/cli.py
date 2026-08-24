@@ -126,6 +126,7 @@ def service_run() -> None:
         cfg = load_config()
         token = ensure_token()
         env = {**os.environ, "MOTE_TOKEN": token, "PYTHONIOENCODING": "utf-8"}
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # docs/shape.md, daemon (2026-08-24)
         args = [str(PY), "-m", "mote.serve.app", "--checkpoint", cfg["checkpoint"], "--device", cfg["device"],
                 "--port", str(cfg["port"]), "--host", cfg.get("host", "127.0.0.1")]
         with open(LOG_FILE, "a", encoding="utf-8") as log:

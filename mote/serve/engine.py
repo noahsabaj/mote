@@ -149,9 +149,17 @@ class Engine:
         # under a byte budget; the Relation arena itself (model/arena.py) stays on the device.
         mb = int(os.environ.get("MOTE_PREFIX_CACHE_MB", 1024)) if prefix_cache_mb is None else int(prefix_cache_mb)
         self.prefix_cache = PrefixStore(mb << 20, pin=self.pin)
-        # Set by the server: a lock shared with the training worker (docs/shape.md). A reply holds it
-        # for its whole generation, so training yields at its next accumulation slice.
+        # Set by the server: the lock the training worker takes per accumulation slice (docs/shape.md).
+        # Serving no longer holds it for a reply (signed 2026-08-24 evening): decode runs on its own
+        # high-priority stream beside the training slice, and the gate is taken only around weight
+        # swaps. MOTE_SERVE_GATED=1 restores the old whole-reply hold (the A/B for the latency gate).
         self.gpu_gate = None
+        self.gated = os.environ.get("MOTE_SERVE_GATED", "0") == "1"
+        cuda = self.device.type == "cuda"
+        self.stream = torch.cuda.Stream(device=self.device, priority=-1) if cuda else None  # high priority
+        # Serving allocations (arena, decode graphs, prefill transients) live in their own pool so the
+        # trainer's churn cannot fragment them; the decode graphs capture into the same pool.
+        self.pool = torch.cuda.MemPool() if (cuda and os.environ.get("MOTE_SERVE_POOL", "1") != "0") else None
         # "<run>/ema@<step>" while a training job's EMA answers chats; None when serving a checkpoint.
         self.serving_live: str | None = None
         self.ckpt_path = path
@@ -172,7 +180,23 @@ class Engine:
         self._telemetry: Dict[str, dict] = {}
         self._attach_telemetry()
         self._last_card: List[int] = []  # the identity-card bytes of the last prompt (rewarm reads them)
-        self._setup_decode()
+        with self._serve_ctx():
+            self._setup_decode()
+
+    def _serve_ctx(self):
+        """Everything the serving side runs on the GPU goes through here: its own high-priority stream
+        and its own memory pool (no-ops on the CPU)."""
+        stack = contextlib.ExitStack()
+        if self.stream is not None:
+            stack.enter_context(torch.cuda.stream(self.stream))
+        if self.pool is not None:
+            stack.enter_context(torch.cuda.use_mem_pool(self.pool))
+        return stack
+
+    def drain(self) -> None:
+        """Wait for every serving kernel in flight (before a weight swap or a checkpoint load)."""
+        if self.stream is not None:
+            self.stream.synchronize()
 
     def _setup_decode(self) -> None:
         """The decode arena and (on CUDA, for models without a multi-byte head) the graph decoder."""
@@ -183,7 +207,8 @@ class Engine:
 
     def _graph_decoder(self) -> GraphDecoder:
         if self._gd is None:
-            self._gd = GraphDecoder(self.model, self.arena, self.device, STOP_IDS, ring_size=self.cfg.max_seq_len)
+            self._gd = GraphDecoder(self.model, self.arena, self.device, STOP_IDS, ring_size=self.cfg.max_seq_len,
+                                    pool=self.pool.id if self.pool is not None else None)
         return self._gd
 
     # ------------------------------------------------------------------------------
@@ -192,7 +217,7 @@ class Engine:
         """Trigger Triton JIT/autotune for prefill at a few prompt lengths (incl. odd and 16-aligned ones) and one
         decode step, so the first user request doesn't pay the ~40 s compile. Returns seconds spent."""
         t0 = time.perf_counter()
-        with self.lock:
+        with self.lock, self._serve_ctx():
             for L in (5, 16, 33, 128, 257, 512, 640, 1024, 2048, 4096):
                 L = min(L, self.cfg.max_seq_len - 4)
                 ids = torch.randint(0, 256, (1, L), device=self.device)
@@ -275,7 +300,8 @@ class Engine:
         place; a different config rebuilds the model. The prefix cache clears either way — its cached
         states were computed under the old weights."""
         new_cfg = MoteConfig.from_dict(cfg_dict)
-        with self.lock:
+        with self.lock:  # no reply in flight; the serving stream is drained before the weights change
+            self.drain()
             rebuilt = new_cfg.to_dict() != self.cfg.to_dict()
             if rebuilt:
                 self.cfg = new_cfg
@@ -285,7 +311,8 @@ class Engine:
             self.model.to(self.device).eval()
             if rebuilt:
                 self._attach_telemetry()
-                self._setup_decode()
+                with self._serve_ctx():
+                    self._setup_decode()
             self.prefix_cache.clear()
             self.arena.invalidate()
             self.serving_live = f"{name}@{step}"
@@ -400,7 +427,7 @@ class Engine:
         store.clear()
         self.arena.invalidate()
         n_bytes = 0
-        with self.lock:
+        with self.lock, self._serve_ctx():
             for ids, anchors in plan:
                 if not anchors:
                     continue
@@ -446,9 +473,9 @@ class Engine:
     def generate(self, messages: Sequence[dict], params: GenParams, emit: Callable[[dict], None], stop: threading.Event,
                  context: Optional[dict] = None) -> None:
         """`context`: {"fold": "auto" | "now" | "off", "card": <edited card or None>} — see mote.serve.context."""
-        with (self.gpu_gate or contextlib.nullcontext()):
-            with self.lock:
-                self._generate(messages, params, emit, stop, context or {})
+        gate = self.gpu_gate if (self.gated and self.gpu_gate is not None) else contextlib.nullcontext()
+        with gate, self.lock, self._serve_ctx():
+            self._generate(messages, params, emit, stop, context or {})
 
     def _generate(self, messages, params: GenParams, emit, stop: threading.Event, context: dict) -> None:
         limit = self.cfg.max_seq_len

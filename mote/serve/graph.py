@@ -55,9 +55,10 @@ def _if_node(pred: torch.Tensor):
 class GraphDecoder:
     K = 8  # replays per host sync
 
-    def __init__(self, model: HNetForCausalLM, arena: RelationArena, device, stop_ids, ring_size: int, seed: int = 0):
+    def __init__(self, model: HNetForCausalLM, arena: RelationArena, device, stop_ids, ring_size: int, seed: int = 0, pool=None):
         assert model.mbp_head is None, "graph decode is for models without a multi-byte head"
         self.model, self.arena, self.device = model, arena, torch.device(device)
+        self.pool = pool  # the engine's serving MemPool id: captures allocate there instead of a private pool
         cfg = model.cfg
         self.D0 = cfg.d_model_outer
         self.V = model.lm_head.weight.shape[0]
@@ -276,7 +277,7 @@ class GraphDecoder:
                 self._warmup(Cb)
             g = torch.cuda.CUDAGraph()
             g.register_generator_state(self.gen)
-            with torch.cuda.graph(g):
+            with torch.cuda.graph(g, pool=self.pool):
                 self._body(Cb, capturing=True)
             self.graphs[key] = g
         return g
