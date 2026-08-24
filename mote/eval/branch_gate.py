@@ -156,7 +156,7 @@ def main(argv=None):
     ap.add_argument("--branch", action="append", required=True, metavar="NAME=RUN_DIR", help="control=... and anneal=... (a branch's checkpoint is RUN_DIR/last.pt)")
     ap.add_argument("--sft-args", default="", help="the identical SFT argv for every branch (without --init-from/--out)")
     ap.add_argument("--skip-sft", action="store_true", help="reuse runs/<branch>_sft/last.pt")
-    ap.add_argument("--api", default="http://127.0.0.1:7860")
+    ap.add_argument("--api", default=None, help="daemon base URL (default: host/port from .mote/config.json, else 127.0.0.1:7860)")
     ap.add_argument("--device", default=None)
     ap.add_argument("--n-read", type=int, default=100)
     ap.add_argument("--n-sim", type=int, default=120)
@@ -166,6 +166,9 @@ def main(argv=None):
     ap.add_argument("--val-batches", type=int, default=64)
     ap.add_argument("--out", default=None, help="markdown path; default docs/results/<today>-branch-gate.md")
     args = ap.parse_args(argv)
+    if not args.api:
+        cfg = json.loads(Path(".mote/config.json").read_text()) if Path(".mote/config.json").exists() else {}
+        args.api = f"http://{cfg.get('host', '127.0.0.1')}:{cfg.get('port', 7860)}"
 
     branches = dict(b.split("=", 1) for b in args.branch)
     if set(branches) != {"control", "anneal"}:

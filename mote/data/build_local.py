@@ -52,7 +52,7 @@ def _docs(text_paths: Sequence[str | Path], chat_paths: Sequence[str | Path], ma
             msgs = r.get("messages")
             if not msgs:
                 continue
-            ids, mask = tok.format_chat_with_loss_mask([ChatMessage(m["role"], m["content"]) for m in msgs])
+            ids, mask = tok.format_chat_with_loss_mask([ChatMessage(m["role"], m.get("content") or "", m.get("parts")) for m in msgs])
             if len(ids) > max_bytes:
                 continue
             docs.append((ids, mask))
