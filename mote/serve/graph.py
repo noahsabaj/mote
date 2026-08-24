@@ -335,6 +335,7 @@ class GraphDecoder:
             S_host = state.main.n
             drained = 0
             reason = "max_bytes"
+            self.stop_id = None  # the stop id that ended the reply (the engine's tool hook reads it)
             K = self.K
             while True:
                 if stop.is_set():
@@ -375,6 +376,7 @@ class GraphDecoder:
                         reason = "max_bytes"
                     else:
                         reason = "eos"  # the stop id sits at ring[wpos], never consumed
+                        self.stop_id = int(self.h_bytes[wpos])
                     break
             self.state.main.n = S_host
             return reason, self.state, self.logits.clone()

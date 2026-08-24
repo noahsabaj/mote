@@ -17,7 +17,12 @@ PAD_ID = 258
 SYSTEM_ID = 259
 USER_ID = 260
 ASSISTANT_ID = 261
-VOCAB_SIZE = 262  # 256 bytes + 6 specials
+# The tool protocol (docs/shape.md § pipeline, docs/search.md; signed 2026-08-24): inside an assistant
+# turn the model writes <|call|> tool: args <|result|>, the server appends the result bytes and an
+# <|assistant|>, and generation resumes. One call id for every tool; the name before the colon routes.
+CALL_ID = 262
+RESULT_ID = 263
+VOCAB_SIZE = 264  # 256 bytes + 8 specials (the embedding was already padded to 264 rows)
 
 SPECIAL_NAMES = {
     BOS_ID: "<|bos|>",
@@ -26,7 +31,15 @@ SPECIAL_NAMES = {
     SYSTEM_ID: "<|system|>",
     USER_ID: "<|user|>",
     ASSISTANT_ID: "<|assistant|>",
+    CALL_ID: "<|call|>",
+    RESULT_ID: "<|result|>",
 }
+
+
+def parse_call(text: str) -> tuple[str, str]:
+    """`"search: byte-level tokenizers"` -> ("search", "byte-level tokenizers"); no colon -> (name, "")."""
+    tool, sep, args = text.partition(":")
+    return tool.strip().lower(), args.strip() if sep else ""
 ROLE_IDS = {"system": SYSTEM_ID, "user": USER_ID, "assistant": ASSISTANT_ID}
 
 
@@ -34,6 +47,10 @@ ROLE_IDS = {"system": SYSTEM_ID, "user": USER_ID, "assistant": ASSISTANT_ID}
 class ChatMessage:
     role: str  # "system" | "user" | "assistant"
     content: str
+    # An assistant turn with tool use is a sequence of parts instead of one content string:
+    # {"type": "text", "text"} | {"type": "call", "text": "sim: take candle"} | {"type": "result", "text": ...}.
+    # Rendered as bytes / <|call|> bytes <|result|> / bytes <|assistant|>; only text and call parts train.
+    parts: Optional[List[dict]] = None
 
 
 class ByteTokenizer:
@@ -67,34 +84,57 @@ class ByteTokenizer:
         return i >= BYTE_VOCAB
 
     # --- chat formatting ------------------------------------------------------------
+    @staticmethod
+    def _turn(m: ChatMessage) -> tuple[List[int], List[int]]:
+        """One turn: ROLE_ID + content + EOS, with the loss mask (1 = the model's own bytes)."""
+        train = 1 if m.role == "assistant" else 0
+        ids: List[int] = [ROLE_IDS[m.role]]
+        mask: List[int] = [0]
+        if m.parts:
+            for part in m.parts:
+                b = list(str(part.get("text", "")).encode("utf-8"))
+                kind = part.get("type", "text")
+                if kind == "call":  # the model writes <|call|>, the call bytes and <|result|>
+                    ids += [CALL_ID] + b + [RESULT_ID]
+                    mask += [train] * (len(b) + 2)
+                elif kind == "result":  # the server writes the result and the <|assistant|> that resumes the turn
+                    ids += b + [ASSISTANT_ID]
+                    mask += [0] * (len(b) + 1)
+                else:
+                    ids += b
+                    mask += [train] * len(b)
+        else:
+            b = list(m.content.encode("utf-8"))
+            ids += b
+            mask += [train] * len(b)
+        ids.append(EOS_ID)
+        mask.append(train)
+        return ids, mask
+
     def format_chat(self, messages: Sequence[ChatMessage], add_generation_prompt: bool = True) -> List[int]:
         """[bos] (<role> bytes <eos>)* [<assistant>]
 
         Each turn is ROLE_ID + UTF-8 bytes + EOS. A generation prompt ends with ASSISTANT_ID so
         the model's first emitted byte is the start of its reply; the reply terminates with EOS.
+        Assistant turns with `parts` render tool calls and results in place (see ChatMessage).
         """
         ids: List[int] = [BOS_ID]
         for m in messages:
-            role = ROLE_IDS[m.role]
-            ids.append(role)
-            ids.extend(m.content.encode("utf-8"))
-            ids.append(EOS_ID)
+            ids.extend(self._turn(m)[0])
         if add_generation_prompt:
             ids.append(ASSISTANT_ID)
         return ids
 
     def format_chat_with_loss_mask(self, messages: Sequence[ChatMessage]) -> tuple[List[int], List[int]]:
         """Like format_chat (no generation prompt) but also returns a per-position mask that is 1
-        on assistant content bytes and their closing EOS — the only positions SFT trains on."""
+        on assistant content bytes and their closing EOS — the only positions SFT trains on. In a
+        tool-using turn the call (<|call|> bytes <|result|>) trains too; result bytes never do."""
         ids: List[int] = [BOS_ID]
         mask: List[int] = [0]
         for m in messages:
-            role = ROLE_IDS[m.role]
-            ids.append(role)
-            mask.append(0)
-            content = list(m.content.encode("utf-8")) + [EOS_ID]
-            ids.extend(content)
-            mask.extend([1 if m.role == "assistant" else 0] * len(content))
+            t_ids, t_mask = self._turn(m)
+            ids.extend(t_ids)
+            mask.extend(t_mask)
         return ids, mask
 
 

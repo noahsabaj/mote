@@ -26,10 +26,10 @@ from ..model.relation import FullRelation
 from .context import fold
 from .graph import BUCKET, GraphDecoder
 from .identity import identity_card, with_system_card
-from ..tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer
+from ..tokenizer import ASSISTANT_ID, BOS_ID, CALL_ID, EOS_ID, PAD_ID, RESULT_ID, SYSTEM_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer, parse_call
 from .prefix_cache import Hit, PrefixStore
 
-STOP_IDS = {EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ASSISTANT_ID, BOS_ID}
+STOP_IDS = {EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ASSISTANT_ID, BOS_ID, RESULT_ID}  # <|result|> stops decoding for the tool hook
 
 
 @dataclass
@@ -38,6 +38,8 @@ class GenParams:
     top_p: float = 0.9
     max_bytes: int = 512
     n_candidates: int = 3  # draft length per chunk boundary (0 disables speculation); verification is exact
+    max_calls: int = 2  # tool calls per reply (docs/search.md: ≤ 2 searches; an RL episode raises it)
+    script: Optional[List[int]] = None  # forced ids instead of samples (tests / transcript replay; eager path only)
 
     @classmethod
     def from_dict(cls, d: Optional[dict], defaults: "GenParams") -> "GenParams":
@@ -47,6 +49,7 @@ class GenParams:
             top_p=float(d.get("top_p", defaults.top_p)),
             max_bytes=int(d.get("max_bytes", defaults.max_bytes)),
             n_candidates=int(d.get("n_candidates", defaults.n_candidates)),
+            max_calls=int(d.get("max_calls", defaults.max_calls)),
         )
 
 
@@ -144,6 +147,9 @@ class Engine:
         self.model.to(self.device).eval()
         self.tok = ByteTokenizer()
         self.lock = threading.Lock()
+        # tool hook: name -> fn(args) -> result text; the reply's <|call|>name: args<|result|> is routed here
+        self.tools: Dict[str, Callable[[str], str]] = {}
+        self.tool_result_limit = 1024  # bytes of result injected per call (docs/search.md)
         extra = ck.get("extra", {})
         step = int(ck.get("step", 0))
         self.info_ckpt = self._describe_checkpoint(self.ckpt_path, step, extra)
@@ -465,6 +471,12 @@ class Engine:
         reason = "max_bytes"
         last_stats_bytes = 0
         n_draft = params.n_candidates if self.model.mbp_head is not None else 0
+        script = list(params.script or [])  # forced ids (tests / replay): plain steps only
+        if script:
+            n_draft = 0
+        calls_made = 0
+        call_buf: List[bytearray] = []  # non-empty while the model is writing a tool call (after <|call|>)
+        stop_id: Optional[int] = None
 
         def stats() -> dict:
             elapsed = time.perf_counter() - t0
@@ -492,9 +504,17 @@ class Engine:
                 emit({"type": "diagnostics", **self._diagnostics(boundary_probs)})
             boundary_probs.append(bp)
             generated.append(byte)
-            text = streamer.feed(byte)
-            if text:
-                text_parts.append(text)
+            if byte == CALL_ID:  # the model opens a tool call: what follows is the call, not reply text
+                call_buf.append(bytearray())
+                text, source = "", "call"
+            elif call_buf:
+                if byte < 256:
+                    call_buf[-1].append(byte)
+                text, source = "", "call"
+            else:
+                text = streamer.feed(byte)
+                if text:
+                    text_parts.append(text)
             emit({
                 "type": "byte", "i": len(generated) - 1, "byte": byte, "text": text or None, "pending": len(streamer.pending),
                 "p": p, "entropy": entropy, "boundary": is_b, "boundary_p": bp, "chunk": chunk_index,
@@ -521,11 +541,42 @@ class Engine:
                 mbp = self.model._speculate(state)
             return mbp[0, :n_draft]
 
+        def tool_turn() -> bool:
+            """After a <|result|> stop: run the named tool, inject `<|result|> result <|assistant|>` into the
+            state, and return True so decoding resumes. False = the stop ends the reply."""
+            nonlocal state, logits, calls_made
+            if not call_buf or calls_made >= params.max_calls or stop.is_set():
+                return False
+            call_text = bytes(call_buf.pop()).decode("utf-8", errors="replace")
+            call_buf.clear()
+            tool, args = parse_call(call_text)
+            fn = self.tools.get(tool)
+            t_tool = time.perf_counter()
+            try:
+                result = fn(args) if fn is not None else f"(no such tool: {tool})"
+            except Exception as e:  # a failing tool is a result the model can read, never a crashed reply
+                result = f"(tool error: {type(e).__name__}: {str(e)[:200]})"
+            rb = list(str(result).encode("utf-8")[: self.tool_result_limit])
+            room = limit - 1 - (P + len(generated)) - 2
+            if room <= 0:
+                return False
+            inj = [RESULT_ID] + rb[:room] + [ASSISTANT_ID]
+            lg, _, _ = self.model.forward_from_state(torch.tensor([inj], device=self.device), state)
+            logits = lg[0, -1]
+            generated.extend(inj)
+            calls_made += 1
+            emit({"type": "tool", "index": calls_made, "tool": tool, "args": args, "call": call_text, "result": result,
+                  "result_bytes": len(rb[:room]), "truncated": len(rb) > room, "t_ms": (time.perf_counter() - t_tool) * 1000})
+            return True
+
         draft = None
-        use_graph = self._graph_ok and n_draft <= 0
-        if use_graph:
+        use_graph = self._graph_ok and n_draft <= 0 and not script
+        while use_graph:
             # one CUDA graph per byte, sampling on the device, K bytes per host sync (mote/serve/graph.py)
-            reason, state, logits = self._graph_decode(state, logits, params, P, limit, record, stop, timing)
+            reason, state, logits, stop_id = self._graph_decode(state, logits, params, P, limit, len(generated), record, stop, timing)
+            if reason == "eos" and stop_id == RESULT_ID and tool_turn():
+                continue
+            break
         while not use_graph and len(generated) < params.max_bytes:
             if stop.is_set():
                 reason = "stopped"
@@ -585,6 +636,8 @@ class Engine:
                     if n_acc > 0:  # the state must have read exactly the recorded bytes (the reply snapshot relies on it)
                         lg_acc, _, _ = self.model.forward_from_state(torch.tensor([xs[:n_acc]], device=self.device), state)
                         logits = lg_acc[0, -1]
+                    if fix == RESULT_ID and tool_turn():
+                        continue
                     reason = "eos"
                     break
                 spec["fixes"] += 1
@@ -602,8 +655,15 @@ class Engine:
                 draft = new_draft(bool(bm_fix[n_acc]), None)
             else:
                 # ---- plain step: one byte from the target
-                byte, p, entropy = _sample(logits, params.temperature, params.top_p)
+                if script:
+                    byte = script.pop(0)
+                    p, entropy = float(torch.softmax(logits.float(), dim=-1)[byte]), entropy_of(logits)
+                else:
+                    byte, p, entropy = _sample(logits, params.temperature, params.top_p)
                 if byte in STOP_IDS:
+                    if byte == RESULT_ID and tool_turn():
+                        draft = None
+                        continue
                     reason = "eos"
                     break
                 lg_next, routing, is_b, mbp = self.model.step(torch.tensor([[byte]], device=self.device), state)
@@ -616,11 +676,15 @@ class Engine:
                 last_stats_bytes = len(generated)
                 emit({"type": "stats", **stats()})
         self._commit("reply", prompt_ids + generated, state, logits, session)  # S2: the next turn starts here
-        emit({"type": "done", "reason": reason, "text": "".join(text_parts), "stats": stats()})
+        emit({"type": "done", "reason": reason, "text": "".join(text_parts), "calls": calls_made, "stats": stats()})
 
-    def _graph_decode(self, state, logits, params: GenParams, P: int, limit: int, record, stop: threading.Event, timing: dict):
+    def register_tool(self, name: str, fn: Callable[[str], str]) -> None:
+        """Route `<|call|>name: args<|result|>` to fn(args) -> result text (search, the sim environment, ...)."""
+        self.tools[name.strip().lower()] = fn
+
+    def _graph_decode(self, state, logits, params: GenParams, P: int, limit: int, n_done: int, record, stop: threading.Event, timing: dict):
         gd = self._graph_decoder()
-        max_out = max(min(params.max_bytes, limit - 1 - P), 0)
+        max_out = max(min(params.max_bytes - n_done, limit - 1 - P - n_done), 0)
         outer = [n for n, m in self.model.named_modules() if isinstance(m, Mamba3Mixer)]
         rel = [n for n, m in self.model.named_modules() if isinstance(m, FullRelation)]
         count = [0]
@@ -639,9 +703,9 @@ class Engine:
         reason, st, lg = gd.run(state, logits, params.temperature, params.top_p, max_out, stop, on_bytes)
         timing["plain_s"] += time.perf_counter() - t0
         timing["plain_bytes"] += count[0]
-        if reason == "max_bytes" and count[0] < params.max_bytes:
+        if reason == "max_bytes" and n_done + count[0] < params.max_bytes:
             reason = "context"
-        return reason, st, lg
+        return reason, st, lg, gd.stop_id
 
 
 def discover_checkpoints(root: Path) -> List[Path]:
