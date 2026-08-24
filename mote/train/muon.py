@@ -15,19 +15,21 @@ import torch
 
 @torch.no_grad()
 def newton_schulz(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
-    """Quintic Newton-Schulz iteration approximating the orthogonal factor of G (bf16, as in the reference)."""
+    """Quintic Newton-Schulz iteration approximating the orthogonal factor of G (bf16, as in the reference).
+    G may carry leading batch dims ([..., m, n]): every matrix is normalised by its own Frobenius norm and
+    the iteration runs as batched matmuls — one launch per step for a whole shape group (2026-08-24)."""
     a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.to(torch.float32)
-    X = (X / (X.norm() + eps)).to(torch.bfloat16)  # normalise in fp32, iterate in bf16 (reference practice)
-    transposed = X.shape[0] > X.shape[1]
+    X = (X / (X.norm(dim=(-2, -1), keepdim=True) + eps)).to(torch.bfloat16)  # normalise in fp32, iterate in bf16
+    transposed = X.shape[-2] > X.shape[-1]
     if transposed:
-        X = X.T
+        X = X.transpose(-2, -1)
     for _ in range(steps):
-        A = X @ X.T
+        A = X @ X.transpose(-2, -1)
         B = b * A + c * (A @ A)
         X = a * X + B @ X
     if transposed:
-        X = X.T
+        X = X.transpose(-2, -1)
     return X
 
 
@@ -41,6 +43,9 @@ class Muon(torch.optim.Optimizer):
         loss = closure() if closure is not None else None
         for group in self.param_groups:
             lr, mom, wd = group["lr"], group["momentum"], group["weight_decay"]
+            # momentum per parameter, then one batched Newton-Schulz per shape (the 12 Relation layers'
+            # 768² projections are one launch per iteration instead of 48)
+            by_shape: dict = {}
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -52,12 +57,16 @@ class Muon(torch.optim.Optimizer):
                 buf = state["momentum_buffer"]
                 buf.mul_(mom).add_(g)
                 upd = g.add(buf, alpha=mom) if group["nesterov"] else buf
-                upd = newton_schulz(upd, steps=group["ns_steps"]).to(p.dtype)
-                upd = upd * (group["rms_scale"] * max(p.shape[0], p.shape[1]) ** 0.5)
-                if wd:
-                    decay = lr * lr / group["lr_max"] if group["sw_decay"] else lr
-                    p.mul_(1.0 - decay * wd)
-                p.add_(upd, alpha=-lr)
+                by_shape.setdefault(tuple(p.shape), []).append((p, upd))
+            for shape, items in by_shape.items():
+                stacked = torch.stack([u for _, u in items]) if len(items) > 1 else items[0][1].unsqueeze(0)
+                orth = newton_schulz(stacked, steps=group["ns_steps"])
+                scale = group["rms_scale"] * max(shape[0], shape[1]) ** 0.5
+                decay = (lr * lr / group["lr_max"] if group["sw_decay"] else lr) * wd if wd else 0.0
+                for (p, _), o in zip(items, orth.unbind(0)):
+                    if decay:
+                        p.mul_(1.0 - decay)
+                    p.add_(o.to(p.dtype) * scale, alpha=-lr)
         return loss
 
 
