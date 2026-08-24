@@ -145,6 +145,41 @@ daemon job type `rlvr` (built 2026-08-24). Everything in the list exists; what e
 been measured on is in `docs/results/2026-08-24-pipeline-build.md`. What remains is operational: mixes B/C
 finish → the pre-launch queue → "launch" → trunk → branches → gate → SFT-1 → DPO stages → RLVR-1.
 
+## Kernel and compile workstreams (grilled and signed 2026-08-24; numbers in docs/results/2026-08-24-h100-probe.md)
+
+The H100 probe (324 KB/s at the frozen recipe = 4.8× the 4060 Ti, 8–13 % MFU; the 7-day trunk would cost
+~135 credits) fixed the roles: **the flagship trains locally; the H100 is for experimentation** (arms,
+probes, kernel tuning). FlashAttention-4 was read for what transfers: its Blackwell choreography (TMEM,
+2-CTA MMA, async pipelines) does not; its algorithms do (conditional softmax rescaling, LPT block order,
+software exp where MUFU binds — Hopper/Blackwell, never Ada). FlexAttention's FA4 backend runs Relation's
+exact score function correctly but is sm90-only and slower than our kernel on the 4060 Ti; rejected, as is
+a CuTe DSL port. Two workstreams, **kernel first, then compile**, each entering the running trunk by
+hot-swap (daemon restart → auto-resume from the last checkpoint right after a daily snapshot, logged in
+docs/results as a mid-run revision) once **exact + T1 smoke + ≥ 10 % faster local flagship step**; anything
+landing after trunk day 7 goes to the branches and post-training.
+
+**FlashRelation v2** (`mote/model/flash_relation.py`, exact to the materialized reference within bf16;
+training + prefill only — decode T=1 uses the materialized path below `FLASH_MIN_T`): head dim 96 tiled as
+64+32 (today it pads to 128: 25 % extra MMA and shared memory in every dot); a one-pass FA2/3-style
+backward parallel over KV blocks with fp32 atomic `dq` (5 tile-dots instead of 7, the exp work once
+instead of twice) and the PyTorch row terms (`da`, `delta`, `dλ`, self-gate corrections) moved into Triton
+prologue/epilogue kernels; FA4's conditional rescaling and LPT order; `exp2`; fixed per-device tile tables
+(no runtime autotune, so prefill latency stays flat — Ada measured at local queue ends, Hopper in one
+autonomous ~0.3-credit H100 session once local tests pass). `MOTE_DETERMINISTIC_RELATION=1` selects
+today's two-pass kernels. Gates: `tests/test_flash_relation.py` + one-pass-vs-two-pass + model-level
+`USE_FLASH` on/off equality + T1. Expected 1.7–2.2× on the kernel, which is an estimated 30–40 % of the
+local flagship step (extrapolated; the clean profile runs when the local queue empties).
+
+**Compile at root depth** (the elementwise/precision glue is ~39 % of local GPU time and ~30 % + a 9.4 %
+norm backward + a launch gap on the H100): register the three Triton custom autograd Functions
+(flash_relation, mamba3, fused norm) as custom ops so nothing graph-breaks → compile the block stacks with
+dynamic T (bucketed chunk counts; `cache_size_limit` guarded so Dynamo never falls back silently) →
+routing/dechunk rewritten in static-shape ops (same chunks selected, padded to the bucket; the equality
+test is the gate) → CUDA graphs: the static byte-level stages first, per-bucket main-network graphs gated
+on measured memory beside the resident serving arena (coarser buckets if needed). Serving stays eager;
+only the trainer's callable is compiled. The whole-model `--compile` flag exists but was never measured:
+eager/`--compile` 10-min twins are queued after `ab3_jepa_sig` and inform the plan.
+
 ## Serving root (grilled and signed 2026-08-24, BUILT the same day; results in docs/results/2026-08-24-serving-root.md)
 
 Reading FreeToken (2608.16157, edge MoE serving) settled two things at once. The transferable part of

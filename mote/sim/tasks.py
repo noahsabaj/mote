@@ -260,11 +260,10 @@ def facts_touched(domain: str, w: World, events: Sequence[Any]) -> List[Predicat
             elif "obj" in d:
                 seen[("obj", d["obj"])] = _obj_fact(w, d["obj"])
         elif domain == "inventory":
+            # goods only: coins follow from the trades, and leaving them out keeps goals short and natural
             for who in ((d["buyer"], d["seller"]) if ev.kind == "trade" else (d["who"],)):
                 st = w.get(w.eid(who), Stock)
                 seen[("goods", who, d["goods"])] = ("goods", who, d["goods"], st.goods[d["goods"]])
-                if ev.kind == "trade":
-                    seen[("coins", who)] = ("coins", who, st.coins)
         elif domain == "schedule":
             cal = w.get(w.eid(d["who"]), Calendar)
             slot = next((s for s in cal.slots if s[2] == d["title"]), None)
@@ -343,8 +342,8 @@ def _pred_text(p: Predicate, locale: str) -> str:
 
 
 def goal_text(goal: Sequence[Predicate], locale: str) -> str:
-    end = "。" if locale == "ja" else "."
-    return TEXT[locale]["goal"] + end.join(_pred_text(p, locale) for p in goal) + end
+    end = "。" if locale == "ja" else ". "
+    return (TEXT[locale]["goal"] + end.join(_pred_text(p, locale) for p in goal) + end).strip()
 
 
 # --- tasks ------------------------------------------------------------------------------------------------
