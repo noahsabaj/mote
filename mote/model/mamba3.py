@@ -160,13 +160,20 @@ class Mamba3Mixer(nn.Module):
     # ------------------------------------------------------------------------------
     def forward(self, u: torch.Tensor, return_final_states: bool = False, initial_states: Optional[Mamba3State] = None):
         z, x, Bn, Cn, ADT, DT, trap, angles = self._preprocess(u)
-        use_kernel = HAS_MAMBA3_KERNEL and u.is_cuda and initial_states is None
+        use_kernel = HAS_MAMBA3_KERNEL and u.is_cuda
         if use_kernel:
+            # Input_States order per upstream: (angle [B,H,A], ssm [B,H,P,N], k [B,H,N], v [B,H,P]).
+            # The kernel does not cast these; feed them back in the dtypes it returns
+            # (angle/ssm fp32, k/v as stored) so cached prefix states round-trip exactly.
+            inp = None
+            if initial_states is not None:
+                inp = (initial_states.angle.float(), initial_states.ssm.float(),
+                       initial_states.k, initial_states.v)
             out = mamba3_siso_combined(
                 Q=Cn, K=Bn, V=x, ADT=ADT, DT=DT, Trap=trap,
                 Q_bias=self.C_bias.squeeze(1), K_bias=self.B_bias.squeeze(1),
                 Angles=angles, D=self.D if torch.is_grad_enabled() else self.D.detach(), Z=z, chunk_size=self.chunk_size,
-                Input_States=None, return_final_states=return_final_states, cu_seqlens=None,
+                Input_States=inp, return_final_states=return_final_states, cu_seqlens=None,
             )
             if return_final_states:
                 y, last_angle, last_state, last_k, last_v, *_ = out
