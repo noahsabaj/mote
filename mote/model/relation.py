@@ -18,6 +18,7 @@ for 4096-byte contexts T is a few hundred and no fused kernel is needed.
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -30,6 +31,7 @@ from .flash_relation import HAS_TRITON, flash_relation
 RelationCache = Tuple[torch.Tensor, torch.Tensor]  # (P2 [B,H,S,dh], I~ [B,H,S,dh]) — or an ArenaLayer (arena.py)
 USE_FLASH = True  # fused Triton kernel (flash_relation.py) on CUDA; the materialized path is the reference
 FLASH_MIN_T = 16  # below this the launch costs more than the tiny matmuls
+_INTERPRET = os.environ.get("TRITON_INTERPRET") == "1"  # Triton's CPU interpreter: the kernel path without a GPU (tests)
 
 
 def _rope_cos_sin(positions: torch.Tensor, dim: int, theta: float, dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -171,7 +173,7 @@ class FullRelation(nn.Module):
         Sall = S + T
         new_cache = cache if arena else (p2_all, info_all)
 
-        if USE_FLASH and HAS_TRITON and x.is_cuda and T >= FLASH_MIN_T and self.window is None:
+        if USE_FLASH and HAS_TRITON and (x.is_cuda or _INTERPRET) and T >= FLASH_MIN_T and self.window is None:
             y, g = flash_relation(p1, p2_all, info_all, self.lam, self.tau_s, q_start=S)
             out = self.wo(y.transpose(1, 2).reshape(B, T, D))
             extras = []
