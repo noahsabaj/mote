@@ -12,10 +12,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
+
 import time
 from pathlib import Path
-from typing import Dict, Iterator, List
+from typing import Iterator, List
 
 import numpy as np
 
@@ -64,60 +64,70 @@ def stream_source(src: PretrainSource, min_bytes: int, max_bytes: int) -> Iterat
 
 
 def build(out: Path, target_bytes: int, val_bytes: int, min_bytes: int, max_bytes: int, seed: int, sources: List[PretrainSource]):
-    rng = random.Random(seed)
-    iters: Dict[str, Iterator[bytes]] = {s.key: stream_source(s, min_bytes, max_bytes) for s in sources}
+    import gc
+
     budget = {s.key: int(s.share * target_bytes) for s in sources}
     val_budget = {s.key: int(s.share * val_bytes) for s in sources}
-    written = {s.key: 0 for s in sources}
     exhausted = set()
     t0 = time.time()
 
-    def take(key: str) -> bytes | None:
-        try:
-            return next(iters[key])
-        except StopIteration:
-            exhausted.add(key)
-            return None
-        except Exception as e:  # network hiccup: drop the source rather than the run
-            print(f"  source {key} failed: {type(e).__name__}: {str(e)[:120]}", flush=True)
-            exhausted.add(key)
-            return None
+    # One source at a time: 20 concurrent streaming iterators held ~20 GB of parquet read buffers
+    # and the kernel OOM-killed the first build (2026-08-23). Sequential filling bounds memory at the
+    # heaviest single source; the loader samples random windows, so source-blocked order is harmless.
+    # Writes go through memory-mapped files the OS pages to disk; truncated to the written length.
+    train_path, val_path = out.with_suffix(".train.bin"), out.with_suffix(".val.bin")
+    train_buf = np.memmap(train_path, dtype=np.uint16, mode="w+", shape=(sum(budget.values()) + max_bytes + 2,))
+    val_buf = np.memmap(val_path, dtype=np.uint16, mode="w+", shape=(sum(val_budget.values()) + max_bytes + 2,))
+    nt = nv = dt = dv = 0
+    gt = {s.key: 0 for s in sources}
+    gv = {s.key: 0 for s in sources}
 
-    def fill(path: Path, budgets: Dict[str, int]):
-        total = sum(budgets.values())
-        # Write through a memory-mapped file: the OS pages it to disk as it fills, so a 10 GB corpus
-        # (20 GB of uint16 ids) never has to sit in RAM. Truncated to the written length at the end.
-        buf = np.memmap(path, dtype=np.uint16, mode="w+", shape=(total + max_bytes + 2,))
-        n, n_docs, got = 0, 0, {k: 0 for k in budgets}
-        keys = list(budgets)
-        while keys:
-            # pick the source furthest behind its share
-            key = min(keys, key=lambda k: got[k] / max(budgets[k], 1))
-            doc = take(key)
-            if doc is None or got[key] >= budgets[key]:
-                keys.remove(key)
-                continue
-            need = len(doc) + 2
-            if n + need > len(buf):
-                break
-            buf[n] = BOS_ID
-            buf[n + 1 : n + 1 + len(doc)] = np.frombuffer(doc, dtype=np.uint8)
-            buf[n + 1 + len(doc)] = EOS_ID
-            n += need
-            got[key] += need
-            n_docs += 1
-            if n_docs % 5000 == 0:
-                print(f"  {path.name}: {n_docs} docs {n/1e6:.0f} MB ({n/1e6/(time.time()-t0):.2f} MB/s) " + " ".join(f"{k}={got[k]/1e6:.0f}" for k in got), flush=True)
+    for src in sources:
+        it = stream_source(src, min_bytes, max_bytes)
+
+        def take() -> bytes | None:
+            try:
+                return next(it)
+            except StopIteration:
+                exhausted.add(src.key)
+                return None
+            except Exception as e:  # network hiccup: drop the source rather than the run
+                print(f"  source {src.key} failed: {type(e).__name__}: {str(e)[:120]}", flush=True)
+                exhausted.add(src.key)
+                return None
+
+        # val quota first, then train, from the same iterator: the shards never share a document
+        for buf, got, quota, is_val in ((val_buf, gv, val_budget[src.key], True), (train_buf, gt, budget[src.key], False)):
+            n = nv if is_val else nt
+            while got[src.key] < quota:
+                doc = take()
+                if doc is None:
+                    break
+                need = len(doc) + 2
+                if n + need > len(buf):
+                    break
+                buf[n] = BOS_ID
+                buf[n + 1 : n + 1 + len(doc)] = np.frombuffer(doc, dtype=np.uint8)
+                buf[n + 1 + len(doc)] = EOS_ID
+                n += need
+                got[src.key] += need
+                if is_val:
+                    nv, dv = n, dv + 1
+                else:
+                    nt, dt = n, dt + 1
+                if (dt + dv) % 5000 == 0:
+                    print(f"  {src.key}: {dt + dv} docs, train {nt/1e6:.0f} MB val {nv/1e6:.0f} MB ({(nt + nv)/1e6/(time.time()-t0):.2f} MB/s)", flush=True)
+        print(f"  {src.key} done: train {gt[src.key]/1e6:.0f}/{budget[src.key]/1e6:.0f} MB val {gv[src.key]/1e6:.0f} MB" + (" (exhausted)" if src.key in exhausted else ""), flush=True)
+        del it
+        gc.collect()
+
+    for buf in (train_buf, val_buf):
         buf.flush()
-        del buf
-        with open(path, "r+b") as f:
-            f.truncate(n * 2)
-        return n, n_docs, got
-
-    print("val shard ...", flush=True)
-    nv, dv, gv = fill(out.with_suffix(".val.bin"), val_budget)
-    print("train shard ...", flush=True)
-    nt, dt, gt = fill(out.with_suffix(".train.bin"), budget)
+    del train_buf, val_buf
+    with open(train_path, "r+b") as f:
+        f.truncate(nt * 2)
+    with open(val_path, "r+b") as f:
+        f.truncate(nv * 2)
     meta = {
         "dtype": "uint16", "vocab_size": VOCAB_SIZE,
         "train": {"ids": nt, "docs": dt, "file": out.with_suffix(".train.bin").name, "per_source_bytes": gt},
@@ -128,7 +138,10 @@ def build(out: Path, target_bytes: int, val_bytes: int, min_bytes: int, max_byte
         "exhausted": sorted(exhausted),
     }
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=2))
-    print(json.dumps({k: v for k, v in meta.items() if k != "sources"}, indent=2))
+    print(json.dumps({k: v for k, v in meta.items() if k != "sources"}, indent=2), flush=True)
+    # pyarrow's background IO threads crash the interpreter during normal teardown (PyGILState_Release
+    # fatal error); everything is flushed and truncated by now, so skip Python finalization entirely.
+    os._exit(0)
 
 
 def main():
