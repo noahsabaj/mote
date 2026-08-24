@@ -218,6 +218,30 @@ docs/results); **`F.rms_norm`**'s fused kernel replaces mamba_ssm's norm if the 
 kernel gate; CuTeDSL / CUTLASS Inductor backends and Gluon are H100-only one-flag experiments once the
 compile workstream runs there.
 
+## Mixture of experts (grilled and signed 2026-08-24; numbers and the seven-paper digest in docs/research/moe-2026-08-24.md)
+
+Root option, Noah's call: MoE enters the pre-launch funnel as its own arm family. The one property that
+earns it a place on this box: top-k experts add parameters without activation memory, and activations
+are what cap the flagship at 16384 on 8 GB. Built in `mote/model/moe.py` (commit da14e1e): `MoESwiGLU` in
+the FFN slot of the Relation blocks — E experts as stacked tensors under batched Muon, router on AdamW fp32,
+three exact-equal execution paths (dense masked for the decode graph, per-expert loop, `grouped_mm` bf16),
+padded chunk rows excluded from every statistic; routers `lossfree` (DeepSeek-V3 bias + Moonlight gate
+scale + seq-level balance 1e-4) and `aux` (Switch + z-loss); telemetry = load / MaxVio / top-k mass per
+layer per step, expert usage per layer at eval, per-domain routing NMI/JSD via `mote.eval.moe_report`.
+Relation is untouched.
+
+**The funnel is different for MoE** — the joint scaling law (2502.05172) says its gain rides on a steeper
+data exponent, so at 30 min / 2 h an MoE arm looks *worse* (+0.07…+0.17 nats) whatever the truth; the
+crossover is 3.7 tokens/param. Verdict = 35M runs of 12 h at equal wall-clock (D/N ≈ 20, predicted
+−0.013 bpb for the E=4-class layout, above the ±0.005 gate): dense at {lr0/2, lr0, 2·lr0} and each MoE
+layout (E=4/top-2 half-size +0.7 GB; E=8/top-2 half-size +2.0 GB) at {lr0, lr0/2}, constant LR with
+`--eval-ema`, so `mote.train.lr_horizon` fits ln lr* vs ln D (Kakao 2608.20061 §2.2.1) from the same runs
+and extrapolates to the trunk's 75 tokens/param — the freeze's lr came from 0.2 tokens/param and cannot
+have seen that slope; Noah reads the fit before any frozen number moves. 30-min flagship-preset arms keep
+their role for KB/s, memory, router balance and lr stability only. Slot: after JEPA round 2, before the
+confirm arm; the serving-beside-training gate is re-measured on the MoE preset. Side finding: the 7-day
+trunk is ~4 epochs of the 10 GB mix (fine per 2305.16264); the day-10 extension would be 6.
+
 ## Serving root (grilled and signed 2026-08-24, BUILT the same day; results in docs/results/2026-08-24-serving-root.md)
 
 Reading FreeToken (2608.16157, edge MoE serving) settled two things at once. The transferable part of
