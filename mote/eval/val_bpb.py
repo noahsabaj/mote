@@ -49,14 +49,15 @@ def run(checkpoint: str | Path, data: Optional[str], domains: Optional[str], bat
     ratio = cfg.dc.target_ratio_final
     out: Dict = {"checkpoint": str(checkpoint), "step": step, "seq_len": seq_len, "batches": batches, "domains": {}}
     with torch.no_grad():
+        # spread=True: windows over the whole shard; the head of a source-blocked shard is one source only
         if data:
-            ev = evaluate(model, ByteShard(data, "val"), batch_size, seq_len, batches, device, ratio)
+            ev = evaluate(model, ByteShard(data, "val"), batch_size, seq_len, batches, device, ratio, spread=True)
             out["val_bpb"] = ev["val_bpb"]
             out["val"] = {k: v for k, v in ev.items() if isinstance(v, (int, float))}
         if domains:
             d = Path(domains)
             for p in sorted(d.glob("*.val.bin")):
-                ev = evaluate(model, raw_shard(p), batch_size, seq_len, batches, device, ratio)
+                ev = evaluate(model, raw_shard(p), batch_size, seq_len, batches, device, ratio, spread=True)
                 out["domains"][p.name.split(".")[0]] = ev["val_bpb"]
     return out
 

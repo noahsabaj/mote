@@ -36,8 +36,8 @@ class MixedShard:
             masks.append(m)
         return torch.cat(ids, 0), (torch.cat(masks, 0) if masks[0] is not None else None)
 
-    def sequential_batches(self, batch_size: int, seq_len: int, max_batches=None):
-        return self.shards[0].sequential_batches(batch_size, seq_len, max_batches)
+    def sequential_batches(self, batch_size: int, seq_len: int, max_batches=None, spread: bool = False):
+        return self.shards[0].sequential_batches(batch_size, seq_len, max_batches, spread=spread)
 
 
 class ByteShard:
@@ -70,9 +70,23 @@ class ByteShard:
         mask = torch.from_numpy(np.stack([w[1] for w in wins])) if self.mask is not None else None
         return ids, mask
 
-    def sequential_batches(self, batch_size: int, seq_len: int, max_batches: int | None = None):
-        """Non-overlapping windows for evaluation. Yields (ids, mask|None)."""
+    def sequential_batches(self, batch_size: int, seq_len: int, max_batches: int | None = None, spread: bool = False):
+        """Non-overlapping windows for evaluation. Yields (ids, mask|None).
+
+        The val shards are source-blocked (build_mix fills one source after another), so the first
+        `max_batches` windows are the first source only. `spread=True` spaces the same number of windows
+        evenly over the whole shard instead — every source in proportion (found 2026-08-24; opt-in so
+        the lab arms stay comparable to their controls)."""
         n_windows = (self.n - 1) // seq_len
+        if spread and max_batches is not None and max_batches * batch_size < n_windows:
+            total = max_batches * batch_size
+            picks = [round(k * (n_windows - 1) / max(total - 1, 1)) for k in range(total)]
+            for b in range(0, total, batch_size):
+                wins = [self._window(j * seq_len, seq_len) for j in picks[b : b + batch_size]]
+                ids = torch.from_numpy(np.stack([w[0] for w in wins]))
+                mask = torch.from_numpy(np.stack([w[1] for w in wins])) if self.mask is not None else None
+                yield ids, mask
+            return
         for i in range(0, n_windows, batch_size):
             if max_batches is not None and i // batch_size >= max_batches:
                 break

@@ -31,6 +31,18 @@ facts). Mix B (fresh flagship composition, 10 GB) and mix C (anneal, 8 GB) build
   1.763, backbone/code/long/math/multi 1.6–3.0.
 * Expert-trace generation: 20 k tasks in 16 s; the trace shard builds in 13 s.
 
+## Found: every trainer "val bpb" so far is the first source only
+
+The gate dry run (same checkpoint as both branches) returned a shared val bpb *identical* to the backbone
+slice. Cause: `build_mix` fills the val shard one source after another and `evaluate` reads the first
+`eval_batches` windows — on the mixes that is fineweb_edu only (32 MB of it before dclm starts; 8 windows
+of 16384 never leave it). On the 35M, mix-A val at seq 1024 / 8 windows: **head 1.800 vs spread 1.705**.
+Consequences: arm-vs-control comparisons in a queue stay fair (same slice for both); absolute "val bpb"
+numbers in the freeze and chain docs are fineweb-head numbers, not mix numbers. Fix: `sequential_batches(...,
+spread=True)` spaces the windows over the whole shard; `--eval-spread` on the trainer (off by default so
+the running queue keeps its basis), on by default in `val_bpb` (the gate's guard). The trunk and both
+branches run with `--eval-spread`; the day-7 trigger reads the spread number.
+
 ## Deliberately untested until a trained model exists
 
 * The graph-decode tool path: the hook is shared, the stop-id read is plumbed (`gd.stop_id`), but no test can

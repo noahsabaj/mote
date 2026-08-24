@@ -177,11 +177,15 @@ def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: fl
 
 
 @torch.no_grad()
-def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len: int, max_batches: int, device, target_ratio: float):
+def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len: int, max_batches: int, device, target_ratio: float,
+             spread: bool = False):
+    """`spread=False` reads the head of the val shard = its first source only (fineweb_edu on the mixes);
+    `spread=True` spaces the windows over the whole shard. Off by default so every arm in a queue is
+    measured like its control; the trunk and the branches run with --eval-spread."""
     model.eval()
     tot_nll, tot_tok, tot_bytes, tot_chunks, mbp_correct, mbp_tot = 0.0, 0, 0, 0, 0, 0
     word_hits, boundary_count = 0, 0
-    for batch, lmask in shard.sequential_batches(batch_size, seq_len, max_batches):
+    for batch, lmask in shard.sequential_batches(batch_size, seq_len, max_batches, spread=spread):
         batch = batch.to(device, non_blocking=True)
         inputs, targets = batch[:, :-1], batch[:, 1:]
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
@@ -305,6 +309,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
     ap.add_argument("--schedule", default="wsd", choices=["wsd", "trunk", "cooldown"], help="wsd: warmup-stable-decay over the budget (lab arms); trunk: warmup then constant, no decay (the flagship trunk); cooldown: decay only, lr -> 0.1x over the run (a branch started with --init-from a trunk snapshot). docs/shape.md pipeline")
     ap.add_argument("--snapshot-steps", type=int, default=0, help="also keep a weights-only snap_<step>.pt every N steps (the branch points for cooldowns)")
+    ap.add_argument("--eval-spread", action="store_true", help="evaluate on windows spread over the whole val shard instead of its head (= first source only); use for the trunk and branches, never mid-queue")
     return ap
 
 
@@ -555,7 +560,7 @@ class Trainer:
                     rec["mfu"] = rec["tflops"] / self.peak_tflops
                 self.log(rec)
             if self.step % args.eval_every == 0:
-                ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio)
+                ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio, spread=args.eval_spread)
                 ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
                 self.log({"eval": ev})
             if (time.time() - last_ckpt) / 60 >= args.ckpt_minutes:
@@ -569,7 +574,7 @@ class Trainer:
         if self._stop:
             self.log({"stopped": self.stopped_reason or "requested"})
 
-        ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, cfg.dc.target_ratio_final)
+        ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, cfg.dc.target_ratio_final, spread=args.eval_spread)
         ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
         self.log({"eval": ev, "final": True})
 

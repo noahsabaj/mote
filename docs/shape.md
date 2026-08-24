@@ -86,7 +86,8 @@ reachable (RLVR raises pass@1 while the base keeps pass@k, 2504.13837; on-policy
 forgets least, 2509.04259). So: facts → pre/mid, format → SFT, RL last, headroom-gated.
 
 **Pre — the trunk.** The frozen config above; `--schedule trunk` = warmup (10 % of the 7-day estimate)
-then constant lr 8e-4, no decay. `--snapshot-steps` keeps a weights-only `snap_<step>.pt` about daily —
+then constant lr 8e-4, no decay; `--eval-spread` (val windows over the whole mix — the default head-only
+eval is the first source, see docs/results/2026-08-24-pipeline-build.md). `--snapshot-steps` keeps a weights-only `snap_<step>.pt` about daily —
 the branch points. The daemon serves the EMA as today. Launch on Noah's word after the pre-launch queue.
 Branch trigger (automatic): the first of {24-h val-bpb gain < 0.003, day 7, Noah's "branch"}. At day 7
 with the gain still ≥ 0.003: continue on **mix B** in 1-day resumes, day 10 at most, then branch.
