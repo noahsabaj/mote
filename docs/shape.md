@@ -22,7 +22,15 @@ which is why deferred question 1 (step- or micro-batch-level preemption) is the 
 measurement has to settle: at the flagship a full step is seconds, so the boundary will have to be a
 gradient-accumulation slice, not a step.
 
-## Day one on Fedora: the measurements
+## Day one on Fedora: measured 2026-08-23 — `docs/results/2026-08-23-fedora-day1.md`
+
+All six ran (16384 profiles OOM beside the desktop — that itself is finding #1). Headlines: +11–12 %
+step throughput vs WSL2; ~39 % of GPU time is elementwise/dtype traffic and the multi-byte head another
+8–13 % with no benefit; kernel-vs-reference Δlogit 0.148 makes Input_States priority #1; the two-process
+sharing baseline already meets the serving contract 40× over at 35M scale — the daemon's case is flagship
+memory (one weight copy, no VRAM for two processes at 16384), not latency.
+
+## Day one on Fedora: the measurements (as planned)
 
 Same scripts, same configs as `docs/results/2026-08-23-chain.md`, so every number has a WSL2 twin.
 

@@ -1,0 +1,81 @@
+{
+ "preset": "local",
+ "params": 35353352,
+ "batch": 4,
+ "seq_len": 2048,
+ "grad_accum": 4,
+ "bucket": 64,
+ "flash": true,
+ "ckpt_main": false,
+ "block_local_mbp": true,
+ "mbp": true,
+ "sec_per_step": 0.3554,
+ "bytes_per_sec": 92209,
+ "bytes_per_chunk": 3.25,
+ "flops_per_byte_M": 127.8,
+ "tflops": 11.78,
+ "mfu": 0.267,
+ "peak_mem_GB": 2.77
+}
+USDT:2026-08-23 21:54:32 62815:62815 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-08-23 21:54:32 62815:62815 SyncActivityProfilerHandler.cpp:59] profiler_stop
+
+== forward per module / phases (device time, ms) ==
+  forward+loss                98.01
+  forward+loss               108.56
+  fwd:embeddings               0.10
+  fwd:embeddings               0.13
+  fwd:encoder                 14.32
+  fwd:encoder                 14.89
+  fwd:routing_module           1.75
+  fwd:chunk_layer              0.24
+  fwd:routing_module           1.81
+  fwd:chunk_layer              0.93
+  fwd:main_network            37.53
+  fwd:main_network            40.02
+  fwd:dechunk_layer            0.74
+  fwd:decoder                 13.55
+  fwd:dechunk_layer            0.87
+  fwd:decoder                 13.81
+  fwd:lm_head                  0.51
+  fwd:mbp_head                26.40
+  fwd:lm_head                  0.51
+  fwd:mbp_head                30.58
+  backward                     0.01
+  backward                     0.18
+  optimizer                    5.88
+  optimizer                    1.75
+
+== top CUDA kernels ==
+----------------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                                  Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+----------------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                          forward+loss         0.00%       0.000us         0.00%       0.000us       0.000us     108.558ms        31.95%     108.558ms      27.140ms             4  
+                                                          forward+loss         0.48%       2.371ms        36.47%     179.448ms      44.862ms       0.000us         0.00%      98.011ms      24.503ms             4  
+                                                              aten::mm         1.63%       8.034ms         2.38%      11.729ms      14.030us      85.923ms        25.29%      85.923ms     102.779us           836  
+                                                             aten::mul         2.93%      14.410ms         4.94%      24.311ms       7.757us      68.630ms        20.20%      68.635ms      21.900us          3134  
+                                                          aten::linear         0.14%     702.250us         3.41%      16.765ms      30.154us       0.000us         0.00%      61.876ms     111.289us           556  
+                      autograd::engine::evaluate_function: MmBackward0         0.26%       1.301ms         2.27%      11.167ms      40.459us       0.000us         0.00%      56.733ms     205.554us           276  
+                                                           MmBackward0         0.21%       1.035ms         2.01%       9.866ms      35.745us       0.000us         0.00%      56.733ms     205.554us           276  
+                     autograd::engine::evaluate_function: MulBackward0         0.78%       3.816ms         4.83%      23.781ms      34.818us       0.000us         0.00%      49.604ms      72.627us           683  
+                                                           aten::copy_         1.51%       7.430ms         5.07%      24.950ms       8.498us      47.362ms        13.94%      47.362ms      16.131us          2936  
+                                                      fwd:main_network         0.00%       0.000us         0.00%       0.000us       0.000us      40.019ms        11.78%      40.019ms      10.005ms             4  
+                                                      fwd:main_network         1.45%       7.114ms         6.77%      33.335ms       8.334ms       0.000us         0.00%      37.531ms       9.383ms             4  
+                                                          MulBackward0         0.18%     902.798us         2.04%      10.058ms      14.727us       0.000us         0.00%      36.878ms      53.994us           683  
+                                                          aten::matmul         0.13%     621.959us         1.42%       6.980ms      23.266us       0.000us         0.00%      33.240ms     110.800us           300  
+                                                              aten::to         0.21%       1.043ms         6.11%      30.086ms       9.341us       0.000us         0.00%      31.179ms       9.680us          3221  
+                                                        aten::_to_copy         0.67%       3.307ms         5.67%      27.922ms      13.748us       0.000us         0.00%      31.179ms      15.352us          2031  
+                                                          fwd:mbp_head         0.00%       0.000us         0.00%       0.000us       0.000us      30.583ms         9.00%      30.583ms       7.646ms             4  
+                                                          fwd:mbp_head         0.53%       2.587ms         6.08%      29.909ms       7.477ms       0.000us         0.00%      26.397ms       6.599ms             4  
+         autograd::engine::evaluate_function: _FlashRelationFnBackward         0.08%     378.627us         4.19%      20.633ms     644.773us       0.000us         0.00%      25.916ms     809.875us            32  
+                                              _FlashRelationFnBackward         1.48%       7.260ms         4.12%      20.254ms     632.941us       8.211ms         2.42%      25.916ms     809.875us            32  
+void at::native::vectorized_elementwise_kernel<4, at::native::Binar...         0.00%       0.000us         0.00%       0.000us       0.000us      25.887ms         7.62%      25.887ms      27.422us           944  
+            ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn         0.00%       0.000us         0.00%       0.000us       0.000us      24.311ms         7.16%      24.311ms      92.087us           264  
+void at::native::vectorized_elementwise_kernel<4, at::native::CUDAF...         0.00%       0.000us         0.00%       0.000us       0.000us      23.813ms         7.01%      23.813ms      23.484us          1014  
+                        ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_tn         0.00%       0.000us         0.00%       0.000us       0.000us      21.217ms         6.25%      21.217ms      89.904us           236  
+                     autograd::engine::evaluate_function: PowBackward0         0.18%     877.000us         1.29%       6.367ms      44.212us       0.000us         0.00%      21.005ms     145.868us           144  
+                                                            aten::add_         0.60%       2.975ms         1.52%       7.502ms       6.434us      20.939ms         6.16%      20.939ms      17.958us          1166  
+----------------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 492.037ms
+Self CUDA time total: 339.748ms
+

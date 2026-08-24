@@ -87,11 +87,11 @@ than a 28 MB, thrice-compacted transcript.
    toolkit), `triton`, and build the Mamba-3 kernels the way `cloud/bootstrap.sh` does.
 4. **[x] Tests** (done: **72 passed, 0 skipped, 3 m 31 s** — the 23 GPU tests green on first run; FlashRelation exact against the reference): `python -m pytest -q` — the 23 GPU tests that skip on Windows run here; FlashRelation's
    exactness tests against the reference are the gate before any training.
-5. **[ ] Speed check**: `python -m mote.train.profile_step --data data/local_mix --preset local --init-from runs/overnight/last.pt --batch-size 4 --grad-accum 4 --bucket 64`
+5. **[x] Speed check** (done: 90.7 KB/s, 26.4 % MFU — +12 % over WSL2; full table in results): `python -m mote.train.profile_step --data data/local_mix --preset local --init-from runs/overnight/last.pt --batch-size 4 --grad-accum 4 --bucket 64`
    and compare with `docs/results/2026-08-23-chain.md` (80.8 KB/s, 23.5 % MFU on WSL2).
 6. **[x] Studio** (done: systemd user unit `mote.service`, linger on, device **cuda**; steady-state cold read ~150 ms vs 2.1–3.5 s on the Windows CPU, warm 45 ms, regenerate 27 ms, decode ~130 B/s at batch 1 — first request after a restart pays ~3 s of Triton JIT) (no `~/.config/systemd/user/mote-studio.service` yet; `.mote/token` came over with the repo): `mote service install` writes a systemd *user* unit (`~/.config/systemd/user/mote-studio.service`)
    and enables it; `loginctl enable-linger $USER` keeps it running without a session. Port 7861.
-7. **[~] Tailscale** (installed and up as `<your-node>`; `tailscale serve` still needs `sudo tailscale set --operator=$USER` once, then `tailscale serve --bg http://127.0.0.1:7861`): `sudo dnf install tailscale && sudo systemctl enable --now tailscaled && sudo tailscale up`,
+7. **[x] Tailscale** (done: operator set, serving at https://<your-node>.<your-tailnet>.ts.net) (installed and up as `<your-node>`; `tailscale serve` still needs `sudo tailscale set --operator=$USER` once, then `tailscale serve --bg http://127.0.0.1:7861`): `sudo dnf install tailscale && sudo systemctl enable --now tailscaled && sudo tailscale up`,
    then `tailscale serve --bg https+insecure://localhost:7861` (or plain `tailscale serve 7861`); the phone
    keeps the same `https://<machine>.<tailnet>.ts.net/` name if the machine name is reused.
 8. **[ ] Pairing**: open `http://127.0.0.1:7861/pair` on the Fedora desktop and pair the phone again (the

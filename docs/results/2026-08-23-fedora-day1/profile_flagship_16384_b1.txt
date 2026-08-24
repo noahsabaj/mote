@@ -1,0 +1,58 @@
+[W823 21:45:32.180518111 CUDACachingAllocator.cpp:508] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 40173568, total: 8211791872).
+[W823 21:45:32.185264856 CUDACachingAllocator.cpp:508] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 44367872, total: 8211791872).
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/nsabaj/Development/mote/mote/train/profile_step.py", line 178, in <module>
+    main()
+  File "/home/nsabaj/Development/mote/mote/train/profile_step.py", line 137, in main
+    step()
+  File "/home/nsabaj/Development/mote/mote/train/profile_step.py", line 126, in step
+    loss, n, stats, _ = compute_losses(model, batch, cfg.dc.target_ratio_init, cfg.mbp.loss_weight, cfg.dc.ratio_loss_weight, None)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/mote/train/train.py", line 136, in compute_losses
+    out = model(inputs)
+          ^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/mote/model/hnet.py", line 150, in forward
+    x = self.mbp_head(x, chunk_id, mask)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1884, in _call_impl
+    return inner()
+           ^^^^^^^
+  File "/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1832, in inner
+    result = forward_call(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/mote/model/mbp.py", line 172, in forward
+    x = layer(x, chunk_id, valid, attn_mask)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/mote/model/mbp.py", line 138, in forward
+    x = x + self.attn(self.norm1(x), chunk_id, valid, attn_mask)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/mote/model/mbp.py", line 120, in forward
+    y = block_local_attention(q, k, v, chunk_id, valid)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nsabaj/Development/mote/mote/model/mbp.py", line 102, in block_local_attention
+    y = F.scaled_dot_product_attention(qb, kw, vw, attn_mask=allowed[:, None])  # [B,H,nq,W,dh]
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.65 GiB of which 82.31 MiB is free. Process 15032 has 228.91 MiB memory in use. Including non-PyTorch memory, this process has 6.37 GiB memory in use. Of the allocated memory 5.61 GiB is allocated by PyTorch, and 69.91 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)

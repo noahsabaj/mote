@@ -1,0 +1,88 @@
+/home/nsabaj/Development/mote/.venv/lib/python3.12/site-packages/torch/autograd/graph.py:979: UserWarning: Unsupported unwinding pattern: unknown op code 0x8 (Triggered internally at /__w/pytorch/pytorch/torch/csrc/profiler/unwind/unwind.cpp:235.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+{
+ "preset": "flagship",
+ "params": 104606716,
+ "batch": 1,
+ "seq_len": 8192,
+ "grad_accum": 8,
+ "bucket": 64,
+ "flash": true,
+ "ckpt_main": true,
+ "block_local_mbp": true,
+ "mbp": true,
+ "sec_per_step": 1.3962,
+ "bytes_per_sec": 46937,
+ "bytes_per_chunk": 6.0,
+ "flops_per_byte_M": 329.6,
+ "tflops": 15.47,
+ "mfu": 0.351,
+ "peak_mem_GB": 4.1
+}
+USDT:2026-08-23 21:50:50 60965:60965 SyncActivityProfilerHandler.cpp:52] profiler_start
+USDT:2026-08-23 21:50:51 60965:60965 SyncActivityProfilerHandler.cpp:59] profiler_stop
+
+== forward per module / phases (device time, ms) ==
+  forward+loss               376.33
+  forward+loss               447.80
+  fwd:embeddings               0.28
+  fwd:embeddings               0.28
+  fwd:encoder                 69.55
+  fwd:encoder                 70.49
+  fwd:routing_module           4.74
+  fwd:chunk_layer              0.57
+  fwd:routing_module           4.89
+  fwd:chunk_layer              2.63
+  fwd:main_network           120.68
+  fwd:main_network           160.50
+  fwd:dechunk_layer            1.64
+  fwd:dechunk_layer           11.31
+  fwd:decoder                 67.30
+  fwd:decoder                 68.20
+  fwd:lm_head                  1.32
+  fwd:mbp_head               101.80
+  fwd:lm_head                  1.33
+  fwd:mbp_head               111.98
+  backward                     0.02
+  backward                     0.42
+  optimizer                   18.13
+  optimizer                    5.68
+
+== top CUDA kernels ==
+----------------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                                  Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+----------------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                          forward+loss         0.00%       0.000us         0.00%       0.000us       0.000us     447.797ms        33.36%     447.797ms      55.975ms             8  
+                                                          forward+loss         0.47%      10.183ms        28.73%     623.753ms      77.969ms       0.000us         0.00%     376.328ms      47.041ms             8  
+                                                              aten::mm         2.10%      45.649ms         3.92%      85.132ms      29.155us     359.198ms        26.76%     359.240ms     123.027us          2920  
+                      autograd::engine::evaluate_function: MmBackward0         0.21%       4.498ms        11.16%     242.261ms     312.192us       0.000us         0.00%     328.871ms     423.803us           776  
+                                                           MmBackward0         2.51%      54.504ms        10.95%     237.764ms     306.396us       0.000us         0.00%     328.871ms     423.803us           776  
+                                                          aten::linear         0.21%       4.630ms         5.63%     122.134ms      45.035us       0.000us         0.00%     319.044ms     117.641us          2712  
+                                                             aten::mul         3.55%      76.965ms         6.26%     135.944ms      13.243us     223.729ms        16.67%     223.730ms      21.795us         10265  
+                                                           aten::copy_         1.13%      24.425ms         5.44%     118.168ms      12.147us     173.839ms        12.95%     173.848ms      17.871us          9728  
+                                                      fwd:main_network         0.00%       0.000us         0.00%       0.000us       0.000us     160.504ms        11.96%     160.504ms      20.063ms             8  
+                     autograd::engine::evaluate_function: MulBackward0         0.74%      16.119ms         4.39%      95.196ms      47.982us       0.000us         0.00%     156.610ms      78.936us          1984  
+                                                          aten::matmul         0.18%       3.908ms         2.18%      47.419ms      33.871us       0.000us         0.00%     156.146ms     111.533us          1400  
+                                                      fwd:main_network         1.89%      40.965ms         7.34%     159.381ms      19.923ms       0.000us         0.00%     120.683ms      15.085ms             8  
+                                                              aten::to         0.17%       3.642ms         6.58%     142.781ms      13.260us       0.000us         0.00%     120.588ms      11.199us         10768  
+                                                        aten::_to_copy         0.60%      13.068ms         6.41%     139.139ms      20.414us       0.000us         0.00%     120.588ms      17.692us          6816  
+                                                          MulBackward0         0.39%       8.413ms         2.05%      44.408ms      22.383us       0.000us         0.00%     116.409ms      58.674us          1984  
+                                                          fwd:mbp_head         0.00%       0.000us         0.00%       0.000us       0.000us     111.981ms         8.34%     111.981ms      13.998ms             8  
+          autograd::engine::evaluate_function: _Mamba3FunctionBackward         0.12%       2.620ms         1.96%      42.588ms     887.252us       0.000us         0.00%     109.721ms       2.286ms            48  
+                                               _Mamba3FunctionBackward         1.29%      28.109ms         1.81%      39.375ms     820.322us     101.281ms         7.54%     109.658ms       2.285ms            48  
+            ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nt         0.00%       0.000us         0.00%       0.000us       0.000us     108.355ms         8.07%     108.355ms     141.087us           768  
+            ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn         0.00%       0.000us         0.00%       0.000us       0.000us     106.537ms         7.94%     106.537ms     135.890us           784  
+                                                          fwd:mbp_head         0.30%       6.604ms         5.01%     108.705ms      13.588ms       0.000us         0.00%     101.805ms      12.726ms             8  
+         autograd::engine::evaluate_function: _FlashRelationFnBackward         0.04%     776.535us         4.18%      90.675ms     944.528us       0.000us         0.00%      88.434ms     921.189us            96  
+                                              _FlashRelationFnBackward         1.27%      27.493ms         4.14%      89.898ms     936.439us      54.379ms         4.05%      88.434ms     921.189us            96  
+void at::native::vectorized_elementwise_kernel<4, at::native::Binar...         0.00%       0.000us         0.00%       0.000us       0.000us      83.022ms         6.18%      83.022ms      31.448us          2640  
+                        ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_tn         0.00%       0.000us         0.00%       0.000us       0.000us      82.438ms         6.14%      82.438ms     264.226us           312  
+----------------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 2.171s
+Self CUDA time total: 1.342s
+
+active allocations at the snapshot, by first mote/ frame:
+     10.1 MB  other
+      8.1 MB  linear.py:134 forward
+      2.0 MB  linear.py:109 __init__
+      0.5 MB  relation.py:39 _rope_cos_sin
