@@ -37,6 +37,9 @@ class RelationArena:
         self.owner: Optional[int] = None
         self.n_valid: int = 0
         self.generation: int = 0  # bumps on every reallocation; captured graphs key on it
+        # The engine's serving MemPool (long-lived allocations only: this buffer and the decode graphs).
+        # Growth allocates inside it so a bigger arena never fragments the trainer's pool.
+        self.pool = None
 
     @property
     def bytes_per_chunk(self) -> int:
@@ -64,7 +67,11 @@ class RelationArena:
         while new_cap < n_chunks:
             new_cap *= 2
         old = self.buf
-        self.buf = torch.zeros(self.n_layers, 2, self.n_heads, new_cap, self.d_head, device=self.device, dtype=self.dtype)
+        import contextlib
+
+        ctx = torch.cuda.use_mem_pool(self.pool) if (self.pool is not None and self.device.type == "cuda") else contextlib.nullcontext()
+        with ctx:
+            self.buf = torch.zeros(self.n_layers, 2, self.n_heads, new_cap, self.d_head, device=self.device, dtype=self.dtype)
         self.buf[:, :, :, : self.capacity].copy_(old)
         self.capacity = new_cap
         self.generation += 1

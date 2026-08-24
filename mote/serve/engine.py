@@ -157,8 +157,11 @@ class Engine:
         self.gated = os.environ.get("MOTE_SERVE_GATED", "0") == "1"
         cuda = self.device.type == "cuda"
         self.stream = torch.cuda.Stream(device=self.device, priority=-1) if cuda else None  # high priority
-        # Serving allocations (arena, decode graphs, prefill transients) live in their own pool so the
-        # trainer's churn cannot fragment them; the decode graphs capture into the same pool.
+        # The LONG-LIVED serving allocations (arena, decode graphs) live in their own pool so the trainer's
+        # churn cannot fragment them. Transients (prefill activations, rewarm reads) deliberately do NOT:
+        # a MemPool keeps its high-water mark cached for itself, and on 2026-08-24 the pool grew to 1–3 GB
+        # of idle reservation over one evening of syncs, starving the training jobs of the same GPU
+        # (five arms OOM'd). `_serve_ctx()` therefore applies the pool only where asked.
         self.pool = torch.cuda.MemPool() if (cuda and os.environ.get("MOTE_SERVE_POOL", "1") != "0") else None
         # "<run>/ema@<step>" while a training job's EMA answers chats; None when serving a checkpoint.
         self.serving_live: str | None = None
@@ -180,16 +183,17 @@ class Engine:
         self._telemetry: Dict[str, dict] = {}
         self._attach_telemetry()
         self._last_card: List[int] = []  # the identity-card bytes of the last prompt (rewarm reads them)
-        with self._serve_ctx():
+        with self._serve_ctx(pool=True):
             self._setup_decode()
 
-    def _serve_ctx(self):
+    def _serve_ctx(self, pool: bool = False):
         """Everything the serving side runs on the GPU goes through here: its own high-priority stream
-        and its own memory pool (no-ops on the CPU)."""
+        (no-op on the CPU). `pool=True` additionally routes allocations into the serving MemPool — only for
+        the long-lived ones (arena construction; growth and graph capture route themselves)."""
         stack = contextlib.ExitStack()
         if self.stream is not None:
             stack.enter_context(torch.cuda.stream(self.stream))
-        if self.pool is not None:
+        if pool and self.pool is not None:
             stack.enter_context(torch.cuda.use_mem_pool(self.pool))
         return stack
 
@@ -201,6 +205,7 @@ class Engine:
     def _setup_decode(self) -> None:
         """The decode arena and (on CUDA, for models without a multi-byte head) the graph decoder."""
         self.arena = self.model.new_arena(self.device, capacity=int(os.environ["MOTE_ARENA_CHUNKS"]) if os.environ.get("MOTE_ARENA_CHUNKS") else None)
+        self.arena.pool = self.pool  # growth reallocates inside the serving pool
         self._gd: Optional[GraphDecoder] = None
         self._graph_ok = (self.device.type == "cuda" and self.model.mbp_head is None
                           and os.environ.get("MOTE_GRAPH_DECODE", "1") != "0")
