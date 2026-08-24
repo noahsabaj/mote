@@ -27,13 +27,41 @@ from .context import context_report
 from .identity import with_system_card
 from .engine import Engine, GenParams, discover_checkpoints
 from .prefs import PrefStore, rubric as rubric_info
+from .jobs import JobQueue
 from .pairing import Pairing, router as pairing_router
 
 ROOT = Path(__file__).resolve().parents[2]
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 app = FastAPI(title="Mote Studio")
 STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "token": None,
-               "challenger": None, "challenger_loading": False}  # challenger: a second Engine for blind A/B (docs/prefs.md)
+               "challenger": None, "challenger_loading": False,  # challenger: a second Engine for blind A/B (docs/prefs.md)
+               "jobs": None, "gate": None}  # the training job queue and the GPU gate it shares with serving (docs/shape.md)
+
+
+def _serve_sync(cfg_dict: dict, state_dict, name: str, step: int) -> None:
+    """A running job's EMA becomes the served weights (called under the GPU gate)."""
+    e = STATE["engine"]
+    if e is not None and not STATE["swapping"]:
+        e.apply_run_weights(cfg_dict, state_dict, name, step)
+
+
+def _job_finished(rec) -> None:
+    """A finished job's final checkpoint becomes the served model (done jobs only)."""
+    out = rec.out_dir
+    path = (ROOT / out / "last.pt") if out else None
+    if rec.state != "done" or path is None or not path.exists():
+        return
+    with STATE["lock"]:
+        STATE["swapping"] = True
+        try:
+            eng = Engine(path, device=STATE.get("device"))
+            eng.gpu_gate = STATE["gate"]
+            eng.warmup()
+            STATE["engine"] = eng
+        except Exception:
+            pass  # keep serving the EMA-synced weights; the checkpoint list still shows the run
+        finally:
+            STATE["swapping"] = False
 PREFS = PrefStore()
 
 # --- access token -----------------------------------------------------------------
@@ -179,11 +207,50 @@ def load_checkpoint(body: LoadBody):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             eng = Engine(path, device=STATE.get("device"))
+            eng.gpu_gate = STATE["gate"]
             eng.warmup()
             STATE["engine"] = eng
         finally:
             STATE["swapping"] = False
     return STATE["engine"].info()
+
+
+class TrainStartBody(BaseModel):
+    args: list
+
+
+class TrainStopBody(BaseModel):
+    id: Optional[str] = None
+
+
+@app.post("/api/training/start")
+def training_start(body: TrainStartBody):
+    """Enqueue a training job (docs/shape.md): args exactly as `python -m mote.train.train` takes them."""
+    jobs = STATE["jobs"]
+    if jobs is None:
+        raise HTTPException(503, "job queue not running")
+    try:
+        rec = jobs.submit([str(a) for a in body.args])
+    except SystemExit:
+        raise HTTPException(400, "bad training args (see `python -m mote.train.train --help`)")
+    return {"submitted": rec.id, **jobs.status()}
+
+
+@app.post("/api/training/stop")
+def training_stop(body: TrainStopBody):
+    jobs = STATE["jobs"]
+    if jobs is None:
+        raise HTTPException(503, "job queue not running")
+    rec = jobs.cancel(body.id)
+    if rec is None:
+        raise HTTPException(404, "no such job (or nothing running)")
+    return jobs.status()
+
+
+@app.get("/api/training/queue")
+def training_queue():
+    jobs = STATE["jobs"]
+    return jobs.status() if jobs is not None else {"current": None, "queued": [], "recent": []}
 
 
 @app.get("/api/training/runs")
@@ -490,6 +557,12 @@ def main(argv=None):
     eng = Engine(ck, device=args.device)
     print(f"warming up kernels ... ({eng.warmup():.1f} s)", flush=True)
     STATE["engine"] = eng
+    gate = threading.Lock()
+    eng.gpu_gate = gate
+    STATE["gate"] = gate
+    jobs = JobQueue(ROOT / ".mote" / "jobs.json", gate, on_serve_sync=_serve_sync, on_finished=_job_finished)
+    STATE["jobs"] = jobs
+    jobs.start()
     print(json.dumps(eng.info(), indent=1), flush=True)
     uvicorn.run(app, host=args.host, port=args.port)
 

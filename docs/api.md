@@ -73,6 +73,13 @@ run log's mtime — the log is what gains `val_bpb` while a run is still going.
 ### `POST /api/checkpoints/load`  body `{ "id": "pilot_1h/last.pt" }`
 Hot-swaps the served model. Returns the new `/api/model` payload. Generation requests during a swap get `503`.
 
+### `POST /api/training/start`  body `{ "args": ["--preset", "local", "--data", "data/local_mix", "--out", "runs/x", ...] }`
+Enqueue a training job on the resident daemon (docs/shape.md) — args exactly as `python -m mote.train.train`
+takes them; malformed args are rejected at submit time (400). `POST /api/training/stop` body `{ "id": null }`
+stops the running job at its next step boundary (final eval + checkpoint still happen) or cancels a queued one
+by id. `GET /api/training/queue` → `{ "current", "queued": [...], "recent": [...] }`. While a job runs, chats are
+answered by its EMA (`/api/model.live`); training yields to each reply at the next accumulation slice.
+
 ### `GET /api/training/runs`
 `[{ "id": "pilot_1h", "steps": 3100, "last_val_bpb": 1.63, "running": false, "started_at": "..." }]`
 

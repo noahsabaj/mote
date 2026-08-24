@@ -11,6 +11,7 @@
     type TrainRecord,
     type TrainingRun
   } from '../lib/types';
+  import type { JobsStatus, TrainingJob } from '../lib/types';
   import Curve from './Curve.svelte';
   import type { Series } from '../lib/chart';
   import Icon from './Icon.svelte';
@@ -20,6 +21,50 @@
   const PALETTE = ['var(--accent)', '#4f86e0', '#3aa37a', '#b35cc9', '#c9a227', '#7c8590'];
 
   let runs = $state<TrainingRun[]>([]);
+  // the daemon's job queue (docs/shape.md): training runs the studio owns
+  let jobs = $state<JobsStatus | null>(null);
+  let jobArgs = $state('--preset local --data data/local_mix --out runs/studio_job --optimizer muon --max-minutes 30');
+  let jobBusy = $state(false);
+  let jobError = $state<string | null>(null);
+
+  async function loadJobs() {
+    try {
+      jobs = await api.trainingQueue();
+      jobError = null;
+    } catch (e) {
+      jobError = e instanceof ApiError ? e.message : String(e);
+    }
+  }
+
+  async function startJob() {
+    const argv = jobArgs.trim().split(/\s+/);
+    if (!argv.length || jobBusy) return;
+    jobBusy = true;
+    try {
+      jobs = await api.trainingStart(argv);
+      jobError = null;
+      void loadRuns();
+    } catch (e) {
+      jobError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      jobBusy = false;
+    }
+  }
+
+  async function stopJob(id: string | null = null) {
+    if (jobBusy) return;
+    jobBusy = true;
+    try {
+      jobs = await api.trainingStop(id);
+      jobError = null;
+    } catch (e) {
+      jobError = e instanceof ApiError ? e.message : String(e);
+    } finally {
+      jobBusy = false;
+    }
+  }
+
+  const argline = (j: TrainingJob) => j.argv.join(' ');
   let runsError = $state<string | null>(null);
   let selected = $state<string[]>([]);
   let logs = $state<Record<string, LogRecord[]>>({});
@@ -62,6 +107,15 @@
 
   $effect(() => {
     void loadRuns();
+    void loadJobs();
+  });
+
+  $effect(() => {
+    const timer = setInterval(() => {
+      void loadJobs();
+      if (jobs?.current) void loadRuns();
+    }, POLL_MS * 2);
+    return () => clearInterval(timer);
   });
 
   // First selection of a run starts its log; later pulls only ask for what is new.
@@ -161,6 +215,42 @@
   });
   const anyRecords = $derived(selected.some((id) => (logs[id] ?? []).length > 0));
 </script>
+
+<section class="jobs" aria-label="Training jobs">
+  <div class="jobrow head">
+    <h3>Jobs</h3>
+    {#if jobs?.current}
+      <button class="btn" disabled={jobBusy} onclick={() => stopJob()}>Stop</button>
+    {/if}
+  </div>
+  {#if jobError}<p class="fail"><Icon name="alert" size={13} />{jobError}</p>{/if}
+  {#if jobs?.current}
+    <p class="jobline"><span class="live">running</span> <span class="mono">{argline(jobs.current)}</span></p>
+  {:else}
+    <p class="meta">Nothing running. The queue is sequential; a chat makes a run yield for the length of the reply.</p>
+  {/if}
+  {#each jobs?.queued ?? [] as j (j.id)}
+    <p class="jobline">
+      <span class="meta">queued{j.resumed ? ' (resume)' : ''}</span>
+      <span class="mono">{argline(j)}</span>
+      <button class="quiet" disabled={jobBusy} onclick={() => stopJob(j.id)}>Cancel</button>
+    </p>
+  {/each}
+  {#each (jobs?.recent ?? []).slice(0, 3) as j (j.id)}
+    <p class="jobline meta"><span class="state {j.state}">{j.state}</span> <span class="mono">{argline(j)}</span></p>
+  {/each}
+  <form
+    class="jobrow"
+    onsubmit={(e) => {
+      e.preventDefault();
+      void startJob();
+    }}
+  >
+    <input class="mono" bind:value={jobArgs} aria-label="Training arguments" />
+    <button class="btn accent" disabled={jobBusy}>Start</button>
+  </form>
+  <p class="meta">Args exactly as <span class="mono">python -m mote.train.train</span> takes them; the run lands in the list below.</p>
+</section>
 
 {#if runsError}
   <p class="fail"><Icon name="alert" size={14} />{runsError}</p>
@@ -285,6 +375,49 @@
 {/if}
 
 <style>
+  .jobs {
+    margin: 0 0 1.1rem;
+    padding: 0 0 0.9rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .jobrow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .jobrow.head {
+    justify-content: space-between;
+    margin-bottom: 0.3rem;
+  }
+  .jobrow input {
+    flex: 1;
+    font-size: 0.8rem;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--line);
+    border-radius: calc(var(--radius) - 2px);
+    background: var(--bg);
+    color: var(--ink);
+    min-width: 0;
+  }
+  .jobline {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.15rem 0;
+    min-width: 0;
+  }
+  .jobline .mono {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .mono {
+    font-family: var(--mono, ui-monospace, monospace);
+    font-size: 0.78rem;
+  }
+  .state.failed { color: var(--danger, #b4413c); }
+
   .picker {
     display: grid;
     gap: 0.3rem;

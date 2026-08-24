@@ -7,6 +7,7 @@ import type {
   ContextPreview,
   FoldMode,
   Health,
+  JobsStatus,
   LogPage,
   ModelInfo,
   PrefsSummary,
@@ -73,6 +74,19 @@ export const api = {
       body: JSON.stringify({ code })
     }),
   /** what the next prompt would look like: bytes used, fold point, card — no generation */
+  trainingQueue: () => request<JobsStatus>('/api/training/queue'),
+  trainingStart: (args: string[]) =>
+    request<JobsStatus & { submitted: string }>('/api/training/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args })
+    }),
+  trainingStop: (id: string | null = null) =>
+    request<JobsStatus>('/api/training/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    }),
   loadChallenger: (id: string) =>
     request<ModelInfo>('/api/challenger/load', {
       method: 'POST',

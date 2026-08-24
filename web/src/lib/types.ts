@@ -66,6 +66,27 @@ export interface ModelInfo {
   identity_card?: string;
   /** a second engine loaded for blind side-by-side comparisons (docs/prefs.md), or null */
   challenger?: ChallengerInfo | null;
+  /** "<run>/ema@<step>" while a training job's EMA answers chats (docs/shape.md), else null */
+  live?: string | null;
+}
+
+// ------------------------------------------------------------------- training jobs (docs/shape.md)
+
+export interface TrainingJob {
+  id: string;
+  argv: string[];
+  state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
+  created_at: number;
+  started_at: number | null;
+  ended_at: number | null;
+  error: string | null;
+  resumed: boolean;
+}
+
+export interface JobsStatus {
+  current: TrainingJob | null;
+  queued: TrainingJob[];
+  recent: TrainingJob[];
 }
 
 export interface ChallengerInfo {

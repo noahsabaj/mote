@@ -235,7 +235,7 @@ def load_checkpoint(path: Path, model, opt=None):
     return ck["step"], ck.get("extra", {})
 
 
-def main(argv=None):
+def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="pilot", choices=["pilot", "local", "flagship"])
     ap.add_argument("--config", default=None, help="JSON config overriding the preset")
@@ -255,176 +255,225 @@ def main(argv=None):
     ap.add_argument("--ckpt-minutes", type=float, default=10.0)
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--compile", action="store_true")
-    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon", "muonsw"], help="muon: Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest; muonsw: Muon with η²-scaled weight decay (2607.23777)")
+    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon", "muonsw"], help="muon: Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest; muonsw: Muon with \u03b7\u00b2-scaled weight decay (2607.23777)")
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
     ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
     ap.add_argument("--mix", action="append", default=[], metavar="PREFIX:SHARE", help="extra shard mixed into training by share, e.g. data/sft_identity:0.05 (repeatable)")
-    ap.add_argument("--beta2", type=float, default=0.95, help="AdamW β₂ (2608.16760: the convergence threshold rises as the batch shrinks; A/B 0.99/0.997 at our 32 kB steps)")
-    ap.add_argument("--mbp-weight", type=float, default=None, help="λ1 for the multi-byte head loss (preset default 1.0)")
-    ap.add_argument("--mbp-gamma", type=float, default=None, help="position weighting exp(-offset/γ) on the head loss (0 = off)")
-    ap.add_argument("--mbp-transition", action="store_true", help="add the V×V byte-transition bias to the head (DSpark Markov head)")
+    ap.add_argument("--beta2", type=float, default=0.95, help="AdamW \u03b2\u2082 (2608.16760: the convergence threshold rises as the batch shrinks; A/B 0.99/0.997 at our 32 kB steps)")
+    ap.add_argument("--mbp-weight", type=float, default=None, help="\u03bb1 for the multi-byte head loss (preset default 1.0)")
+    ap.add_argument("--mbp-gamma", type=float, default=None, help="position weighting exp(-offset/\u03b3) on the head loss (0 = off)")
+    ap.add_argument("--mbp-transition", action="store_true", help="add the V\u00d7V byte-transition bias to the head (DSpark Markov head)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--sft", action="store_true", help="train on an SFT shard (assistant-byte loss mask)")
     ap.add_argument("--init-from", default=None, help="checkpoint to initialize weights from (e.g. pretrain -> SFT)")
-    ap.add_argument("--ratio-weight", type=float, default=None, help="override dc.ratio_loss_weight (α)")
+    ap.add_argument("--ratio-weight", type=float, default=None, help="override dc.ratio_loss_weight (\u03b1)")
     ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
-    args = ap.parse_args(argv)
+    return ap
 
-    torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = MoteConfig.load(args.config) if args.config else getattr(MoteConfig, args.preset)()
-    cfg.max_seq_len = max(cfg.max_seq_len, args.seq_len)
-    if args.ratio_weight is not None:
-        cfg.dc.ratio_loss_weight = args.ratio_weight
-    if args.target_ratio is not None:
-        cfg.dc.target_ratio_init, cfg.dc.target_ratio_final = args.target_ratio
-    cfg.save(out_dir / "config.json")
-    (out_dir / "run.json").write_text(json.dumps({**vars(args), "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
+class Trainer:
+    """The training loop as a drivable object (decided 2026-08-23, docs/shape.md).
 
-    if args.bucket is not None:
-        cfg.dc.chunk_bucket = args.bucket
-    if args.no_mbp:
-        cfg.mbp.enabled = False
-    if args.mbp_weight is not None:
-        cfg.mbp.loss_weight = args.mbp_weight
-    if args.mbp_gamma is not None:
-        cfg.mbp.position_gamma = args.mbp_gamma
-    if args.mbp_transition:
-        cfg.mbp.transition = True
-    model = HNetForCausalLM(cfg, device=device)
-    if args.ckpt_main:
-        model.main_network.grad_checkpoint = True
-    n_params = model.num_params()
-    peak_tflops = peak_tflops_for(device) if device.type == "cuda" else None
-    print(f"params: {n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('mote.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('mote.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
-    opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, betas=(0.9, args.beta2), optimizer=args.optimizer)
+    `run()` is a generator that yields ("slice", None) after every accumulation micro-batch and
+    ("step", None) after every optimizer step. `main()` simply drains it, which reproduces the old
+    monolithic loop exactly; the daemon (mote.serve.jobs) drives it one yield at a time and slips
+    generation between slices. `request_stop()` ends the run gracefully at the next step boundary
+    (final eval + checkpoint still happen), which is what the studio's Stop button calls.
+    """
 
-    train_shard = ByteShard(args.data, "train", sft=args.sft)
-    val_shard = ByteShard(args.data, "val", sft=args.sft)
-    if args.mix:
-        extras = [(ByteShard(spec.rsplit(":", 1)[0], "train", sft=args.sft), float(spec.rsplit(":", 1)[1])) for spec in args.mix]
-        main_w = max(1.0 - sum(w for _, w in extras), 0.0)
-        train_shard = MixedShard([train_shard] + [s for s, _ in extras], [main_w] + [w for _, w in extras])
-        print("training mix:", {args.data: main_w, **{spec: float(spec.rsplit(':', 1)[1]) for spec in args.mix}}, flush=True)
-    if args.init_from and not (args.resume and ckpt_path_exists(out_dir)):
-        _step, _ = load_checkpoint(Path(args.init_from), model, None)
-        print(f"initialized weights from {args.init_from} (step {_step})", flush=True)
-    gen = torch.Generator().manual_seed(args.seed)
+    def __init__(self, argv_or_args=None):
+        args = build_argparser().parse_args(argv_or_args) if (argv_or_args is None or isinstance(argv_or_args, list)) else argv_or_args
+        self.args = args
+        torch.manual_seed(args.seed)
+        self.device = device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.out_dir = out_dir = Path(args.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    step, t_start = 0, time.time()
-    ckpt_path = out_dir / "last.pt"
-    extra = {}
-    if args.resume and ckpt_path.exists():
-        step, extra = load_checkpoint(ckpt_path, model, opt)
-        if "generator_state" in extra:
-            gen.set_state(torch.tensor(extra["generator_state"], dtype=torch.uint8))
-        print(f"resumed from step {step}", flush=True)
+        cfg = MoteConfig.load(args.config) if args.config else getattr(MoteConfig, args.preset)()
+        cfg.max_seq_len = max(cfg.max_seq_len, args.seq_len)
+        if args.ratio_weight is not None:
+            cfg.dc.ratio_loss_weight = args.ratio_weight
+        if args.target_ratio is not None:
+            cfg.dc.target_ratio_init, cfg.dc.target_ratio_final = args.target_ratio
+        cfg.save(out_dir / "config.json")
+        (out_dir / "run.json").write_text(json.dumps({**vars(args), "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
 
-    fwd = torch.compile(model) if args.compile else model
-    log_f = open(out_dir / "log.jsonl", "a", encoding="utf-8")
+        if args.bucket is not None:
+            cfg.dc.chunk_bucket = args.bucket
+        if args.no_mbp:
+            cfg.mbp.enabled = False
+        if args.mbp_weight is not None:
+            cfg.mbp.loss_weight = args.mbp_weight
+        if args.mbp_gamma is not None:
+            cfg.mbp.position_gamma = args.mbp_gamma
+        if args.mbp_transition:
+            cfg.mbp.transition = True
+        self.cfg = cfg
+        self.model = model = HNetForCausalLM(cfg, device=device)
+        if args.ckpt_main:
+            model.main_network.grad_checkpoint = True
+        self.n_params = model.num_params()
+        self.peak_tflops = peak_tflops_for(device) if device.type == "cuda" else None
+        print(f"params: {self.n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('mote.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('mote.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
+        self.opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, betas=(0.9, args.beta2), optimizer=args.optimizer)
 
-    def log(rec: Dict):
-        rec["step"] = step
-        rec["elapsed_min"] = (time.time() - t_start) / 60
-        log_f.write(json.dumps(rec) + "\n")
-        log_f.flush()
+        train_shard = ByteShard(args.data, "train", sft=args.sft)
+        self.val_shard = ByteShard(args.data, "val", sft=args.sft)
+        if args.mix:
+            extras = [(ByteShard(spec.rsplit(":", 1)[0], "train", sft=args.sft), float(spec.rsplit(":", 1)[1])) for spec in args.mix]
+            main_w = max(1.0 - sum(w for _, w in extras), 0.0)
+            train_shard = MixedShard([train_shard] + [s for s, _ in extras], [main_w] + [w for _, w in extras])
+            print("training mix:", {args.data: main_w, **{spec: float(spec.rsplit(':', 1)[1]) for spec in args.mix}}, flush=True)
+        self.train_shard = train_shard
+        if args.init_from and not (args.resume and ckpt_path_exists(out_dir)):
+            _step, _ = load_checkpoint(Path(args.init_from), model, None)
+            print(f"initialized weights from {args.init_from} (step {_step})", flush=True)
+        self.gen = torch.Generator().manual_seed(args.seed)
+
+        self.step, self.t_start = 0, time.time()
+        self.ckpt_path = out_dir / "last.pt"
+        if args.resume and self.ckpt_path.exists():
+            self.step, extra = load_checkpoint(self.ckpt_path, model, self.opt)
+            if "generator_state" in extra:
+                self.gen.set_state(torch.tensor(extra["generator_state"], dtype=torch.uint8))
+            print(f"resumed from step {self.step}", flush=True)
+
+        self.fwd = torch.compile(model) if args.compile else model
+        self.log_f = open(out_dir / "log.jsonl", "a", encoding="utf-8")
+        self.tokens_per_step = args.batch_size * args.seq_len * args.grad_accum
+        self.total_steps = args.max_steps
+        self.time_driven = args.max_steps == 0  # schedules follow wall-clock progress; step count is only an estimate
+        self.budget_sec = args.max_minutes * 60
+        self._stop = False
+        self.stopped_reason = None
+
+    # ------------------------------------------------------------------------------
+    def log(self, rec: Dict):
+        rec["step"] = self.step
+        rec["elapsed_min"] = (time.time() - self.t_start) / 60
+        self.log_f.write(json.dumps(rec) + "\n")
+        self.log_f.flush()
         print(json.dumps(rec), flush=True)
 
-    # ---- total steps: fixed, or derived from a short throughput probe ----------------------------
-    total_steps = args.max_steps
-    tokens_per_step = args.batch_size * args.seq_len * args.grad_accum
-    model.train()
+    def request_stop(self, reason: str = "requested"):
+        """Graceful: the run ends at the next step boundary, with the final eval and checkpoint."""
+        self._stop = True
+        self.stopped_reason = reason
 
-    def train_step(target_ratio: float):
-        """One optimizer step. Returns a dict of 0-dim device tensors; call float() on them only when
-        logging — every .item() here would drain the launch queue (40 syncs/step before this)."""
-        opt.zero_grad(set_to_none=True)
+    def save(self):
+        save_checkpoint(self.ckpt_path, self.model, self.opt, self.step, self.cfg,
+                        {"generator_state": self.gen.get_state().tolist(), "total_steps": self.total_steps,
+                         "n_params": self.n_params, "bytes_seen": self.step * self.tokens_per_step})
+
+    def _train_step(self, target_ratio: float):
+        """One optimizer step as a generator: yields ("slice", None) after each accumulation micro-batch
+        (the daemon's preemption points), returns the stats dict of 0-dim device tensors. Calling
+        float() on them is the one sync per logging interval, as before."""
+        args, device = self.args, self.device
+        self.opt.zero_grad(set_to_none=True)
         agg = {}
         total_n = None
         for _ in range(args.grad_accum):
-            batch, lmask = train_shard.sample_batch(args.batch_size, args.seq_len, gen)
+            batch, lmask = self.train_shard.sample_batch(args.batch_size, args.seq_len, self.gen)
             batch = batch.to(device, non_blocking=True)
             lmask = lmask.to(device, non_blocking=True) if lmask is not None else None
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                loss, n, stats, _ = compute_losses(fwd, batch, target_ratio, cfg.mbp.loss_weight, cfg.dc.ratio_loss_weight, lmask)
+                loss, n, stats, _ = compute_losses(self.fwd, batch, target_ratio, self.cfg.mbp.loss_weight, self.cfg.dc.ratio_loss_weight, lmask)
             loss.backward()  # unnormalised sum; normalised once below
             total_n = n if total_n is None else total_n + n
             for k, v in stats.items():
                 agg[k] = v if k not in agg else agg[k] + v
-        grads = [p.grad for p in model.parameters() if p.grad is not None]
+            yield ("slice", None)
+        grads = [p.grad for p in self.model.parameters() if p.grad is not None]
         torch._foreach_div_(grads, total_n)
-        gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-        opt.step()
+        gnorm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), args.clip)
+        self.opt.step()
         out = {"ce": agg["ce_sum"] / total_n, "ratio": agg["ratio"] / args.grad_accum, "bpic": agg["bpic"] / args.grad_accum, "grad_norm": gnorm}
         if "ce_mbp_sum" in agg:
             out["ce_mbp"] = agg["ce_mbp_sum"] / total_n
         return out
 
-    if total_steps == 0:
-        probe_steps = 5
-        set_lr(opt, args.lr * 0.01)
-        torch.cuda.synchronize() if device.type == "cuda" else None
-        t0 = time.time()
-        for _ in range(probe_steps):
-            train_step(cfg.dc.target_ratio_init)
-        torch.cuda.synchronize() if device.type == "cuda" else None
-        sec_per_step = (time.time() - t0) / probe_steps
-        budget_sec = args.max_minutes * 60 - (time.time() - t_start)
-        total_steps = max(int(budget_sec / sec_per_step * 0.9), 50)
-        log({"probe_sec_per_step": sec_per_step, "bytes_per_sec": tokens_per_step / sec_per_step, "total_steps": total_steps})
+    def _progress(self) -> float:
+        if self.time_driven:
+            return min((time.time() - self.t_start) / self.budget_sec, 1.0)
+        return min(self.step / max(self.total_steps, 1), 1.0)
 
-    last_ckpt = time.time()
-    t_log = time.time()
-    time_driven = args.max_steps == 0  # schedules follow wall-clock progress; step count is only an estimate
-    budget_sec = args.max_minutes * 60
+    def run(self):
+        """The whole run. Drain it (`for _ in t.run(): pass`) for the old behaviour."""
+        args, cfg, device = self.args, self.cfg, self.device
+        self.model.train()
 
-    def progress() -> float:
-        if time_driven:
-            return min((time.time() - t_start) / budget_sec, 1.0)
-        return min(step / max(total_steps, 1), 1.0)
+        if self.total_steps == 0:
+            probe_steps = 5
+            set_lr(self.opt, args.lr * 0.01)
+            torch.cuda.synchronize() if device.type == "cuda" else None
+            t0 = time.time()
+            for _ in range(probe_steps):
+                yield from self._train_step(cfg.dc.target_ratio_init)
+                yield ("step", None)
+            torch.cuda.synchronize() if device.type == "cuda" else None
+            sec_per_step = (time.time() - t0) / probe_steps
+            budget_sec = args.max_minutes * 60 - (time.time() - self.t_start)
+            self.total_steps = max(int(budget_sec / sec_per_step * 0.9), 50)
+            self.log({"probe_sec_per_step": sec_per_step, "bytes_per_sec": self.tokens_per_step / sec_per_step, "total_steps": self.total_steps})
 
-    while (progress() < 1.0) if time_driven else (step < total_steps):
-        pr = progress()
-        horizon = 1000
-        sched_step = int(pr * horizon)
-        target_ratio = atdc_target_ratio(sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final, cfg.dc.schedule_warmup_frac)
-        lr = wsd_lr(sched_step, horizon, args.lr)
-        set_lr(opt, lr)
-        stats = train_step(target_ratio)
-        step += 1
-        if step % args.log_every == 0:
-            dt = time.time() - t_log
-            t_log = time.time()
-            stats = {k: float(v) for k, v in stats.items()}  # the one sync per logging interval
-            rec = {"lr": lr, "target_ratio": target_ratio, "bytes_per_sec": tokens_per_step * args.log_every / dt, "train_bpb": stats["ce"] / LN2}
-            rec.update(stats)
-            rec["tflops"] = flops_per_byte(model, args.seq_len, stats.get("bpic", 1.0)) * rec["bytes_per_sec"] / 1e12
-            if peak_tflops:
-                rec["mfu"] = rec["tflops"] / peak_tflops
-            log(rec)
-        if step % args.eval_every == 0:
-            ev = evaluate(model, val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio)
-            ev["sample"] = chunk_sample(model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
-            log({"eval": ev})
-        if (time.time() - last_ckpt) / 60 >= args.ckpt_minutes:
-            save_checkpoint(ckpt_path, model, opt, step, cfg, {"generator_state": gen.get_state().tolist(), "total_steps": total_steps, "n_params": n_params, "bytes_seen": step * tokens_per_step})
-            last_ckpt = time.time()
-            log({"checkpoint": str(ckpt_path)})
-        if (time.time() - t_start) / 60 > args.max_minutes:
-            log({"stopped": "time budget"})
-            break
-    ev = evaluate(model, val_shard, args.batch_size, args.seq_len, args.eval_batches, device, cfg.dc.target_ratio_final)
-    ev["sample"] = chunk_sample(model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
-    log({"eval": ev, "final": True})
+        last_ckpt = time.time()
+        t_log = time.time()
 
-    save_checkpoint(ckpt_path, model, opt, step, cfg, {"generator_state": gen.get_state().tolist(), "total_steps": total_steps, "n_params": n_params, "bytes_seen": step * tokens_per_step})
-    log({"done": True, "final_step": step})
-    log_f.close()
+        while ((self._progress() < 1.0) if self.time_driven else (self.step < self.total_steps)) and not self._stop:
+            pr = self._progress()
+            horizon = 1000
+            sched_step = int(pr * horizon)
+            target_ratio = atdc_target_ratio(sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final, cfg.dc.schedule_warmup_frac)
+            lr = wsd_lr(sched_step, horizon, args.lr)
+            set_lr(self.opt, lr)
+            stats = yield from self._train_step(target_ratio)
+            self.step += 1
+            if self.step % args.log_every == 0:
+                dt = time.time() - t_log
+                t_log = time.time()
+                stats = {k: float(v) for k, v in stats.items()}  # the one sync per logging interval
+                rec = {"lr": lr, "target_ratio": target_ratio, "bytes_per_sec": self.tokens_per_step * args.log_every / dt, "train_bpb": stats["ce"] / LN2}
+                rec.update(stats)
+                rec["tflops"] = flops_per_byte(self.model, args.seq_len, stats.get("bpic", 1.0)) * rec["bytes_per_sec"] / 1e12
+                if self.peak_tflops:
+                    rec["mfu"] = rec["tflops"] / self.peak_tflops
+                self.log(rec)
+            if self.step % args.eval_every == 0:
+                ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio)
+                ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
+                self.log({"eval": ev})
+            if (time.time() - last_ckpt) / 60 >= args.ckpt_minutes:
+                self.save()
+                last_ckpt = time.time()
+                self.log({"checkpoint": str(self.ckpt_path)})
+            if (time.time() - self.t_start) / 60 > args.max_minutes:
+                self.log({"stopped": "time budget"})
+                break
+            yield ("step", None)
+        if self._stop:
+            self.log({"stopped": self.stopped_reason or "requested"})
+
+        ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, cfg.dc.target_ratio_final)
+        ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
+        self.log({"eval": ev, "final": True})
+
+        self.save()
+        self.log({"done": True, "final_step": self.step})
+
+    def close(self):
+        self.log_f.close()
+
+
+def main(argv=None):
+    t = Trainer(argv)
+    try:
+        for _ in t.run():
+            pass
+    finally:
+        t.close()
 
 
 if __name__ == "__main__":

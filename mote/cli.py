@@ -353,6 +353,33 @@ def prefs_cmd(args) -> int:
     return 0
 
 
+def _api(method: str, path: str, body=None):
+    import urllib.request
+
+    cfg = load_config()
+    tok = ensure_token()
+    req = urllib.request.Request(f"http://127.0.0.1:{cfg['port']}{path}", method=method,
+                                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"},
+                                 data=json.dumps(body).encode() if body is not None else None)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def train_cmd(args) -> int:
+    """Training jobs on the resident studio (docs/shape.md): start | stop | queue."""
+    if args.action == "start":
+        if not args.train_args:
+            print("usage: mote train start -- --preset local --data data/local_mix --out runs/x ...")
+            return 2
+        out = _api("POST", "/api/training/start", {"args": args.train_args})
+        print(json.dumps(out, indent=1))
+    elif args.action == "stop":
+        print(json.dumps(_api("POST", "/api/training/stop", {"id": args.id}), indent=1))
+    elif args.action == "queue":
+        print(json.dumps(_api("GET", "/api/training/queue"), indent=1))
+    return 0
+
+
 # ---- entry ---------------------------------------------------------------------------------------
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mote", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -377,7 +404,13 @@ def main(argv=None) -> int:
     pr.add_argument("file", nargs="?", help="verdicts JSONL for `import`")
     pr.add_argument("--out", default="data/prefs/to_rate.jsonl")
     pr.add_argument("--limit", type=int, default=None)
+    tr = sub.add_parser("train", help="training jobs on the resident studio: start -- <train args> | stop [--id] | queue")
+    tr.add_argument("action", choices=["start", "stop", "queue"])
+    tr.add_argument("--id", default=None, help="job id for `stop` (default: the running one)")
+    tr.add_argument("train_args", nargs=argparse.REMAINDER, help="after `--`: args for python -m mote.train.train")
     args = ap.parse_args(argv)
+    if getattr(args, "cmd", None) == "train" and args.train_args and args.train_args[0] == "--":
+        args.train_args = args.train_args[1:]
 
     if args.cmd == "service":
         return {"install": service_install, "uninstall": service_uninstall, "start": lambda: service_start(args.force),
@@ -396,6 +429,8 @@ def main(argv=None) -> int:
         return config_cmd(args)
     if args.cmd == "prefs":
         return prefs_cmd(args)
+    if args.cmd == "train":
+        return train_cmd(args)
     return 1
 
 

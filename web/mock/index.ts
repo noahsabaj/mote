@@ -32,6 +32,19 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   }
 }
 
+// Training jobs (docs/shape.md): an in-memory queue so the Training tab's controls work offline.
+type MockJob = { id: string; argv: string[]; state: string; created_at: number; started_at: number | null; ended_at: number | null; error: string | null; resumed: boolean };
+const MOCK_JOBS: MockJob[] = [];
+let jobSeq = 0;
+
+function jobsStatus() {
+  return {
+    current: MOCK_JOBS.find((j) => j.state === 'running') ?? null,
+    queued: MOCK_JOBS.filter((j) => j.state === 'queued'),
+    recent: MOCK_JOBS.filter((j) => !['queued', 'running'].includes(j.state)).slice(-10).reverse()
+  };
+}
+
 // Preference votes (docs/prefs.md): kept in memory for the session, enough for the Model sheet's table.
 const PREF_VOTES: { vote: string | null; a: string; b: string }[] = [];
 
@@ -130,6 +143,40 @@ async function handle(
 
   if (path === '/api/checkpoints' && req.method === 'GET') {
     return json(res, 200, checkpointList());
+  }
+
+  if (path === '/api/training/queue' && req.method === 'GET') {
+    return json(res, 200, jobsStatus());
+  }
+
+  if (path === '/api/training/start' && req.method === 'POST') {
+    const body = await readJson(req);
+    const argv = (body.args ?? []) as string[];
+    const rec = { id: `j${(jobSeq += 1)}`, argv, state: 'queued', created_at: Date.now() / 1000, started_at: null as number | null, ended_at: null as number | null, error: null, resumed: false };
+    MOCK_JOBS.push(rec);
+    setTimeout(() => {
+      if (rec.state === 'queued' && !MOCK_JOBS.some((j) => j.state === 'running')) {
+        rec.state = 'running';
+        rec.started_at = Date.now() / 1000;
+        setTimeout(() => {
+          if (rec.state === 'running') {
+            rec.state = 'done';
+            rec.ended_at = Date.now() / 1000;
+          }
+        }, 30000);
+      }
+    }, 1500);
+    return json(res, 200, { submitted: rec.id, ...jobsStatus() });
+  }
+
+  if (path === '/api/training/stop' && req.method === 'POST') {
+    const body = await readJson(req);
+    const id = (body.id ?? null) as string | null;
+    const rec = id ? MOCK_JOBS.find((j) => j.id === id) : MOCK_JOBS.find((j) => j.state === 'running');
+    if (!rec) return json(res, 404, { detail: 'no such job (or nothing running)' });
+    rec.state = 'cancelled';
+    rec.ended_at = Date.now() / 1000;
+    return json(res, 200, jobsStatus());
   }
 
   if (path === '/api/challenger/load' && req.method === 'POST') {

@@ -23,6 +23,9 @@
 {:else if info}
   <section>
     <p class="note"><span class="tag">{info.status}</span> {info.status_note}</p>
+    {#if info.live}
+      <p class="note"><span class="tag">live</span> serving {info.live} — a training job's EMA is answering chats</p>
+    {/if}
   </section>
 
   <section>

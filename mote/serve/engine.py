@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import contextlib
 import os
 import threading
 import time
@@ -127,6 +128,11 @@ class Engine:
         mb = int(os.environ.get("MOTE_PREFIX_CACHE_MB", 1024)) if prefix_cache_mb is None else int(prefix_cache_mb)
         self.prefix_cache = PrefixCache(mb << 20)
         self.pin = self.device.type == "cuda"
+        # Set by the server: a lock shared with the training worker (docs/shape.md). A reply holds it
+        # for its whole generation, so training yields at its next accumulation slice.
+        self.gpu_gate = None
+        # "<run>/ema@<step>" while a training job's EMA answers chats; None when serving a checkpoint.
+        self.serving_live: str | None = None
         self.ckpt_path = Path(ckpt_path)
         ck = torch.load(self.ckpt_path, map_location="cpu", weights_only=False)
         self.cfg = MoteConfig.from_dict(ck["config"])
@@ -211,6 +217,22 @@ class Engine:
         except Exception:
             return None
 
+    @torch.no_grad()
+    def apply_run_weights(self, cfg_dict: dict, state_dict, name: str, step: int) -> None:
+        """Hot-swap the served weights from a running job's EMA (docs/shape.md). Same config loads in
+        place; a different config rebuilds the model. The prefix cache clears either way — its cached
+        states were computed under the old weights."""
+        new_cfg = MoteConfig.from_dict(cfg_dict)
+        with self.lock:
+            if new_cfg.to_dict() != self.cfg.to_dict():
+                self.cfg = new_cfg
+                self.model = HNetForCausalLM(new_cfg)
+                self.defaults = GenParams(max_bytes=min(512, new_cfg.max_seq_len // 2))
+            self.model.load_state_dict(state_dict)
+            self.model.to(self.device).eval()
+            self.prefix_cache.clear()
+            self.serving_live = f"{name}@{step}"
+
     @property
     def ckpt_name(self) -> str:
         """run/file, the name the studio shows: overnight_sft/last.pt"""
@@ -225,6 +247,7 @@ class Engine:
         c = self.info_ckpt
         return {
             "name": self.ckpt_name,
+            "live": self.serving_live,
             "params": self.model.num_params(),
             "status": c.status,
             "status_note": c.status_note,
@@ -323,8 +346,9 @@ class Engine:
     def generate(self, messages: Sequence[dict], params: GenParams, emit: Callable[[dict], None], stop: threading.Event,
                  context: Optional[dict] = None) -> None:
         """`context`: {"fold": "auto" | "now" | "off", "card": <edited card or None>} — see mote.serve.context."""
-        with self.lock:
-            self._generate(messages, params, emit, stop, context or {})
+        with (self.gpu_gate or contextlib.nullcontext()):
+            with self.lock:
+                self._generate(messages, params, emit, stop, context or {})
 
     def _generate(self, messages, params: GenParams, emit, stop: threading.Event, context: dict) -> None:
         limit = self.cfg.max_seq_len
