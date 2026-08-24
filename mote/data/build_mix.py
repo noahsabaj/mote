@@ -20,12 +20,26 @@ from typing import Dict, Iterator, List
 import numpy as np
 
 from ..tokenizer import BOS_ID, EOS_ID, VOCAB_SIZE
-from .sources import PRETRAIN, PretrainSource
+from .sources import FLAGSHIP, PRETRAIN, PretrainSource
+
+
+def _chunks(b: bytes, max_bytes: int) -> Iterator[bytes]:
+    """Split an over-long document at paragraph breaks (books): each piece is its own document."""
+    while len(b) > max_bytes:
+        cut = b.rfind(b"\n\n", max_bytes // 2, max_bytes)
+        if cut < 0:
+            cut = max_bytes
+        yield b[:cut]
+        b = b[cut:].lstrip(b"\n")
+    if b:
+        yield b
 
 
 def stream_source(src: PretrainSource, min_bytes: int, max_bytes: int) -> Iterator[bytes]:
     from datasets import load_dataset
 
+    lo = src.min_bytes if src.min_bytes is not None else min_bytes
+    hi = src.max_bytes if src.max_bytes is not None else max_bytes
     kwargs = dict(split=src.split, streaming=True)
     if src.name:
         kwargs["name"] = src.name
@@ -40,7 +54,12 @@ def stream_source(src: PretrainSource, min_bytes: int, max_bytes: int) -> Iterat
         if not t:
             continue
         b = t.encode("utf-8")
-        if min_bytes <= len(b) <= max_bytes:
+        if src.chunk and len(b) > hi:
+            for piece in _chunks(b, hi):
+                if lo <= len(piece) <= hi:
+                    yield piece
+            continue
+        if lo <= len(b) <= hi:
             yield b
 
 
@@ -104,7 +123,9 @@ def build(out: Path, target_bytes: int, val_bytes: int, min_bytes: int, max_byte
         "train": {"ids": nt, "docs": dt, "file": out.with_suffix(".train.bin").name, "per_source_bytes": gt},
         "val": {"ids": nv, "docs": dv, "file": out.with_suffix(".val.bin").name, "per_source_bytes": gv},
         "sources": [{"key": s.key, "path": s.path, "name": s.name, "share": s.share, "note": s.note} for s in sources],
-        "filters": {"min_bytes": min_bytes, "max_bytes": max_bytes}, "exhausted": sorted(exhausted),
+        "filters": {"min_bytes": min_bytes, "max_bytes": max_bytes,
+                    "overrides": {s.key: [s.min_bytes, s.max_bytes] for s in sources if s.min_bytes or s.max_bytes}},
+        "exhausted": sorted(exhausted),
     }
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps({k: v for k, v in meta.items() if k != "sources"}, indent=2))
@@ -118,9 +139,11 @@ def main():
     ap.add_argument("--min-bytes", type=int, default=128)
     ap.add_argument("--max-bytes", type=int, default=4096)
     ap.add_argument("--only", nargs="*", default=None, help="restrict to these source keys (for probing)")
+    ap.add_argument("--list", default="pretrain", choices=["pretrain", "flagship"], help="which source registry to build from")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    sources = [s for s in PRETRAIN if not args.only or s.key in args.only]
+    registry = FLAGSHIP if args.list == "flagship" else PRETRAIN
+    sources = [s for s in registry if not args.only or s.key in args.only]
     if args.only:  # renormalize shares
         tot = sum(s.share for s in sources)
         for s in sources:

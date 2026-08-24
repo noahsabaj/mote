@@ -148,6 +148,6 @@ class MoteConfig:
             encoder_layers=3,
             decoder_layers=3,
             main=RelationCfg(n_layers=12, d_model=768, n_heads=8, d_ff=2048),
-            mbp=MBPCfg(n_layers=2, n_heads=8, d_ff=2048),
+            mbp=MBPCfg(n_layers=2, n_heads=8, d_ff=2048, enabled=False),  # head off for the flagship (decided 2026-08-23: no loss gain under Muon, 8-13% of step time)
             max_seq_len=16384,  # decided 2026-08-23 (docs/context.md); profiled at batch 1 + ckpt: 6.34 GB peak on the 4060 Ti
         )

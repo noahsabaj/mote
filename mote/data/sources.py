@@ -20,6 +20,9 @@ class PretrainSource:
     text: Callable[[dict], Optional[str]] = lambda r: r.get("text")
     keep: Callable[[dict], bool] = lambda r: True
     note: str = ""
+    min_bytes: Optional[int] = None  # override the builder's window (long-document sources)
+    max_bytes: Optional[int] = None
+    chunk: bool = False  # split over-long documents at paragraph breaks instead of dropping them (books)
 
 
 def _fineweb_keep(r: dict) -> bool:
@@ -59,6 +62,44 @@ PRETRAIN: List[PretrainSource] = [
     PretrainSource("nemotron_factseek", "nvidia/Nemotron-Pretraining-Specialized-v1.2", 0.04, name="Nemotron-Pretraining-Fact-Seeking", note="tiny QA docs"),
     PretrainSource("finewiki_simple", "HuggingFaceFW/finewiki", 0.03, name="simple", note="CC-BY-SA"),
 ]
+
+
+def _permissive_code(r: dict) -> bool:
+    lic = (r.get("license") or "").lower()
+    return any(k in lic for k in ("mit", "apache", "bsd", "isc", "unlicense"))
+
+
+def _fw2(lang: str, share: float) -> "PretrainSource":
+    return PretrainSource(f"fw2_{lang[:3]}", "HuggingFaceFW/fineweb-2", share, name=lang,
+                          note=f"multilingual slice {lang}")
+
+
+# The flagship recipe (grilled 2026-08-23, docs/shape.md): backbone ~63%, reasoning 11%, code 8%,
+# multilingual 9% (es/fr/de/pt/ru/ja), long documents 10%. Long sources carry their own byte windows;
+# the builder also writes per-domain val shards for the trade-offs to stay visible.
+FLAGSHIP: List[PretrainSource] = [
+    PretrainSource("fineweb_edu", "HuggingFaceFW/fineweb-edu", 0.25, name="sample-10BT", keep=_fineweb_keep, note="edu web, int_score>=3"),
+    PretrainSource("dclm_edu", "HuggingFaceTB/dclm-edu", 0.09, note="DCLM filtered with the FineWeb-Edu classifier"),
+    PretrainSource("finephrase", "HuggingFaceFW/finephrase", 0.07, name="faq", text=_finephrase_text, note="rephrased completions only"),
+    PretrainSource("ultra_fineweb_l3", "openbmb/Ultra-FineWeb-L3", 0.05, name="Ultra-FineWeb-L3-en-Multi-Style-Synthetic", text=lambda r: r.get("content"), note="short rewrites"),
+    PretrainSource("synth", "PleIAs/SYNTH", 0.08, text=_synth_text, keep=lambda r: (r.get("language") or "en").startswith("en"), note="query+answer as Q/A"),
+    PretrainSource("cosmopedia_v2", "HuggingFaceTB/smollm-corpus", 0.07, name="cosmopedia-v2", keep=_cosmopedia_keep, note="stories/wikihow/textbook"),
+    PretrainSource("nemotron_factseek", "nvidia/Nemotron-Pretraining-Specialized-v1.2", 0.02, name="Nemotron-Pretraining-Fact-Seeking", note="tiny QA docs"),
+    PretrainSource("finewiki_simple", "HuggingFaceFW/finewiki", 0.01, name="simple", note="CC-BY-SA"),
+    # reasoning
+    PretrainSource("finemath", "HuggingFaceTB/finemath", 0.10, name="finemath-3plus", note="math/step-by-step-dense web"),
+    # code
+    PretrainSource("code", "codeparrot/github-code-clean", 0.07, name="all-all", text=lambda r: r.get("code"), keep=_permissive_code, note="permissive licenses"),
+    PretrainSource("code_long", "codeparrot/github-code-clean", 0.01, name="all-all", text=lambda r: r.get("code"), keep=_permissive_code, min_bytes=8192, max_bytes=65536, note="long files"),
+    # multilingual (two extra scripts on purpose: byte-level UTF-8 is home turf)
+    _fw2("spa_Latn", 0.015), _fw2("fra_Latn", 0.015), _fw2("deu_Latn", 0.015),
+    _fw2("por_Latn", 0.015), _fw2("rus_Cyrl", 0.015), _fw2("jpn_Jpan", 0.015),
+    # long documents (teach the 16384 window something real)
+    PretrainSource("finewiki_long", "HuggingFaceFW/finewiki", 0.04, name="en", min_bytes=8192, max_bytes=65536, note="full articles"),
+    PretrainSource("gutenberg", "manu/project_gutenberg", 0.03, split="en", min_bytes=8192, max_bytes=65536, chunk=True, note="books, chunked at paragraph breaks"),
+    PretrainSource("fineweb_long", "HuggingFaceFW/fineweb-edu", 0.02, name="sample-10BT", keep=_fineweb_keep, min_bytes=8192, max_bytes=65536, note="long edu pages"),
+]
+assert abs(sum(s.share for s in FLAGSHIP) - 1.0) < 1e-9, sum(s.share for s in FLAGSHIP)
 
 
 @dataclass
