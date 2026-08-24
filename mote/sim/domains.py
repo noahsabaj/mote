@@ -264,10 +264,9 @@ def _kinship(seed: int, diff: Dict[str, int]) -> Trace:
     for c in g1:
         parents[c] = (g0[0], g0[1])
     pairs = []
-    g1_shuffled = g1[:]
-    rng.shuffle(g1_shuffled)
-    for i in range(0, len(g1_shuffled) - 1, 2):
-        a, b = g1_shuffled[i], g1_shuffled[i + 1]
+    inlaws = g2[: len(g1) // 2]  # marry IN from outside the bloodline, never a sibling
+    g2 = g2[len(inlaws):]
+    for a, b in zip(g1, inlaws):
         spouses[a], spouses[b] = b, a
         pairs.append((a, b))
     for j, c in enumerate(g2):
@@ -326,7 +325,7 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
         if cal[p].slots and rng.random() < 0.3:  # move a meeting
             i = rng.randrange(len(cal[p].slots))
             s, e, title = cal[p].slots[i]
-            ns = rng.randint(8, 16)
+            ns = rng.choice([h for h in range(8, 17) if h != s])
             cal[p].slots[i] = (ns, ns + (e - s), title)
             events.append(Event(t, "moved", {"who": p, "title": title, "from_h": s, "to_h": ns}))
         else:

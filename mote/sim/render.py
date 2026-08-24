@@ -37,6 +37,20 @@ RU_OBJ = {"key": ("ключ", "ключ"), "book": ("книга", "книгу"),
 RU_CONT = {"box": ("коробка", "коробку", "коробке"), "basket": ("корзина", "корзину", "корзине"),
            "drawer": ("ящик", "ящик", "ящике"), "chest": ("сундук", "сундук", "сундуке")}
 RU_GOODS = {"apples": "яблок", "loaves": "буханок", "candles": "свечей", "nails": "гвоздей", "eggs": "яиц"}
+# numeral agreement: 1 -> singular, 2-4 -> paucal, 5+ -> genitive plural
+# (nominative singular, paucal, genitive plural, accusative singular — feminine nouns differ after verbs)
+RU_GOODS_FORMS = {"apples": ("яблоко", "яблока", "яблок", "яблоко"), "loaves": ("буханка", "буханки", "буханок", "буханку"),
+                  "candles": ("свеча", "свечи", "свечей", "свечу"), "nails": ("гвоздь", "гвоздя", "гвоздей", "гвоздь"),
+                  "eggs": ("яйцо", "яйца", "яиц", "яйцо")}
+RU_COIN_FORMS = ("монета", "монеты", "монет", "монету")
+
+
+def ru_n(n: int, forms, acc: bool = False) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} {forms[3] if acc else forms[0]}"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} {forms[1]}"
+    return f"{n} {forms[2]}"
 RU_TITLES = {"standup": "летучка", "review": "ревью", "lunch": "обед", "planning": "планирование",
              "call": "созвон", "workshop": "воркшоп"}
 
@@ -49,6 +63,7 @@ JA = {
     "titles": {"standup": "朝会", "review": "レビュー", "lunch": "昼食", "planning": "計画会議",
                "call": "電話会議", "workshop": "ワークショップ"},
 }
+JA_COUNTER = {"apples": "個", "loaves": "個", "candles": "本", "nails": "本", "eggs": "個"}
 
 
 def _cap(s: str) -> str:
@@ -100,10 +115,10 @@ def _ev_ru(e) -> str:
     if k == "put_down":
         return f"{_cap(d['who'])} {_ru_v(('оставил', 'оставила'), d['who'])} {RU_OBJ[d['obj']][1]} в {RU_ROOMS[d['room']][2]}."
     if k == "trade":
-        return (f"{_cap(d['buyer'])} {_ru_v(('купил', 'купила'), d['buyer'])} {d['n']} {RU_GOODS[d['goods']]} "
-                f"у {_cap(d['seller'])} за {d['cost']} монет.")
+        return (f"{_cap(d['buyer'])} {_ru_v(('купил', 'купила'), d['buyer'])} {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)} "
+                f"у {_cap(d['seller'])} за {ru_n(d['cost'], RU_COIN_FORMS, acc=True)}.")
     if k == "harvest":
-        return f"{_cap(d['who'])} {_ru_v(('собрал', 'собрала'), d['who'])} ещё {d['n']} {RU_GOODS[d['goods']]}."
+        return f"{_cap(d['who'])} {_ru_v(('собрал', 'собрала'), d['who'])} ещё {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)}."
     if k == "booked":
         return f"{_cap(d['who'])} {_ru_v(('назначил', 'назначила'), d['who'])} встречу «{RU_TITLES[d['title']]}» с {d['start_h']}:00 до {d['end_h']}:00."
     if k == "moved":
@@ -128,9 +143,10 @@ def _ev_ja(e) -> str:
     if k == "put_down":
         return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を{JA['rooms'][d['room']]}に置いた。"
     if k == "trade":
-        return f"{_cap(d['buyer'])}は{_cap(d['seller'])}から{JA['goods'][d['goods']]}を{d['n']}個、{d['cost']}枚のコインで買った。"
+        c = JA_COUNTER[d['goods']]
+        return f"{_cap(d['buyer'])}は{_cap(d['seller'])}から{JA['goods'][d['goods']]}を{d['n']}{c}、{d['cost']}枚のコインで買った。"
     if k == "harvest":
-        return f"{_cap(d['who'])}は{JA['goods'][d['goods']]}をさらに{d['n']}個集めた。"
+        return f"{_cap(d['who'])}は{JA['goods'][d['goods']]}をさらに{d['n']}{JA_COUNTER[d['goods']]}集めた。"
     if k == "booked":
         return f"{_cap(d['who'])}は{d['start_h']}時から{d['end_h']}時まで{JA['titles'][d['title']]}を予定に入れた。"
     if k == "moved":
@@ -164,8 +180,10 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
         return (f"Where is {_cap(a['who'])} now?", f"{_cap(a['who'])} is in {EN['rooms'][q.answer[1]]}.",
                 f"{_cap(a['who'])} is in {EN['rooms'][q.wrong[1]]}.")
     if q.qtype == "count_loose_in_room":
+        def there(n):
+            return f"There is {n}." if n == 1 else f"There are {n}."
         return (f"How many objects are lying in {EN['rooms'][a['room']]} (not held, not in a container)?",
-                f"There are {q.answer[1]}.", f"There are {q.wrong[1]}.")
+                there(q.answer[1]), there(q.wrong[1]))
     if q.qtype == "count_goods":
         return (f"How many {EN['goods'][a['goods']]} does {_cap(a['who'])} have now?",
                 f"{_cap(a['who'])} has {q.answer[1]}.", f"{_cap(a['who'])} has {q.wrong[1]}.")
@@ -227,10 +245,12 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
                 f"Там {q.answer[1]}.", f"Там {q.wrong[1]}.")
     if q.qtype == "count_goods":
         return (f"Сколько {RU_GOODS[a['goods']]} сейчас у {_cap(a['who'])}?",
-                f"У {_cap(a['who'])} {q.answer[1]}.", f"У {_cap(a['who'])} {q.wrong[1]}.")
+                f"У {_cap(a['who'])} {ru_n(q.answer[1], RU_GOODS_FORMS[a['goods']])}.",
+                f"У {_cap(a['who'])} {ru_n(q.wrong[1], RU_GOODS_FORMS[a['goods']])}.")
     if q.qtype == "count_coins":
         return (f"Сколько монет сейчас у {_cap(a['who'])}?",
-                f"У {_cap(a['who'])} {q.answer[1]} монет.", f"У {_cap(a['who'])} {q.wrong[1]} монет.")
+                f"У {_cap(a['who'])} {ru_n(q.answer[1], RU_COIN_FORMS)}.",
+                f"У {_cap(a['who'])} {ru_n(q.wrong[1], RU_COIN_FORMS)}.")
     if q.qtype == "who_has_more":
         return (f"У кого больше {RU_GOODS[a['goods']]} — у {_cap(a['a'])} или у {_cap(a['b'])}?",
                 f"У {_cap(q.answer[1])}.", f"У {_cap(q.wrong[1])}.")
@@ -274,8 +294,11 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
         return (f"{o}は今どこにある？", f"{o}は{_place_ja(q.answer)}。", f"{o}は{_place_ja(q.wrong)}。")
     if q.qtype == "where_obj_start":
         o = JA["objects"][a["obj"]]
-        return (f"{o}は最初どこにあった？", f"最初、{o}は{_place_ja(q.answer)[:-2]}った。" if q.answer[0] != "held" else f"最初、{o}は{_cap(q.answer[1])}が持っていた。",
-                f"最初、{o}は{_place_ja(q.wrong)[:-2]}った。" if q.wrong[0] != "held" else f"最初、{o}は{_cap(q.wrong[1])}が持っていた。")
+        def was(ans):
+            if ans[0] == "held":
+                return f"最初、{o}は{_cap(ans[1])}が持っていた。"
+            return f"最初、{o}は{_place_ja(ans)[:-2]}あった。"
+        return (f"{o}は最初どこにあった？", was(q.answer), was(q.wrong))
     if q.qtype == "where_person":
         return (f"{_cap(a['who'])}は今どこにいる？", f"{_cap(a['who'])}は{JA['rooms'][q.answer[1]]}にいる。",
                 f"{_cap(a['who'])}は{JA['rooms'][q.wrong[1]]}にいる。")
@@ -283,8 +306,9 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
         return (f"{JA['rooms'][a['room']]}に置いてある物はいくつ？（手に持たれておらず、入れ物にも入っていない物）",
                 f"{q.answer[1]}個。", f"{q.wrong[1]}個。")
     if q.qtype == "count_goods":
+        c = JA_COUNTER[a['goods']]
         return (f"{_cap(a['who'])}は今{JA['goods'][a['goods']]}をいくつ持っている？",
-                f"{q.answer[1]}個。", f"{q.wrong[1]}個。")
+                f"{q.answer[1]}{c}。", f"{q.wrong[1]}{c}。")
     if q.qtype == "count_coins":
         return (f"{_cap(a['who'])}は今コインを何枚持っている？", f"{q.answer[1]}枚。", f"{q.wrong[1]}枚。")
     if q.qtype == "who_has_more":
