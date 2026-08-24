@@ -177,15 +177,22 @@ class DeChunkLayer(nn.Module):
         mask = torch.tril(torch.ones(C, C, device=x.device, dtype=torch.bool))
         A = torch.exp(diff.masked_fill(~mask, float("-inf")))
         local = torch.matmul(A, pf[..., None] * xf)  # [B, nb, C, D]
-        # carry across blocks: z̄ at block end = local_end + exp(L_end) * carry_in
-        carry = torch.zeros(B, D, device=x.device, dtype=wdt) if init is None else init.to(wdt)
         decay_t = torch.exp(L)  # exp(L_t - L_0) with L_0 = 0 at block start  [B, nb, C]
-        blocks = []
-        for b in range(nb):
-            blk = local[:, b] + decay_t[:, b, :, None] * carry[:, None, :]
-            blocks.append(blk)
-            carry = blk[:, -1]
-        out = torch.stack(blocks, dim=1)  # no in-place writes: autograd-safe
+        # Carry across blocks in closed form (no Python loop over blocks: static shapes, one launch):
+        # the value entering block b is  Σ_{c<b} exp(S_b − S_c⁺) e_c + exp(S_b) init,  with e_c the
+        # block-c end value from its own terms, S_b = Σ_{j<b} log d_j the log-decay before block b and
+        # S_c⁺ = Σ_{j≤c} log d_j. All exponents are ≤ 0, as within a block.
+        e = local[:, :, -1]  # [B, nb, D]
+        logd = L[:, :, -1]  # [B, nb]  log of each block's total decay
+        s_incl = torch.cumsum(logd, dim=-1)  # S_c⁺
+        s_excl = s_incl - logd  # S_b
+        w = s_excl[:, :, None] - s_incl[:, None, :]  # [B, nb, nb]: rows b, cols c
+        lower = torch.tril(torch.ones(nb, nb, device=x.device, dtype=torch.bool), diagonal=-1)  # c < b
+        w = torch.exp(w.masked_fill(~lower, float("-inf")))
+        carry_in = torch.matmul(w, e)  # [B, nb, D]
+        if init is not None:
+            carry_in = carry_in + torch.exp(s_excl)[..., None] * init.to(wdt)[:, None, :]
+        out = local + decay_t[..., None] * carry_in[:, :, None, :]
         return out.reshape(B, nb * C, D)[:, :M].to(x.dtype)
 
     def _ema(self, x: torch.Tensor, p: torch.Tensor, init: Optional[torch.Tensor] = None) -> torch.Tensor:
