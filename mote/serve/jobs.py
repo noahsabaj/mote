@@ -28,6 +28,27 @@ import torch
 
 from ..train.train import Trainer, build_argparser
 
+
+def _job_args(argv: List[str]) -> List[str]:
+    return argv[1:] if argv and argv[0] == "rlvr" else argv
+
+
+def _argparser_for(argv: List[str]):
+    """`rlvr --init-from ...` is the RL job (mote/train/rlvr.py); anything else is the trainer."""
+    if argv and argv[0] == "rlvr":
+        from ..train.rlvr import build_argparser as rl_argparser
+        return rl_argparser()
+    return build_argparser()
+
+
+def make_trainer(argv: List[str]):
+    """The job's driver: Trainer or RlvrTrainer, both generators of ("slice"|"step", None) with
+    model / cfg / out_dir / step / request_stop / close (the queue and the EMA only use those)."""
+    if argv and argv[0] == "rlvr":
+        from ..train.rlvr import RlvrTrainer
+        return RlvrTrainer(argv[1:])
+    return Trainer(argv)
+
 STATES = ("queued", "running", "done", "failed", "cancelled", "interrupted")
 
 
@@ -128,7 +149,7 @@ class JobQueue:
             self._thread.start()
 
     def submit(self, argv: List[str]) -> JobRecord:
-        build_argparser().parse_args(argv)  # reject malformed args at submit time, not hours later
+        _argparser_for(argv).parse_args(_job_args(argv))  # reject malformed args at submit time, not hours later
         rec = JobRecord(id=secrets.token_hex(4), argv=list(argv))
         with self._lock:
             self.jobs.append(rec)
@@ -223,7 +244,7 @@ class JobQueue:
 
     def _run_job(self, rec: JobRecord) -> None:
         with self.gate:  # model + optimizer construction also touches the GPU
-            self._trainer = t = Trainer(list(rec.argv))
+            self._trainer = t = make_trainer(list(rec.argv))
             ema = Ema(t.model, self.ema_decay)
         steps_since_sync = 0
         g = t.run()

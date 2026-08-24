@@ -156,6 +156,7 @@ def main(argv=None):
     ap.add_argument("--branch", action="append", required=True, metavar="NAME=RUN_DIR", help="control=... and anneal=... (a branch's checkpoint is RUN_DIR/last.pt)")
     ap.add_argument("--sft-args", default="", help="the identical SFT argv for every branch (without --init-from/--out)")
     ap.add_argument("--skip-sft", action="store_true", help="reuse runs/<branch>_sft/last.pt")
+    ap.add_argument("--sft-run", action="append", default=[], metavar="NAME=RUN_DIR", help="with --skip-sft: the SFT run to measure for a branch (default runs/<branch>_sft)")
     ap.add_argument("--api", default=None, help="daemon base URL (default: host/port from .mote/config.json, else 127.0.0.1:7860)")
     ap.add_argument("--device", default=None)
     ap.add_argument("--n-read", type=int, default=100)
@@ -174,6 +175,7 @@ def main(argv=None):
     if set(branches) != {"control", "anneal"}:
         raise SystemExit("need exactly --branch control=... and --branch anneal=...")
     sft_dirs = {n: Path(f"runs/{Path(d).name}_sft") for n, d in branches.items()}
+    sft_dirs.update({n: Path(d) for n, d in (s.split("=", 1) for s in args.sft_run)})
     if not args.skip_sft:
         if not args.sft_args:
             raise SystemExit("--sft-args is required unless --skip-sft")

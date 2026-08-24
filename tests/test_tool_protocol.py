@@ -57,7 +57,7 @@ def only_result_stops(monkeypatch):
 
 def _run(eng, params):
     ev = []
-    eng.generate([{"role": "user", "content": "hello"}], params, ev.append, threading.Event())
+    eng.generate([{"role": "user", "content": "hello"}], params, ev.append, threading.Event(), context={"want_ids": True})
     return ev
 
 
@@ -80,6 +80,9 @@ def test_tool_hook_round_trip(tmp_path, only_result_stops):
     after = [e for e in ev[i_tool + 1:] if e["type"] == "byte"]
     assert len(after) == 21 and all(e["source"] == "nbp" for e in after) and done["stats"]["bytes"] == 40
     assert done["text"] == "A" + "b" * 21 and done["reason"] == "max_bytes"
+    # the RL view: every generated id with a loss mask that is 0 exactly on the injected <|result|>pong:hi<|assistant|>
+    assert len(done["ids"]) == 40 == len(done["mask"]) and done["mask"].count(0) == 9 and done["mask"][10:19] == [0] * 9
+    assert done["ids"][10] == RESULT_ID and done["ids"][18] == ASSISTANT_ID and bytes(done["ids"][11:18]) == b"pong:hi" and done["eos"] is False
 
 
 def test_unknown_tool_and_call_cap(tmp_path, only_result_stops):

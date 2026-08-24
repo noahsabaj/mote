@@ -128,6 +128,21 @@ def _sample(logits: torch.Tensor, temperature: float, top_p: float):
 
 class Engine:
     def __init__(self, ckpt_path: str | Path, device: Optional[str] = None, prefix_cache_mb: Optional[int] = None):
+        ck = torch.load(Path(ckpt_path), map_location="cpu", weights_only=False)
+        cfg = MoteConfig.from_dict(ck["config"])
+        model = HNetForCausalLM(cfg)
+        model.load_state_dict(ck["model"])
+        self._setup(model, cfg, Path(ckpt_path), int(ck.get("step", 0)), ck.get("extra", {}), device, prefix_cache_mb)
+
+    @classmethod
+    def from_model(cls, model: HNetForCausalLM, cfg: MoteConfig, device: Optional[str] = None, name: str = "live/policy.pt",
+                   step: int = 0, prefix_cache_mb: Optional[int] = None) -> "Engine":
+        """Serve a model object that already lives in memory — the RL driver's policy — with no checkpoint file."""
+        self = cls.__new__(cls)
+        self._setup(model, cfg, Path(name), step, {}, device, prefix_cache_mb, describe=False)
+        return self
+
+    def _setup(self, model, cfg, path: Path, step: int, extra: dict, device, prefix_cache_mb, describe: bool = True) -> None:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.pin = self.device.type == "cuda"
         # Prefix store (mote/serve/prefix_cache.py): branches of arena pages + ~3 MB anchors on the CPU
@@ -139,20 +154,20 @@ class Engine:
         self.gpu_gate = None
         # "<run>/ema@<step>" while a training job's EMA answers chats; None when serving a checkpoint.
         self.serving_live: str | None = None
-        self.ckpt_path = Path(ckpt_path)
-        ck = torch.load(self.ckpt_path, map_location="cpu", weights_only=False)
-        self.cfg = MoteConfig.from_dict(ck["config"])
-        self.model = HNetForCausalLM(self.cfg)
-        self.model.load_state_dict(ck["model"])
+        self.ckpt_path = path
+        self.cfg = cfg
+        self.model = model
         self.model.to(self.device).eval()
         self.tok = ByteTokenizer()
         self.lock = threading.Lock()
         # tool hook: name -> fn(args) -> result text; the reply's <|call|>name: args<|result|> is routed here
         self.tools: Dict[str, Callable[[str], str]] = {}
         self.tool_result_limit = 1024  # bytes of result injected per call (docs/search.md)
-        extra = ck.get("extra", {})
-        step = int(ck.get("step", 0))
-        self.info_ckpt = self._describe_checkpoint(self.ckpt_path, step, extra)
+        if describe:
+            self.info_ckpt = self._describe_checkpoint(path, step, extra)
+        else:
+            self.info_ckpt = CheckpointInfo(str(path), step, 0, None, None, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                            "live", "the live policy of a running RL job")
         self.defaults = GenParams(max_bytes=min(512, self.cfg.max_seq_len // 2))
         self._telemetry: Dict[str, dict] = {}
         self._attach_telemetry()
@@ -477,6 +492,7 @@ class Engine:
         calls_made = 0
         call_buf: List[bytearray] = []  # non-empty while the model is writing a tool call (after <|call|>)
         stop_id: Optional[int] = None
+        reply_mask: List[int] = []  # 1 = a byte the model chose, 0 = injected tool result (the RL loss mask)
 
         def stats() -> dict:
             elapsed = time.perf_counter() - t0
@@ -504,6 +520,7 @@ class Engine:
                 emit({"type": "diagnostics", **self._diagnostics(boundary_probs)})
             boundary_probs.append(bp)
             generated.append(byte)
+            reply_mask.append(1)
             if byte == CALL_ID:  # the model opens a tool call: what follows is the call, not reply text
                 call_buf.append(bytearray())
                 text, source = "", "call"
@@ -564,6 +581,7 @@ class Engine:
             lg, _, _ = self.model.forward_from_state(torch.tensor([inj], device=self.device), state)
             logits = lg[0, -1]
             generated.extend(inj)
+            reply_mask.extend([0] * len(inj))
             calls_made += 1
             emit({"type": "tool", "index": calls_made, "tool": tool, "args": args, "call": call_text, "result": result,
                   "result_bytes": len(rb[:room]), "truncated": len(rb) > room, "t_ms": (time.perf_counter() - t_tool) * 1000})
@@ -638,7 +656,7 @@ class Engine:
                         logits = lg_acc[0, -1]
                     if fix == RESULT_ID and tool_turn():
                         continue
-                    reason = "eos"
+                    reason, stop_id = "eos", fix
                     break
                 spec["fixes"] += 1
                 if n_acc > 0:
@@ -664,7 +682,7 @@ class Engine:
                     if byte == RESULT_ID and tool_turn():
                         draft = None
                         continue
-                    reason = "eos"
+                    reason, stop_id = "eos", byte
                     break
                 lg_next, routing, is_b, mbp = self.model.step(torch.tensor([[byte]], device=self.device), state)
                 record(byte, p, entropy, bool(is_b), float(routing.boundary_prob[0, 1]), "nbp", (time.perf_counter() - t_round) * 1000)
@@ -676,7 +694,10 @@ class Engine:
                 last_stats_bytes = len(generated)
                 emit({"type": "stats", **stats()})
         self._commit("reply", prompt_ids + generated, state, logits, session)  # S2: the next turn starts here
-        emit({"type": "done", "reason": reason, "text": "".join(text_parts), "calls": calls_made, "stats": stats()})
+        done = {"type": "done", "reason": reason, "text": "".join(text_parts), "calls": calls_made, "stats": stats()}
+        if context.get("want_ids"):  # the RL driver needs the exact byte ids and the loss mask, not the text
+            done.update({"prompt_ids": list(prompt_ids), "ids": list(generated), "mask": reply_mask, "eos": reason == "eos" and stop_id == EOS_ID})
+        emit(done)
 
     def register_tool(self, name: str, fn: Callable[[str], str]) -> None:
         """Route `<|call|>name: args<|result|>` to fn(args) -> result text (search, the sim environment, ...)."""
