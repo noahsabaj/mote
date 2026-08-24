@@ -133,9 +133,12 @@ Served = the last stage that passed its gate; every stage checkpoint sits in the
 
 Build order (all local): trainer schedules + snapshots + `:plain` mixes + the anneal/skip builder +
 `build_local` (built 2026-08-24, `tests/test_pipeline_stages.py`; live at the next daemon restart at an
-arm boundary) → mixes B and C on CPU during the pre-launch queue → sim-QA probe + branch funnel →
-`<|call|>/<|result|>` ids + the shared tool hook → env tasks, verifier, planners, expert traces →
-`mote/train/rlvr.py` as a daemon job type.
+arm boundary) → mixes B and C (building 2026-08-24 on CPU; `data/sim_plain` + `data/sim_sft` built) →
+sim-QA probe + branch funnel (built 2026-08-24: `mote/eval/sim_probe.py` held-out worlds, EM + pass@k;
+`mote/eval/val_bpb.py` shared + per-domain val; `mote/eval/branch_gate.py` submits the identical SFT per
+branch to the daemon, measures, applies the verdict rule, writes docs/results; the 35M scores 0 EM on
+held-out sim QA — the baseline) → `<|call|>/<|result|>` ids + the shared tool hook → env tasks, verifier,
+planners, expert traces → `mote/train/rlvr.py` as a daemon job type.
 
 ## Serving root (grilled and signed 2026-08-24, BUILT the same day; results in docs/results/2026-08-24-serving-root.md)
 
