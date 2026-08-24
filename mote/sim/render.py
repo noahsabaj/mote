@@ -35,9 +35,18 @@ EN = {
                "planning": "the planning meeting", "call": "the call", "workshop": "the workshop"},
 }
 
-RU_ROOMS = {"kitchen": ("кухня", "кухню", "кухне"), "garden": ("сад", "сад", "саду"),
-            "study": ("кабинет", "кабинет", "кабинете"), "hall": ("зал", "зал", "зале"),
-            "cellar": ("подвал", "подвал", "подвале"), "attic": ("чердак", "чердак", "чердаке")}
+# (nominative, accusative, prepositional, preposition) — кухня/чердак take на, the rest в
+RU_ROOMS = {"kitchen": ("кухня", "кухню", "кухне", "на"), "garden": ("сад", "сад", "саду", "в"),
+            "study": ("кабинет", "кабинет", "кабинете", "в"), "hall": ("зал", "зал", "зале", "в"),
+            "cellar": ("подвал", "подвал", "подвале", "в"), "attic": ("чердак", "чердак", "чердаке", "на")}
+
+
+def ru_room_to(r: str) -> str:
+    return f"{RU_ROOMS[r][3]} {RU_ROOMS[r][1]}"
+
+
+def ru_room_in(r: str) -> str:
+    return f"{RU_ROOMS[r][3]} {RU_ROOMS[r][2]}"
 RU_OBJ = {"key": ("ключ", "ключ"), "book": ("книга", "книгу"), "lamp": ("лампа", "лампу"),
           "coin": ("монета", "монету"), "apple": ("яблоко", "яблоко"), "letter": ("письмо", "письмо"),
           "cup": ("чашка", "чашку"), "knife": ("нож", "нож")}
@@ -129,9 +138,9 @@ def _ev_ru(e) -> str:
     d = e.data
     k = e.kind
     if k == "init_household":
-        out = [f"{_cap(p)} в {RU_ROOMS[r][2]}." for p, r in d["people"].items()]
-        out += [f"{_cap(RU_CONT[c][0])} в {RU_ROOMS[r][2]}." for c, r in d["containers"].items()]
-        out += [f"{_cap(RU_OBJ[o][0])} в {RU_ROOMS[r][2]}." for o, r in d["objects"].items()]
+        out = [f"{_cap(p)} {ru_room_in(r)}." for p, r in d["people"].items()]
+        out += [f"{_cap(RU_CONT[c][0])} {ru_room_in(r)}." for c, r in d["containers"].items()]
+        out += [f"{_cap(RU_OBJ[o][0])} {ru_room_in(r)}." for o, r in d["objects"].items()]
         return " ".join(out)
     if k == "init_stock":
         out = []
@@ -140,24 +149,24 @@ def _ev_ru(e) -> str:
             out.append(f"У {_cap(p)} вначале {goods} и {ru_n(st['coins'], RU_COIN_FORMS)}.")
         return " ".join(out)
     if k == "move":
-        return f"{_cap(d['who'])} {_ru_v(('пошёл', 'пошла'), d['who'])} в {RU_ROOMS[d['to']][1]}."
+        return f"{_cap(d['who'])} {_ru_v(('пошёл', 'пошла'), d['who'])} {ru_room_to(d['to'])}."
     if k == "take":
         return f"{_cap(d['who'])} {_ru_v(('взял', 'взяла'), d['who'])} {RU_OBJ[d['obj']][1]}."
     if k == "put_in":
         return f"{_cap(d['who'])} {_ru_v(('положил', 'положила'), d['who'])} {RU_OBJ[d['obj']][1]} в {RU_CONT[d['cont']][1]}."
     if k == "put_down":
-        return f"{_cap(d['who'])} {_ru_v(('оставил', 'оставила'), d['who'])} {RU_OBJ[d['obj']][1]} в {RU_ROOMS[d['room']][2]}."
+        return f"{_cap(d['who'])} {_ru_v(('оставил', 'оставила'), d['who'])} {RU_OBJ[d['obj']][1]} {ru_room_in(d['room'])}."
     if k == "trade":
         return (f"{_cap(d['buyer'])} {_ru_v(('купил', 'купила'), d['buyer'])} {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)} "
                 f"у {_cap(d['seller'])} за {ru_n(d['cost'], RU_COIN_FORMS, acc=True)}.")
     if k == "harvest":
-        return f"{_cap(d['who'])} {_ru_v(('собрал', 'собрала'), d['who'])} ещё {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)}."
+        return f"{_cap(d['who'])} {_ru_v(('раздобыл', 'раздобыла'), d['who'])} ещё {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)}."
     if k == "booked":
         return f"{_cap(d['who'])} {_ru_v(('назначил', 'назначила'), d['who'])} встречу «{RU_TITLES[d['title']]}» с {d['start_h']}:00 до {d['end_h']}:00."
     if k == "moved":
         return f"{_cap(d['who'])} {_ru_v(('перенёс', 'перенесла'), d['who'])} встречу «{RU_TITLES[d['title']]}» с {d['from_h']}:00 на {d['to_h']}:00."
     if k == "family":
-        out = [f"{_cap(a)} и {_cap(b)} женаты." for a, b in
+        out = [f"{_cap(a)} и {_cap(b)} состоят в браке." for a, b in
                {tuple(sorted((x, y))) for x, y in d["spouses"].items() if y}]
         out += [f"{_cap(p1)} и {_cap(p2)} — родители {_cap(c)}." for c, (p1, p2) in sorted(d["parents"].items())]
         return " ".join(out)
@@ -168,15 +177,15 @@ def _ev_ja(e) -> str:
     d = e.data
     k = e.kind
     if k == "init_household":
-        out = [f"{_cap(p)}は{JA['rooms'][r]}にいる。" for p, r in d["people"].items()]
-        out += [f"{JA['containers'][c]}は{JA['rooms'][r]}にある。" for c, r in d["containers"].items()]
-        out += [f"{JA['objects'][o]}は{JA['rooms'][r]}にある。" for o, r in d["objects"].items()]
+        out = [f"{_cap(p)}は{JA['rooms'][r]}にいた。" for p, r in d["people"].items()]
+        out += [f"{JA['containers'][c]}は{JA['rooms'][r]}にあった。" for c, r in d["containers"].items()]
+        out += [f"{JA['objects'][o]}は{JA['rooms'][r]}にあった。" for o, r in d["objects"].items()]
         return "".join(out)
     if k == "init_stock":
         out = []
         for p, st in d["start"].items():
             goods = "、".join(f"{JA['goods'][g]}{n}{JA_COUNTER[g]}" for g, n in st["goods"].items())
-            out.append(f"{_cap(p)}は最初、{goods}とコイン{st['coins']}枚を持っている。")
+            out.append(f"{_cap(p)}は最初、{goods}とコイン{st['coins']}枚を持っていた。")
         return "".join(out)
     if k == "move":
         return f"{_cap(d['who'])}は{JA['rooms'][d['to']]}へ移動した。"
@@ -188,7 +197,7 @@ def _ev_ja(e) -> str:
         return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を{JA['rooms'][d['room']]}に置いた。"
     if k == "trade":
         c = JA_COUNTER[d['goods']]
-        return f"{_cap(d['buyer'])}は{_cap(d['seller'])}から{JA['goods'][d['goods']]}を{d['n']}{c}、{d['cost']}枚のコインで買った。"
+        return f"{_cap(d['buyer'])}は{_cap(d['seller'])}から{JA['goods'][d['goods']]}を{d['n']}{c}、コイン{d['cost']}枚で買った。"
     if k == "harvest":
         return f"{_cap(d['who'])}は{JA['goods'][d['goods']]}をさらに{d['n']}{JA_COUNTER[d['goods']]}集めた。"
     if k == "booked":
@@ -196,7 +205,7 @@ def _ev_ja(e) -> str:
     if k == "moved":
         return f"{_cap(d['who'])}は{JA['titles'][d['title']]}を{d['from_h']}時から{d['to_h']}時に変更した。"
     if k == "family":
-        out = [f"{_cap(a)}と{_cap(b)}は夫婦だ。" for a, b in
+        out = [f"{_cap(a)}と{_cap(b)}は結婚している。" for a, b in
                {tuple(sorted((x, y))) for x, y in d["spouses"].items() if y}]
         out += [f"{_cap(p1)}と{_cap(p2)}は{_cap(c)}の両親だ。" for c, (p1, p2) in sorted(d["parents"].items())]
         return "".join(out)
@@ -238,8 +247,9 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
         return (f"Who has more {EN['goods'][a['goods']]}, {_cap(a['a'])} or {_cap(a['b'])}?",
                 f"{_cap(q.answer[1])} does.", f"{_cap(q.wrong[1])} does.")
     if q.qtype == "grandparent":
-        return (f"Who is {_cap(a['who'])}'s grandparent through {_cap(a['via'])}?",
-                f"{_cap(q.answer[1])}.", f"{_cap(q.wrong[1])}.")
+        pair = lambda v: f"{_cap(v[0])} and {_cap(v[1])}"
+        return (f"Who are {_cap(a['who'])}'s grandparents on {_cap(a['via'])}'s side?",
+                f"{pair(q.answer[1])}.", f"{pair(q.wrong[1])}.")
     if q.qtype == "count_siblings":
         return (f"How many siblings does {_cap(a['who'])} have?", f"{q.answer[1]}.", f"{q.wrong[1]}.")
     if q.qtype == "count_children":
@@ -264,7 +274,7 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
 def _place_ru(ans) -> str:
     tag, v = ans
     if tag == "room":
-        return f"в {RU_ROOMS[v][2]}"
+        return f"{ru_room_in(v)}"
     if tag == "cont":
         return f"в {RU_CONT[v][2]}"
     return f"у {_cap(v)}"
@@ -281,12 +291,12 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
     if q.qtype == "where_obj_start":
         o = RU_OBJ[a["obj"]][0]
         was = RU_WAS[RU_OBJ_GENDER[a["obj"]]]
-        return (f"Где {o} {was} в начале?", f"{_cap(o)} {was} {_place_ru(q.answer)}.", f"{_cap(o)} {was} {_place_ru(q.wrong)}.")
+        return (f"Где изначально {was} {o}?", f"{_cap(o)} {was} {_place_ru(q.answer)}.", f"{_cap(o)} {was} {_place_ru(q.wrong)}.")
     if q.qtype == "where_person":
-        return (f"Где сейчас {_cap(a['who'])}?", f"{_cap(a['who'])} в {RU_ROOMS[q.answer[1]][2]}.",
-                f"{_cap(a['who'])} в {RU_ROOMS[q.wrong[1]][2]}.")
+        return (f"Где сейчас {_cap(a['who'])}?", f"{_cap(a['who'])} {ru_room_in(q.answer[1])}.",
+                f"{_cap(a['who'])} {ru_room_in(q.wrong[1])}.")
     if q.qtype == "count_loose_in_room":
-        return (f"Сколько предметов лежит в {RU_ROOMS[a['room']][2]} (не в руках и не в ёмкости)?",
+        return (f"Сколько предметов лежит {ru_room_in(a['room'])} (не в руках и не в ёмкости)?",
                 f"Там {q.answer[1]}.", f"Там {q.wrong[1]}.")
     if q.qtype == "count_goods":
         return (f"Сколько {RU_GOODS[a['goods']]} сейчас у {_cap(a['who'])}?",
@@ -300,8 +310,9 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
         return (f"У кого больше {RU_GOODS[a['goods']]} — у {_cap(a['a'])} или у {_cap(a['b'])}?",
                 f"У {_cap(q.answer[1])}.", f"У {_cap(q.wrong[1])}.")
     if q.qtype == "grandparent":
-        return (f"Кто дедушка или бабушка {_cap(a['who'])} по линии {_cap(a['via'])}?",
-                f"{_cap(q.answer[1])}.", f"{_cap(q.wrong[1])}.")
+        pair = lambda v: f"{_cap(v[0])} и {_cap(v[1])}"
+        return (f"Кто бабушка и дедушка {_cap(a['who'])} со стороны {_cap(a['via'])}?",
+                f"{pair(q.answer[1])}.", f"{pair(q.wrong[1])}.")
     if q.qtype == "count_siblings":
         return (f"Сколько братьев и сестёр у {_cap(a['who'])}?", f"{q.answer[1]}.", f"{q.wrong[1]}.")
     if q.qtype == "count_children":
@@ -310,7 +321,8 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
         return (f"С кем в браке {_cap(a['who'])}?", f"С {_cap(q.answer[1])}.", f"С {_cap(q.wrong[1])}.")
     if q.qtype == "free_at":
         yes, no = "Да.", "Нет."
-        return (f"Свободен(на) ли {_cap(a['who'])} в {a['hour']}:00?", yes if q.answer[1] else no, yes if q.wrong[1] else no)
+        free = "Свободна" if GENDER.get(a['who']) == "f" else "Свободен"
+        return (f"{free} ли {_cap(a['who'])} в {a['hour']}:00?", yes if q.answer[1] else no, yes if q.wrong[1] else no)
     if q.qtype == "first_meeting":
         return (f"Какая первая встреча у {_cap(a['who'])}?", f"«{_cap(RU_TITLES[q.answer[1]])}».",
                 f"«{_cap(RU_TITLES[q.wrong[1]])}».")
@@ -348,8 +360,8 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
         return (f"{_cap(a['who'])}は今どこにいる？", f"{_cap(a['who'])}は{JA['rooms'][q.answer[1]]}にいる。",
                 f"{_cap(a['who'])}は{JA['rooms'][q.wrong[1]]}にいる。")
     if q.qtype == "count_loose_in_room":
-        return (f"{JA['rooms'][a['room']]}に置いてある物はいくつ？（手に持たれておらず、入れ物にも入っていない物）",
-                f"{q.answer[1]}個。", f"{q.wrong[1]}個。")
+        return (f"{JA['rooms'][a['room']]}に置いてある物はいくつ？（誰も手に持っておらず、入れ物にも入っていない物）",
+                f"{q.answer[1]}つ。", f"{q.wrong[1]}つ。")
     if q.qtype == "count_goods":
         c = JA_COUNTER[a['goods']]
         return (f"{_cap(a['who'])}は今{JA['goods'][a['goods']]}をいくつ持っている？",
@@ -360,7 +372,8 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
         return (f"{JA['goods'][a['goods']]}を多く持っているのは{_cap(a['a'])}と{_cap(a['b'])}のどちら？",
                 f"{_cap(q.answer[1])}。", f"{_cap(q.wrong[1])}。")
     if q.qtype == "grandparent":
-        return (f"{_cap(a['via'])}を通じた{_cap(a['who'])}の祖父母は誰？", f"{_cap(q.answer[1])}。", f"{_cap(q.wrong[1])}。")
+        pair = lambda v: f"{_cap(v[0])}と{_cap(v[1])}"
+        return (f"{_cap(a['via'])}側の{_cap(a['who'])}の祖父母は誰？", f"{pair(q.answer[1])}。", f"{pair(q.wrong[1])}。")
     if q.qtype == "count_siblings":
         return (f"{_cap(a['who'])}の兄弟姉妹は何人？", f"{q.answer[1]}人。", f"{q.wrong[1]}人。")
     if q.qtype == "count_children":

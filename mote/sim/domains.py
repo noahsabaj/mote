@@ -290,10 +290,11 @@ def _kinship(seed: int, diff: Dict[str, int]) -> Trace:
     if g2_with_parents:
         c = rngq.choice(g2_with_parents)
         mother = parents[c][0]
-        gp = parents.get(mother, (None, None))[0]
-        if gp:
-            qs.append(Q("grandparent", {"who": c, "via": mother}, ("person", gp),
-                        ("person", rngq.choice([x for x in g1 if x != mother])), "wrong_entity"))
+        gps = parents.get(mother)
+        if gps:
+            decoy = rngq.choice([x for x in names if x not in gps and x != mother and x != c])
+            qs.append(Q("grandparent", {"who": c, "via": mother}, ("persons", tuple(gps)),
+                        ("persons", (gps[0], decoy)), "wrong_entity"))
         sibs = [x for x in g2_with_parents if x != c and parents[x] == parents[c]]
         qs.append(Q("count_siblings", {"who": c}, ("num", len(sibs)),
                     ("num", len(sibs) + rngq.choice([1, -1]) if sibs else 1), "off_by_one"))
@@ -334,14 +335,19 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
             cal[p].slots[i] = (ns, ns + (e - s), title)
             events.append(Event(t, "moved", {"who": p, "title": title, "from_h": s, "to_h": ns}))
         else:
+            free_titles = [x for x in titles if x not in {t2 for _s, _e, t2 in cal[p].slots}]
+            if not free_titles:
+                continue  # a repeated title would make a later "moved X" ambiguous
             s = rng.randint(8, 16)
-            title = rng.choice(titles)
+            title = rng.choice(free_titles)
             cal[p].slots.append((s, s + rng.choice([1, 2]), title))
             events.append(Event(t, "booked", {"who": p, "title": title, "start_h": s, "end_h": cal[p].slots[-1][1]}))
     qs: List[Q] = []
     rngq = random.Random(seed + 1)
-    p = rngq.choice(people)
-    h = rngq.randint(8, 17)
+    booked = [p for p in people if cal[p].slots] or people  # only ask about people the text mentions
+    p = rngq.choice(booked)
+    edges = {x for s_, e_, _ in cal[p].slots for x in (s_, e_)}
+    h = rngq.choice([x for x in range(8, 18) if x not in edges] or list(range(8, 18)))  # never an endpoint
     busy = any(s <= h < e for s, e, _ in cal[p].slots)
     qs.append(Q("free_at", {"who": p, "hour": h}, ("bool", not busy), ("bool", busy), "wrong_entity"))
     if cal[p].slots:
@@ -352,7 +358,7 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
                     "wrong_entity"))
         qs.append(Q("count_meetings", {"who": p}, ("num", len(cal[p].slots)),
                     ("num", len(cal[p].slots) + rngq.choice([1, -1])), "off_by_one"))
-    a, b = rngq.sample(people, 2)
+    a, b = rngq.sample(booked, 2) if len(booked) >= 2 else rngq.sample(people, 2)
     overlap = any(sa < eb and sb < ea for sa, ea, _ in cal[a].slots for sb, eb, _ in cal[b].slots)
     qs.append(Q("overlap", {"a": a, "b": b}, ("bool", overlap), ("bool", not overlap), "wrong_entity"))
     return Trace("schedule", seed, diff, w, events, qs)
