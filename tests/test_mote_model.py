@@ -71,9 +71,12 @@ def test_mamba3_step_matches_forward_and_state_continuation():
     assert rel(torch.cat([y_a, y_b], 1), y_full) < tol
     for a, b in zip(st_full, st_b):
         assert rel(a, b) < tol
-    # reference vs step must agree tightly regardless of kernels
+    # reference vs step must agree tightly regardless of kernels (initial_states now routes to the
+    # kernel too — Input_States wiring — so invoke the reference path explicitly)
     zero = m.allocate_inference_cache(2, DEV)
-    y_ref, _ = m(u, return_final_states=True, initial_states=zero)
+    z, x, Bn, Cn, ADT, DT, trap, angles = m._preprocess(u)
+    y_ref, _ = m._reference_forward(Cn, Bn, x, ADT, DT, trap, angles, z, zero)
+    y_ref = m.out_proj(y_ref.reshape(u.shape[0], u.shape[1], -1).to(u.dtype))
     assert rel(y_ref, y_step) < 1e-4, rel(y_ref, y_step)
 
 
