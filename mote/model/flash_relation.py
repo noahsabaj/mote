@@ -50,9 +50,11 @@ except Exception:  # pragma: no cover - Windows-native path
 
 DETERMINISTIC = os.environ.get("MOTE_DETERMINISTIC_RELATION", "0") == "1"  # two-pass backward, no atomics
 
-LOG2E = 1.4426950408889634
-LN2 = 0.6931471805599453
-RESCALE_THRESH = 8.0  # log2(256): slack before the online softmax rescales (FlashAttention-4)
+# Kernel-side constants: globals read inside @triton.jit must be tl.constexpr instances (Triton 3.7 rejects
+# plain floats at compile time — the CPU interpreter does not, which is how this slipped past TRITON_INTERPRET=1)
+LOG2E = tl.constexpr(1.4426950408889634)
+LN2 = tl.constexpr(0.6931471805599453)
+RESCALE_THRESH = tl.constexpr(8.0)  # log2(256): slack before the online softmax rescales (FlashAttention-4)
 
 
 def _next_pow2(n: int) -> int:
