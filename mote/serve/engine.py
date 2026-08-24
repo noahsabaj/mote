@@ -178,12 +178,14 @@ class Engine:
                 state = self.model.allocate_inference_state(self.device, arena=self.arena)
                 self.model.prefill(ids, state)
                 self.model.step(torch.tensor([[65]], device=self.device), state)
-                if L >= 128:
-                    # resumed prefill compiles its own kernel variants (Input_States != None,
-                    # 2026-08-24): warm them too, or the first cache-hit turn pays the compile
+                if L >= 16:
+                    # resumed reads compile their own kernel variants (Input_States != None,
+                    # 2026-08-24): warm them at short and long lengths too, or the first warm turn
+                    # (a ~30-byte continuation) pays a multi-second compile
                     warm = self.model.allocate_inference_state(self.device, arena=self.arena)
                     self.model.prefill(ids[:, : L // 2], warm)
                     self.model.forward_from_state(ids[:, L // 2 :], warm)
+                    self.model.forward_from_state(ids[:, : min(3, L)], warm)
             if self._graph_ok:  # capture the first decode width now, not on the first reply
                 gd = self._graph_decoder()
                 state = self.model.allocate_inference_state(self.device, arena=self.arena)

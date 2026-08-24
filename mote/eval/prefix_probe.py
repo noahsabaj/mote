@@ -54,6 +54,8 @@ def main():
 
     warm = Engine(args.checkpoint, device=args.device)
     cold = Engine(args.checkpoint, device=args.device, prefix_cache_mb=0)
+    if args.device != "cpu":  # the Triton JIT (tens of seconds on first use) is startup cost, not a turn
+        print(f"warm-up: {warm.warmup():.1f} s + {cold.warmup():.1f} s", flush=True)
     params = GenParams(temperature=0.0, max_bytes=args.max_bytes, n_candidates=0)
     messages, prev, rows = [], None, []
     for t, q in enumerate(QUESTIONS[: args.turns]):

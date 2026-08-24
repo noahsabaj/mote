@@ -294,7 +294,18 @@ class HNetForCausalLM(nn.Module):
             if o is None or isinstance(o, (int, float, bool, str)):
                 return o
             if hasattr(o, "__dataclass_fields__"):
-                return type(o)(**{k: cl(getattr(o, k)) for k in o.__dataclass_fields__})
+                out = {}
+                for k in o.__dataclass_fields__:
+                    v = getattr(o, k)
+                    if k == "cur_chunk_inputs" and isinstance(v, list) and len(v) > 1:
+                        # the multi-byte head keeps one [1,1,D] slot per byte of the chunk in progress —
+                        # hundreds of tiny tensors on a long chunk; move them as one tensor (measured:
+                        # per-tensor pinned copies were ~100 ms of a 30-byte warm turn on the GPU)
+                        moved = fn(torch.cat(v, dim=1))
+                        out[k] = list(moved.split(1, dim=1))
+                    else:
+                        out[k] = cl(v)
+                return type(o)(**out)
             return copy.deepcopy(o)
         return cl(state)
 
@@ -310,13 +321,26 @@ class HNetForCausalLM(nn.Module):
         (the serving engine parks anchors on the CPU; `pin` page-locks them for the trip back). The
         arena reference is kept as is: its rows are moved by the prefix store, page by page."""
         dev = torch.device(device)
+        # Every copy is queued without a host sync (pinned on the CPU side), and the stream is synced
+        # once at the end: a blocking copy per tensor cost ~1 ms each beside a running trainer
+        # (measured 2026-08-24: 19-36 ms to restore an anchor of ~30 small tensors).
+        sync = False
+
         def mv(t: torch.Tensor) -> torch.Tensor:
+            nonlocal sync
             if pin and dev.type == "cpu" and t.is_cuda:
                 out = torch.empty_like(t, device="cpu", pin_memory=True)
-                out.copy_(t)
+                out.copy_(t, non_blocking=True)
+                sync = True
                 return out
+            if dev.type == "cuda" and not t.is_cuda:
+                return t.to(dev, non_blocking=t.is_pinned(), copy=True)
             return t.to(dev, copy=True)
-        return HNetForCausalLM._map_state(state, mv)
+
+        out = HNetForCausalLM._map_state(state, mv)
+        if sync:
+            torch.cuda.current_stream().synchronize()  # the pinned copies are complete before anyone reads them
+        return out
 
     @torch.no_grad()
     def step(self, input_ids: torch.Tensor, state: InferenceState):

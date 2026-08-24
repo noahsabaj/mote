@@ -34,6 +34,26 @@ engine graph path == eager path incl. p/entropy/chunk events, next turn warm.
 
 Typical warm turns read 16–34 bytes in 13–25 ms. The worst turn is now a reported number.
 
+## Prefix probe, 35M, GPU (Triton kernels), 40 greedy turns, beside a running 2h arm (`2026-08-24-prefix-probe-gpu.json`)
+
+| | GPU |
+|---|---|
+| prompt bytes served from the store / cuts moved / replies differ | 92.5 % / 0 / 0 |
+| largest next-byte logit difference (kernel resume vs one pass) | **0.12** — kernel rounding, not the store (CPU reference: 1.4e-4); greedy replies identical |
+| warm read, mean / worst (non-fold turns, ~30 B) | **47 ms / 57 ms** |
+| fold turns (~1000 B re-read from the card) | 55–63 ms |
+| cold read, mean / worst (~1500 B) | 44 ms / 56 ms |
+
+Two fixes came out of this run, both in the model: `move_state` copied every tensor with a blocking
+`.to()` (one stream sync each — 19–36 ms per restore beside the trainer; now non-blocking with one
+sync: 4–10 ms), and the Mamba-3 kernel was handed `v` in fp32 after any decode (the eager `step`
+returns fp32, the kernel returns bf16), so Triton compiled a second variant on the first warm turn of
+every process (3.5 s; now the states are normalised at the kernel boundary, 41 ms). Honest reading:
+**at 35M on the GPU the store is a wash for latency** — a 30-byte continuation costs ~37 ms of launches
+and syncs, about what a cold 1.5 KB prefill costs through the kernels. It pays on the CPU (Windows
+studio, 63 vs 921 ms) and it is built for the flagship's 16 KB contexts, where a cold read is a full
+16 KB / 105M-parameter pass and the hot arena saves the row copies; that number waits for an idle GPU.
+
 Note on this checkpoint: its router treats the 482-byte identity card as **one chunk** (boundary
 probability mean 0.02 on prose; prefill, step and continuation agree 482/482 on CPU and GPU), so its
 anchors and arena rows are tiny. The flagship's rows will be ~3000 per full context.

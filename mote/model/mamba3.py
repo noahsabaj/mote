@@ -166,12 +166,14 @@ class Mamba3Mixer(nn.Module):
         use_kernel = HAS_MAMBA3_KERNEL and u.is_cuda
         if use_kernel:
             # Input_States order per upstream: (angle [B,H,A], ssm [B,H,P,N], k [B,H,N], v [B,H,P]).
-            # The kernel does not cast these; feed them back in the dtypes it returns
-            # (angle/ssm fp32, k/v as stored) so cached prefix states round-trip exactly.
+            # The kernel does not cast these, and Triton specialises on the pointer dtypes: feed them
+            # in the layout the kernel itself returns (angle/ssm/k fp32, v bf16, contiguous). A state
+            # produced by the eager `step` carries v in fp32 — without this cast the first warm
+            # continuation after a decode compiled a second variant (measured 3.5 s, 2026-08-24).
             inp = None
             if initial_states is not None:
-                inp = (initial_states.angle.float(), initial_states.ssm.float(),
-                       initial_states.k, initial_states.v)
+                inp = (initial_states.angle.float().contiguous(), initial_states.ssm.float().contiguous(),
+                       initial_states.k.float().contiguous(), initial_states.v.to(torch.bfloat16).contiguous())
             out = mamba3_siso_combined(
                 Q=Cn, K=Bn, V=x, ADT=ADT, DT=DT, Trap=trap,
                 Q_bias=self.C_bias.squeeze(1), K_bias=self.B_bias.squeeze(1),
