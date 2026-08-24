@@ -282,7 +282,10 @@ class Mamba3Mixer(nn.Module):
         if self.telemetry_dev is not None:
             self.telemetry_dev["retention"].copy_(alpha[0])
             self.telemetry_dev["trapezoid"].copy_(tr[0])
-        elif self.telemetry is not None:
+        elif self.telemetry is not None and not (u.is_cuda and torch.cuda.is_current_stream_capturing()):
+            # host copies are illegal inside a CUDA-graph capture (the flagship's first capture found this,
+            # 2026-08-24: the 35M never captures because of its multi-byte head); the decoder's readings
+            # come from telemetry_dev when the graph path owns the mixer
             self.telemetry["retention"] = alpha[0].tolist()  # per-head exp(A·Δt) for this byte
             self.telemetry["trapezoid"] = tr[0].tolist()
         beta = (1 - tr) * dt * alpha
