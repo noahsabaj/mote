@@ -175,10 +175,23 @@ norm backward + a launch gap on the H100): register the three Triton custom auto
 (flash_relation, mamba3, fused norm) as custom ops so nothing graph-breaks → compile the block stacks with
 dynamic T (bucketed chunk counts; `cache_size_limit` guarded so Dynamo never falls back silently) →
 routing/dechunk rewritten in static-shape ops (same chunks selected, padded to the bucket; the equality
-test is the gate) → CUDA graphs: the static byte-level stages first, per-bucket main-network graphs gated
-on measured memory beside the resident serving arena (coarser buckets if needed). Serving stays eager;
-only the trainer's callable is compiled. The whole-model `--compile` flag exists but was never measured:
-eager/`--compile` 10-min twins are queued after `ab3_jepa_sig` and inform the plan.
+test is the gate; the dechunk's cross-block EMA carry is already a closed form, 591e89f) → CUDA graphs
+gated on measured memory beside the resident serving arena. Serving stays eager; only the trainer's
+callable is compiled. The whole-model `--compile` flag exists but was never measured: eager/`--compile`
+10-min twins are queued after `ab3_jepa_sig` and inform the plan.
+
+Folded in 2026-08-24 evening after checking what torch 2.13 actually ships (each a measured flag, dropped
+if it doesn't pay): Inductor **graph partition** (on by default; `reduce-overhead` splits around the chunk
+layer's `.item()` and cudagraphs each partition per bucket — replaces hand-rolled bucket graphs),
+`torch.compiler.nested_compile_region` on `Block.forward` (one compile shared by the 12 + 6 blocks),
+`save_cache_artifacts`/`load_cache_artifacts` across daemon restarts (a hot-swap must not re-pay compile
+time), compiled autograd, combo kernels, and DebugMode tensor hashing as the compile-vs-eager exactness
+tool. Also measured under the kernel gate: `F.rms_norm`'s fused CUDA kernel against mamba_ssm's norm
+(whose backward is 9.4 % of the H100 step), and batching same-shape Muon matrices into one `bmm` per
+Newton–Schulz step (`torch.optim.Muon` is the same math as ours with no batching — nothing to gain there).
+**TF32** for the fp32 residual projection is a numerics change to the frozen fp32-residual path: screened
+as a 30-min arm pair (`--tf32` vs a fresh control) before launch, adopted only within noise. fp8, the
+CuTeDSL/CUTLASS Inductor backends and Gluon are 1B / H100-only material.
 
 ## Serving root (grilled and signed 2026-08-24, BUILT the same day; results in docs/results/2026-08-24-serving-root.md)
 

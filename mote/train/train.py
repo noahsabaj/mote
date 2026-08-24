@@ -286,6 +286,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--ckpt-minutes", type=float, default=10.0)
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--compile", action="store_true")
+    ap.add_argument("--tf32", action="store_true", help="TF32 tensor-core inputs for the fp32 matmuls (the fp32 residual projection); a numerics change to the frozen fp32-residual path, screened as an arm (2026-08-24)")
     ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon", "muonsw"], help="muon: Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest; muonsw: Muon with \u03b7\u00b2-scaled weight decay (2607.23777)")
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
@@ -409,6 +410,8 @@ class Trainer:
             print(f"resumed from step {self.step}", flush=True)
 
         self.fwd = torch.compile(model) if args.compile else model
+        if getattr(args, "tf32", False):
+            torch.set_float32_matmul_precision("high")  # TF32 for fp32 GEMMs; off (="highest") is the frozen default
         self.log_f = open(out_dir / "log.jsonl", "a", encoding="utf-8")
         self.tokens_per_step = args.batch_size * args.seq_len * args.grad_accum
         self.total_steps = args.max_steps
