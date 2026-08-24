@@ -81,6 +81,20 @@ process-boundary alternatives (moot — one process shipped).
 7. Memory-first training changes, evidence-gated by 2: checkpointed or reversible outer layers, bf16/FP8
    activation storage, fused EMA dechunk, optimizer state in pinned host memory, token-budget batching.
 
+## Reading 2026-08-23 (six papers of Aug 18-20, checked against this road before the freeze)
+
+None changed a decision. The keepers: **2608.18222** (Think Shallow, Solve Deep) is the recipe for the
+eventual looped-main arm — a weight-tied main network trained with a terminal fixed-point penalty
+(headline weight 0.05, useful range 0.005–0.2, "the slowest rate that still settles"), per-step
+displacement + top-8 Benettin Lyapunov exponents logged from day one, depth-safety by displacement-sum
+vs decoder margin; their own scale result (the loss alone collapses Huginn-3.5B to a constant answer;
+only latent anchoring survives) is why it does NOT touch the flagship. **2608.19611** (Forking Fast):
+uncertainty of sampled generations converges and resampling can be smoothed cheaply — methodology for
+the prefs loop and any temperature>0 probe. **2608.19171** (Lévy Attention): a mixer that emits a
+closed-form trust signal for free — a future honesty-signal exploration next to Relation's
+exchange-mass telemetry. **2608.18656** (FlashAttention-V): CPU-vector attention kernels — a "Mote on
+edge" track. 2608.19331 / 2608.18808: theory, no bearing.
+
 ## Out of scope until the above
 
 Looped main network, test-time-training memory layers instead of a window, any change to the
