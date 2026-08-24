@@ -110,7 +110,8 @@ def _ev_en(e, kin_names=None) -> str:
         coins = "1 coin" if d['cost'] == 1 else f"{d['cost']} coins"
         return f"{_cap(d['buyer'])} bought {en_n(d['n'], d['goods'])} from {_cap(d['seller'])} for {coins}."
     if k == "harvest":
-        return f"{_cap(d['who'])} gathered {en_n(d['n'], d['goods'])} more."
+        n, g = d['n'], d['goods']
+        return f"{_cap(d['who'])} gathered {n} more {EN_GOODS_ONE[g] if n == 1 else EN['goods'][g]}."
     if k == "booked":
         return f"{_cap(d['who'])} booked {EN['titles'][d['title']]} from {d['start_h']}:00 to {d['end_h']}:00."
     if k == "moved":
