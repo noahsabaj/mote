@@ -269,6 +269,9 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--sft", action="store_true", help="train on an SFT shard (assistant-byte loss mask)")
     ap.add_argument("--init-from", default=None, help="checkpoint to initialize weights from (e.g. pretrain -> SFT)")
     ap.add_argument("--ratio-weight", type=float, default=None, help="override dc.ratio_loss_weight (\u03b1)")
+    ap.add_argument("--bf16-residual", action="store_true", help="A/B: keep the residual stream in bf16 instead of fp32")
+    ap.add_argument("--relation-window", type=int, default=None, help="A/B: each chunk sees at most the last N chunks (materialized path)")
+    ap.add_argument("--no-flash", action="store_true", help="A/B: materialized Relation instead of the Triton kernel")
     ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
     return ap
 
@@ -310,6 +313,13 @@ class Trainer:
             cfg.mbp.position_gamma = args.mbp_gamma
         if args.mbp_transition:
             cfg.mbp.transition = True
+        if args.bf16_residual:
+            cfg.residual_in_fp32 = False
+        if args.relation_window is not None:
+            cfg.main.window_chunks = args.relation_window
+        if args.no_flash:
+            from ..model import relation as _relation
+            _relation.USE_FLASH = False
         self.cfg = cfg
         self.model = model = HNetForCausalLM(cfg, device=device)
         if args.ckpt_main:

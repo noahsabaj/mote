@@ -59,17 +59,17 @@ class HNetForCausalLM(nn.Module):
         V = cfg.pad_vocab_to
 
         self.embeddings = nn.Embedding(V, D0, **fk)
-        self.encoder = make_mamba3_stack(cfg.encoder_layers, D0, cfg.mamba3, cfg.norm_eps, 0, **fk)
+        self.encoder = make_mamba3_stack(cfg.encoder_layers, D0, cfg.mamba3, cfg.norm_eps, 0, **fk, residual_in_fp32=cfg.residual_in_fp32)
         self.routing_module = RoutingModule(D0, **fk)
         self.chunk_layer = ChunkLayer(bucket=getattr(cfg.dc, "chunk_bucket", 1))
-        self.main_network = make_relation_stack(cfg.main, cfg.norm_eps, **fk)
+        self.main_network = make_relation_stack(cfg.main, cfg.norm_eps, **fk, residual_in_fp32=cfg.residual_in_fp32)
         self.dechunk_layer = DeChunkLayer(D0, prob_clamp=cfg.dc.prob_clamp)
         self.residual_proj = nn.Linear(D0, D0, device=device, dtype=torch.float32)
         nn.init.zeros_(self.residual_proj.weight)
         nn.init.zeros_(self.residual_proj.bias)
         self.residual_proj.weight._no_reinit = True
         self.pad_dimension = nn.Parameter(torch.zeros(D1 - D0, **fk)) if D1 > D0 else None
-        self.decoder = make_mamba3_stack(cfg.decoder_layers, D0, cfg.mamba3, cfg.norm_eps, cfg.encoder_layers, **fk)
+        self.decoder = make_mamba3_stack(cfg.decoder_layers, D0, cfg.mamba3, cfg.norm_eps, cfg.encoder_layers, **fk, residual_in_fp32=cfg.residual_in_fp32)
         self.lm_head = nn.Linear(D0, V, bias=False, **fk)
         self.mbp_head = LCAHead(D0, cfg.mbp.n_layers, cfg.mbp.n_heads, cfg.mbp.d_ff, cfg.norm_eps, vocab=V, transition=getattr(cfg.mbp, "transition", False), **fk) if cfg.mbp.enabled else None
         if cfg.tie_embeddings:

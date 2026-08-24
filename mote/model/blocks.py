@@ -107,7 +107,7 @@ class Isotropic(nn.Module):
 
 
 # --------------------------------------------------------------------------------------
-def make_mamba3_stack(n_layers: int, d_model: int, cfg, eps: float, layer_offset: int = 0, device=None, dtype=None) -> Isotropic:
+def make_mamba3_stack(n_layers: int, d_model: int, cfg, eps: float, layer_offset: int = 0, residual_in_fp32: bool = True, device=None, dtype=None) -> Isotropic:
     """Encoder / decoder: Mamba-3 mixers without FFN ('m' blocks)."""
     blocks = []
     for i in range(n_layers):
@@ -124,11 +124,11 @@ def make_mamba3_stack(n_layers: int, d_model: int, cfg, eps: float, layer_offset
             device=device,
             dtype=dtype,
         )
-        blocks.append(Block(d_model, mixer, None, eps=eps, device=device, dtype=dtype))
+        blocks.append(Block(d_model, mixer, None, eps=eps, residual_in_fp32=residual_in_fp32, device=device, dtype=dtype))
     return Isotropic(blocks, d_model, eps=eps, device=device, dtype=dtype)
 
 
-def make_relation_stack(cfg, eps: float, device=None, dtype=None) -> Isotropic:
+def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=None, dtype=None) -> Isotropic:
     """Main network: Full Relation mixers with SwiGLU FFNs ('R' blocks)."""
     blocks = []
     for i in range(cfg.n_layers):
@@ -142,7 +142,8 @@ def make_relation_stack(cfg, eps: float, device=None, dtype=None) -> Isotropic:
             givens=cfg.givens,
             device=device,
             dtype=dtype,
+                    window=getattr(cfg, "window_chunks", None),
         )
         mlp = SwiGLU(cfg.d_model, cfg.d_ff, device=device, dtype=dtype)
-        blocks.append(Block(cfg.d_model, mixer, mlp, eps=eps, device=device, dtype=dtype))
+        blocks.append(Block(cfg.d_model, mixer, mlp, eps=eps, residual_in_fp32=residual_in_fp32, device=device, dtype=dtype))
     return Isotropic(blocks, cfg.d_model, eps=eps, device=device, dtype=dtype)

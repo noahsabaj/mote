@@ -32,9 +32,12 @@ class Mamba3Cfg:
 
 @dataclass
 class RelationCfg:
+    # None = full attention over all chunks; an int limits each chunk to the last N chunks
+    # (windowed-main A/B, docs/context.md; forces the materialized path until the kernel learns windows)
     """Full Relation main network (Ge, Yang, Nie 2026)."""
 
     n_layers: int = 6
+    window_chunks: int | None = None
     d_model: int = 384
     n_heads: int = 8  # must be even (Givens head pairs)
     d_ff: int = 768
