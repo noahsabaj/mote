@@ -161,6 +161,10 @@ class Engine:
                 state = self.model.allocate_inference_state(self.device)
                 self.model.prefill(ids, state)
                 self.model.step(torch.tensor([[65]], device=self.device), state)
+                if L >= 128:
+                    # resumed prefill compiles its own kernel variants (Input_States != None,
+                    # 2026-08-24): warm them too, or the first cache-hit turn pays the compile
+                    self.model.prefill(ids[:, : L // 2], state)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()  # give the warm-up's transient buffers back (training may share this GPU)
