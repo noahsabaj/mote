@@ -1,0 +1,14 @@
+# The repo moved from Windows to Fedora on 2026-08-23; Windows checkouts had
+# core.autocrlf=true, so the working tree arrived CRLF against an LF index and
+# every text file read as modified. Pin LF in the working tree on every platform.
+* text=auto eol=lf
+
+# Windows shim: cmd.exe is happiest with CRLF.
+mote.cmd text eol=crlf
+
+*.png binary
+*.ico binary
+*.pt binary
+*.bin binary
+*.woff binary
+*.woff2 binary
