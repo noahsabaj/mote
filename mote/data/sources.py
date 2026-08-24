@@ -6,7 +6,7 @@ Percentages are the agreed mix; the builders scale them to a byte budget.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, Iterator, List, Optional
 
 
@@ -100,6 +100,22 @@ FLAGSHIP: List[PretrainSource] = [
     PretrainSource("fineweb_long", "HuggingFaceFW/fineweb-edu", 0.02, name="sample-10BT", keep=_fineweb_keep, min_bytes=8192, max_bytes=65536, note="long edu pages"),
 ]
 assert abs(sum(s.share for s in FLAGSHIP) - 1.0) < 1e-9, sum(s.share for s in FLAGSHIP)
+
+# The anneal (cooldown) composition, signed 2026-08-24 (docs/shape.md § pipeline): the same sources as
+# FLAGSHIP with the weight moved toward math, Q&A and rewrites — the "quality annealing" of OLMo 2 /
+# Llama 3 / OctoThinker. Fresh documents come from `build_mix --list anneal --skip-after <earlier metas>`.
+# The cooldown branch adds plain-LM extras on top via `--mix …:plain` (sim narrative+QA 4 %, chat 3 %,
+# identity 0.2 %), so these weights are of the remaining ~93 % of the branch's bytes.
+_ANNEAL_WEIGHTS: Dict[str, float] = {
+    "fineweb_edu": 18, "dclm_edu": 8, "ultra_fineweb_l3": 4, "nemotron_factseek": 2, "finewiki_simple": 1,
+    "synth": 10, "finephrase": 7, "cosmopedia_v2": 7,
+    "finemath": 15,
+    "code": 7, "code_long": 1,
+    "fw2_spa": 1, "fw2_fra": 1, "fw2_deu": 1, "fw2_por": 1, "fw2_rus": 1, "fw2_jpn": 1,
+    "finewiki_long": 3, "gutenberg": 2, "fineweb_long": 2,
+}
+assert set(_ANNEAL_WEIGHTS) == {s.key for s in FLAGSHIP}, set(_ANNEAL_WEIGHTS) ^ {s.key for s in FLAGSHIP}
+ANNEAL: List[PretrainSource] = [replace(s, share=_ANNEAL_WEIGHTS[s.key] / sum(_ANNEAL_WEIGHTS.values())) for s in FLAGSHIP]
 
 
 @dataclass

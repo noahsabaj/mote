@@ -44,14 +44,16 @@ class ByteShard:
     """Pretraining shards: ``{prefix}.meta.json`` + ``{prefix}.train.bin`` / ``.val.bin``.
     SFT shards: ``{prefix}.sft.meta.json`` + ``.sft.{split}.bin`` and ``.sft.{split}.mask.bin``."""
 
-    def __init__(self, prefix: str | Path, split: str, sft: bool = False):
+    def __init__(self, prefix: str | Path, split: str, sft: bool = False, plain: bool = False):
+        """`plain`: read an SFT shard's bytes as ordinary LM data (no loss mask) — how a cooldown mix
+        takes chat and identity bytes (docs/shape.md pipeline)."""
         prefix = Path(prefix)
         meta_path = prefix.parent / (f"{prefix.name}.sft.meta.json" if sft else f"{prefix.name}.meta.json")
         meta = json.loads(meta_path.read_text())
         self.meta = meta
-        self.sft = sft
+        self.sft = sft and not plain
         self.data = np.memmap(prefix.parent / meta[split]["file"], dtype=np.uint16, mode="r")
-        self.mask = np.memmap(prefix.parent / meta[split]["mask_file"], dtype=np.uint8, mode="r") if sft else None
+        self.mask = np.memmap(prefix.parent / meta[split]["mask_file"], dtype=np.uint8, mode="r") if self.sft else None
         self.n = len(self.data)
 
     def _window(self, s: int, seq_len: int) -> Tuple[np.ndarray, Optional[np.ndarray]]:

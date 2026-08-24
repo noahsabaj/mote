@@ -72,8 +72,9 @@ continue, and `Engine._read_prompt` reads only the bytes after the longest ancho
 
 ## Flagship: the window
 
-* **16384 bytes from the first step** (decided; ~1.94× per-byte cost, so ≈2 weeks local instead of
-  ≈1 at the same MFU). ~3000 chunks in the main network; positions trained to that length.
+* **16384 bytes from the first step** (decided; ~1.94× per-byte cost; at the fused-norm 68 KB/s that is
+  ~5.9 GB/day, a ≈7-day trunk — docs/shape.md § pipeline). ~3000 chunks in the main network; positions
+  trained to that length.
 * **Gate — passed 2026-08-23**: `profile_step --preset flagship --chunk-bytes 6 --seq-len 16384 --batch-size 1
   --ckpt-main` on the 4060 Ti: **6.34 GB peak**, 42 KB/s, 19.3 TFLOPS (≈ 44 % MFU) — 8192 was 4.17 GB at the
   same 42 KB/s, 4096 3.06 GB at 29 KB/s. The preset now says 16384. (Fallback 8192 stays on paper.)

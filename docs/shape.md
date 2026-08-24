@@ -75,6 +75,68 @@ no window kernel gets built); head off; EMA 0.999; batch 1 x accum 4 @ 16384; fu
 Launch gated on the pre-launch queue (JEPA round 1+2, attention ablation, seed-noise calibration)
 and Noah's word.
 
+## Training pipeline: pre / mid / post (grilled and signed 2026-08-24)
+
+What each stage is, exactly, and what it may and may not do. The evidence behind the split: knowledge
+and the reasoning substrate are laid down in pretraining and mid-training (Allen-Zhu & Li 2309.14316:
+facts memorised without diverse forms stay unextractable "regardless of subsequent instruction
+fine-tuning"; Front-Loading 2510.03264; PRISM 2603.17074: mid-training restructures > 90 % of the
+weights, RL touches ~5 % and only works on a mid-trained model); post-training reweights what is already
+reachable (RLVR raises pass@1 while the base keeps pass@k, 2504.13837; on-policy RL is KL-minimal and
+forgets least, 2509.04259). So: facts → pre/mid, format → SFT, RL last, headroom-gated.
+
+**Pre — the trunk.** The frozen config above; `--schedule trunk` = warmup (10 % of the 7-day estimate)
+then constant lr 8e-4, no decay. `--snapshot-steps` keeps a weights-only `snap_<step>.pt` about daily —
+the branch points. The daemon serves the EMA as today. Launch on Noah's word after the pre-launch queue.
+Branch trigger (automatic): the first of {24-h val-bpb gain < 0.003, day 7, Noah's "branch"}. At day 7
+with the gain still ≥ 0.003: continue on **mix B** in 1-day resumes, day 10 at most, then branch.
+Data: mix A = the frozen 10 GB; **mix B** = fresh 10 GB of the same composition (`build_mix --list
+flagship --skip-after data/flagship_mix.meta.json`: the HF streams are file-ordered and unshuffled, so
+skipping A's recorded per-source bytes replays past exactly A's documents).
+
+**Mid — two cooldown branches, ~1.4 GPU-days each.** `--init-from <trunk snapshot> --schedule cooldown`:
+lr 8e-4 → 0.1× (inverse-sqrt) over the whole branch, no warmup, chunk target held at its final value, the
+step horizon fixed at the first probe so a resume continues the decay. **Control** = mix B. **Anneal** =
+**mix C** (8 GB fresh, the ANNEAL table in `mote/data/sources.py`: fineweb_edu 18 / dclm 8 / Ultra-FineWeb
+rewrites 4 / fact-seeking 2 / simple-wiki 1 · SYNTH Q&A 10 / finephrase 7 / Cosmopedia 7 · finemath 15 ·
+code 7 + 1 long · multilingual 6 · long documents 7, of the branch's ~93 %) plus plain-LM extras via
+`--mix …:plain`: sim narrative+QA 4 % (`build_local`), chat (`sft_local`, no mask) 3 %, identity 0.2 %.
+Gate: both branches get the identical 60-min SFT, then reading EM/F1, sim-QA EM (new probe),
+identity/hold/concede, needle and chat val decide; guard = overall val bpb ≤ control + 0.005, per-domain
+vals recorded. Anneal ships if it wins ≥ 2 of {reading, sim-QA, chat val} with no guard tripped, else
+control. The winner's final checkpoint is the **flagship base**; the pair is the flagship's own
+mid-training A/B (docs/results).
+
+**Post — SFT → DPO stages → RLVR last.**
+1. **SFT-1** (format): init = the flagship base; `sft_local` + identity 5 % + sim QA ~10 % + tool-protocol
+   traces if built (else SFT-2 adds them); search data only once the reading gate (docs/search.md, ≥ 50 %
+   EM after a small QA SFT) passes on the flagship base. lr: T2 {1e-4, 3e-4} (overnight_sft2 used AdamW
+   3e-4). After it: identity ≥ 5/6, chat val, reading, sim-QA, needle, and pass@1 / pass@64 on the sim
+   tasks — the RL headroom numbers.
+2. **Correctness DPO**: the sim's 20k verifiable pairs; gate pass@1 > 0 on held-out sim QA; 1 epoch,
+   lr 5e-7, β 0.1, SFT term on; guards identity/hold/concede + chat val (no regression).
+3. **Prefs DPO**: the docs/prefs.md gate unchanged (≥ 1000 rated, ≥ 150 Noah's); skipped while unmet.
+4. **RLVR-1, multi-turn actions in the sim** (household, inventory, schedule — kinship has no agent
+   actions). Tasks State2State-style (2608.04934): k scripted actions from a seeded world → goal =
+   predicates over the reached state (holdings, locations, bookings) rendered in the locale; reward 1 iff
+   all hold at the end (fraction logged), step budget k+2, an illegal action renders as "nothing
+   happened". Protocol: `<|call|>` = 262 and `<|result|>` = 263 with the tool named in the bytes
+   (`<|call|>sim: take candle<|result|>…`; search is `<|call|>search: …`, docs/search.md), one server hook
+   for every tool, only the model's bytes carry loss. Cold start = SFT on expert traces from per-domain
+   planners. Algorithm: GRPO-style outcome reward, G = 8, group-normalised advantage, KL β to the post-DPO
+   reference, lr ~1e-6, on-policy rollouts through the graph decoder at T = 1, prompts kept at the edge of
+   competence (group pass rate in (0, 1)), ~200 steps, pass@k on a held-out task set every N steps. Start
+   gate: pass@1 < 0.5 and pass@64 − pass@1 ≥ 0.2. Guards: pass@64 never below the pre-RL model;
+   identity/hold/concede and chat val no regression; KL bounded.
+
+Served = the last stage that passed its gate; every stage checkpoint sits in the studio picker.
+
+Build order (all local): trainer schedules + snapshots + `:plain` mixes + the anneal/skip builder +
+`build_local` (built 2026-08-24, `tests/test_pipeline_stages.py`; live at the next daemon restart at an
+arm boundary) → mixes B and C on CPU during the pre-launch queue → sim-QA probe + branch funnel →
+`<|call|>/<|result|>` ids + the shared tool hook → env tasks, verifier, planners, expert traces →
+`mote/train/rlvr.py` as a daemon job type.
+
 ## Serving root (grilled and signed 2026-08-24, BUILT the same day; results in docs/results/2026-08-24-serving-root.md)
 
 Reading FreeToken (2608.16157, edge MoE serving) settled two things at once. The transferable part of

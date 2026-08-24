@@ -107,6 +107,33 @@ def wsd_lr(step: int, total: int, base: float, warmup_frac: float = 0.1, decay_f
     return base * max(min_ratio, 1.0 - (1.0 - min_ratio) * math.sqrt(t))
 
 
+def schedule_lr(kind: str, step: int, total: int, base: float, min_ratio: float = 0.1) -> float:
+    """The three schedules of the pipeline (docs/shape.md, signed 2026-08-24).
+
+    `wsd`      warmup-stable-decay over the budget — the lab arms.
+    `trunk`    warmup (10 %) then constant, never decays — the flagship trunk; cooldowns branch off it.
+    `cooldown` decay only: base -> min_ratio over the whole run, no warmup — a branch started with
+               `--init-from` a trunk snapshot.
+    """
+    if kind == "trunk":
+        warm = max(int(total * 0.1), 1)
+        return base * (step + 1) / warm if step < warm else base
+    if kind == "cooldown":
+        t = min(step / max(total, 1), 1.0)
+        return base * max(min_ratio, 1.0 - (1.0 - min_ratio) * math.sqrt(t))
+    return wsd_lr(step, total, base, min_ratio=min_ratio)
+
+
+def parse_mix_spec(spec: str):
+    """`PREFIX:SHARE[:plain]` -> (prefix, share, plain). `plain` reads an SFT shard's bytes without its
+    loss mask (chat/identity bytes as ordinary LM data in a cooldown mix)."""
+    parts = spec.split(":")
+    plain = parts[-1] == "plain"
+    if plain:
+        parts = parts[:-1]
+    return ":".join(parts[:-1]), float(parts[-1]), plain
+
+
 def set_lr(opt, lr: float):
     for g in opt.param_groups:
         g["lr"] = lr * g["lr_mult"]
@@ -259,7 +286,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
     ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
-    ap.add_argument("--mix", action="append", default=[], metavar="PREFIX:SHARE", help="extra shard mixed into training by share, e.g. data/sft_identity:0.05 (repeatable)")
+    ap.add_argument("--mix", action="append", default=[], metavar="PREFIX:SHARE[:plain]", help="extra shard mixed into training by share, e.g. data/sft_identity:0.05 (repeatable); ':plain' reads an SFT shard without its loss mask")
     ap.add_argument("--beta2", type=float, default=0.95, help="AdamW \u03b2\u2082 (2608.16760: the convergence threshold rises as the batch shrinks; A/B 0.99/0.997 at our 32 kB steps)")
     ap.add_argument("--mbp-weight", type=float, default=None, help="\u03bb1 for the multi-byte head loss (preset default 1.0)")
     ap.add_argument("--mbp-gamma", type=float, default=None, help="position weighting exp(-offset/\u03b3) on the head loss (0 = off)")
@@ -276,6 +303,8 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--jepa-weight", type=float, default=0.05, help="weight of the JEPA aux loss")
     ap.add_argument("--no-flash", action="store_true", help="A/B: materialized Relation instead of the Triton kernel")
     ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
+    ap.add_argument("--schedule", default="wsd", choices=["wsd", "trunk", "cooldown"], help="wsd: warmup-stable-decay over the budget (lab arms); trunk: warmup then constant, no decay (the flagship trunk); cooldown: decay only, lr -> 0.1x over the run (a branch started with --init-from a trunk snapshot). docs/shape.md pipeline")
+    ap.add_argument("--snapshot-steps", type=int, default=0, help="also keep a weights-only snap_<step>.pt every N steps (the branch points for cooldowns)")
     return ap
 
 
@@ -347,10 +376,13 @@ class Trainer:
         train_shard = ByteShard(args.data, "train", sft=args.sft)
         self.val_shard = ByteShard(args.data, "val", sft=args.sft)
         if args.mix:
-            extras = [(ByteShard(spec.rsplit(":", 1)[0], "train", sft=args.sft), float(spec.rsplit(":", 1)[1])) for spec in args.mix]
+            extras = []
+            for spec in args.mix:
+                prefix, share, plain = parse_mix_spec(spec)
+                extras.append((ByteShard(prefix, "train", sft=args.sft or plain, plain=plain), share))
             main_w = max(1.0 - sum(w for _, w in extras), 0.0)
             train_shard = MixedShard([train_shard] + [s for s, _ in extras], [main_w] + [w for _, w in extras])
-            print("training mix:", {args.data: main_w, **{spec: float(spec.rsplit(':', 1)[1]) for spec in args.mix}}, flush=True)
+            print("training mix:", {args.data: main_w, **{spec: parse_mix_spec(spec)[1] for spec in args.mix}}, flush=True)
         self.train_shard = train_shard
         if args.init_from and not (args.resume and ckpt_path_exists(out_dir)):
             _step, _ = load_checkpoint(Path(args.init_from), model, None)
@@ -358,9 +390,12 @@ class Trainer:
         self.gen = torch.Generator().manual_seed(args.seed)
 
         self.step, self.t_start = 0, time.time()
+        self.sched_total = None  # step horizon of the trunk/cooldown schedules: fixed at the first probe, survives resume
         self.ckpt_path = out_dir / "last.pt"
         if args.resume and self.ckpt_path.exists():
             self.step, extra = load_checkpoint(self.ckpt_path, model, self.opt)
+            if args.schedule != "wsd":
+                self.sched_total = extra.get("sched_total") or extra.get("total_steps")
             if "generator_state" in extra:
                 self.gen.set_state(torch.tensor(extra["generator_state"], dtype=torch.uint8))
             if self.jepa is not None and "jepa" in extra:
@@ -392,6 +427,7 @@ class Trainer:
 
     def save(self):
         extra = {"generator_state": self.gen.get_state().tolist(), "total_steps": self.total_steps,
+                 "sched_total": self.sched_total, "schedule": self.args.schedule,
                  "n_params": self.n_params, "bytes_seen": self.step * self.tokens_per_step}
         if self.jepa is not None:
             extra["jepa"] = self.jepa.state_dict()
@@ -449,6 +485,21 @@ class Trainer:
             return min((time.time() - self.t_start) / self.budget_sec, 1.0)
         return min(self.step / max(self.total_steps, 1), 1.0)
 
+    def _running(self) -> bool:
+        if self.args.schedule == "cooldown":  # a branch ends where its decay ends, by step, resume-proof
+            return self.step < self.sched_total
+        return (self._progress() < 1.0) if self.time_driven else (self.step < self.total_steps)
+
+    def snapshot(self) -> Path:
+        """Weights-only `snap_<step>.pt`: a branch point (`--init-from` loads it; no optimizer state)."""
+        p = self.out_dir / f"snap_{self.step:08d}.pt"
+        tmp = p.with_suffix(".tmp")
+        torch.save({"model": self.model.state_dict(), "step": self.step, "config": self.cfg.to_dict(),
+                    "extra": {"sched_total": self.sched_total, "schedule": self.args.schedule}}, tmp)
+        os.replace(tmp, p)
+        self.log({"snapshot": str(p)})
+        return p
+
     def run(self):
         """The whole run. Drain it (`for _ in t.run(): pass`) for the old behaviour."""
         args, cfg, device = self.args, self.cfg, self.device
@@ -468,18 +519,31 @@ class Trainer:
             self.total_steps = max(int(budget_sec / sec_per_step * 0.9), 50)
             self.log({"probe_sec_per_step": sec_per_step, "bytes_per_sec": self.tokens_per_step / sec_per_step, "total_steps": self.total_steps})
 
+        if self.sched_total is None:
+            self.sched_total = self.total_steps
         last_ckpt = time.time()
         t_log = time.time()
+        snap_idx = self.step // args.snapshot_steps if args.snapshot_steps else 0
 
-        while ((self._progress() < 1.0) if self.time_driven else (self.step < self.total_steps)) and not self._stop:
-            pr = self._progress()
+        while self._running() and not self._stop:
+            # wsd follows wall-clock progress (arms compare at equal wall-clock); trunk/cooldown follow
+            # the step horizon fixed at the first probe, so a resume continues the schedule instead of
+            # restarting it
+            pr = self._progress() if args.schedule == "wsd" else min(self.step / max(self.sched_total, 1), 1.0)
             horizon = 1000
             sched_step = int(pr * horizon)
-            target_ratio = atdc_target_ratio(sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final, cfg.dc.schedule_warmup_frac)
-            lr = wsd_lr(sched_step, horizon, args.lr)
+            # a cooldown branch starts from a trunk that finished its ATDC ramp: hold the final target
+            if args.schedule == "cooldown":
+                target_ratio = cfg.dc.target_ratio_final
+            else:
+                target_ratio = atdc_target_ratio(sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final, cfg.dc.schedule_warmup_frac)
+            lr = schedule_lr(args.schedule, sched_step, horizon, args.lr)
             set_lr(self.opt, lr)
             stats = yield from self._train_step(target_ratio)
             self.step += 1
+            if args.snapshot_steps and self.step // args.snapshot_steps > snap_idx:
+                snap_idx = self.step // args.snapshot_steps
+                self.snapshot()
             if self.step % args.log_every == 0:
                 dt = time.time() - t_log
                 t_log = time.time()

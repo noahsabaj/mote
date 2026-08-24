@@ -15,12 +15,12 @@ import os
 
 import time
 from pathlib import Path
-from typing import Iterator, List
+from typing import Dict, Iterator, List
 
 import numpy as np
 
 from ..tokenizer import BOS_ID, EOS_ID, VOCAB_SIZE
-from .sources import FLAGSHIP, PRETRAIN, PretrainSource
+from .sources import ANNEAL, FLAGSHIP, PRETRAIN, PretrainSource
 
 
 def _chunks(b: bytes, max_bytes: int) -> Iterator[bytes]:
@@ -63,11 +63,39 @@ def stream_source(src: PretrainSource, min_bytes: int, max_bytes: int) -> Iterat
             yield b
 
 
-def build(out: Path, target_bytes: int, val_bytes: int, min_bytes: int, max_bytes: int, seed: int, sources: List[PretrainSource]):
+def skip_docs(take, nbytes: int):
+    """Advance a source past `nbytes` of already-used documents (counted as the builder counts them:
+    len + BOS + EOS). The HF streams are file-ordered and unshuffled, so replaying a source and skipping
+    the bytes an earlier build recorded lands exactly after that build's last document."""
+    skipped = n = 0
+    while skipped < nbytes:
+        doc = take()
+        if doc is None:
+            break
+        skipped += len(doc) + 2
+        n += 1
+    return n, skipped
+
+
+def skip_after(meta_paths: List[str]) -> Dict[str, int]:
+    """Per-source bytes (train + val) used by earlier builds, to be skipped by this one."""
+    skip: Dict[str, int] = {}
+    for p in meta_paths:
+        m = json.loads(Path(p).read_text())
+        for split in ("train", "val"):
+            for k, v in m[split]["per_source_bytes"].items():
+                skip[k] = skip.get(k, 0) + int(v)
+    return skip
+
+
+def build(out: Path, target_bytes: int, val_bytes: int, min_bytes: int, max_bytes: int, seed: int, sources: List[PretrainSource],
+          skip: Dict[str, int] | None = None):
     import gc
 
     budget = {s.key: int(s.share * target_bytes) for s in sources}
     val_budget = {s.key: int(s.share * val_bytes) for s in sources}
+    skip = skip or {}
+    skipped_bytes: Dict[str, int] = {}
     exhausted = set()
     t0 = time.time()
 
@@ -95,6 +123,11 @@ def build(out: Path, target_bytes: int, val_bytes: int, min_bytes: int, max_byte
                 print(f"  source {src.key} failed: {type(e).__name__}: {str(e)[:120]}", flush=True)
                 exhausted.add(src.key)
                 return None
+
+        if skip.get(src.key):
+            n_sk, b_sk = skip_docs(take, skip[src.key])
+            skipped_bytes[src.key] = b_sk
+            print(f"  {src.key}: skipped {n_sk} docs / {b_sk/1e6:.0f} MB used by earlier builds ({(time.time()-t0)/60:.1f} min)", flush=True)
 
         # val quota first, then train, from the same iterator: the shards never share a document
         for buf, got, quota, is_val in ((val_buf, gv, val_budget[src.key], True), (train_buf, gt, budget[src.key], False)):
@@ -136,6 +169,7 @@ def build(out: Path, target_bytes: int, val_bytes: int, min_bytes: int, max_byte
         "filters": {"min_bytes": min_bytes, "max_bytes": max_bytes,
                     "overrides": {s.key: [s.min_bytes, s.max_bytes] for s in sources if s.min_bytes or s.max_bytes}},
         "exhausted": sorted(exhausted),
+        "skipped": skipped_bytes,
     }
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps({k: v for k, v in meta.items() if k != "sources"}, indent=2), flush=True)
@@ -152,10 +186,11 @@ def main():
     ap.add_argument("--min-bytes", type=int, default=128)
     ap.add_argument("--max-bytes", type=int, default=4096)
     ap.add_argument("--only", nargs="*", default=None, help="restrict to these source keys (for probing)")
-    ap.add_argument("--list", default="pretrain", choices=["pretrain", "flagship"], help="which source registry to build from")
+    ap.add_argument("--list", default="pretrain", choices=["pretrain", "flagship", "anneal"], help="which source registry to build from (anneal = the cooldown composition, docs/shape.md pipeline)")
+    ap.add_argument("--skip-after", nargs="*", default=[], metavar="META_JSON", help="skip the documents these earlier builds used (fresh mix B / anneal mix C after the flagship mix)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    registry = FLAGSHIP if args.list == "flagship" else PRETRAIN
+    registry = {"pretrain": PRETRAIN, "flagship": FLAGSHIP, "anneal": ANNEAL}[args.list]
     sources = [s for s in registry if not args.only or s.key in args.only]
     if args.only:  # renormalize shares
         tot = sum(s.share for s in sources)
@@ -163,7 +198,10 @@ def main():
             s.share = s.share / tot
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    build(out, int(args.target_gb * 1e9), int(args.val_mb * 1e6), args.min_bytes, args.max_bytes, args.seed, sources)
+    skip = skip_after(args.skip_after) if args.skip_after else None
+    if skip:
+        print("skipping per source (MB):", {k: round(v / 1e6) for k, v in skip.items()}, flush=True)
+    build(out, int(args.target_gb * 1e9), int(args.val_mb * 1e6), args.min_bytes, args.max_bytes, args.seed, sources, skip=skip)
 
 
 if __name__ == "__main__":

@@ -13,10 +13,12 @@ hundred, leaving about 1 KB for what it reads. Everything below is sized to that
 ## Protocol
 
 * Two spare vocab ids (the embedding is padded 262 → 264, so nothing changes shape):
-  `SEARCH_ID = 262` (`<|search|>`), `RESULT_ID = 263` (`<|result|>`).
+  `CALL_ID = 262` (`<|call|>`), `RESULT_ID = 263` (`<|result|>`). Generalised 2026-08-24 (docs/shape.md
+  § pipeline): one call id for every tool, the tool named in the bytes — `<|call|>search: query` here,
+  `<|call|>sim: take candle` in the RL environment. The server dispatches on the name before the colon.
 * A searched reply is one assistant turn:
-  `<|assistant|> <|search|> query bytes <|result|> [server: result bytes] <|assistant|> answer <|eos|>`.
-  The model writes `<|search|>`, the query, then `<|result|>`; the server stops there, runs the
+  `<|assistant|> <|call|>search: query bytes <|result|> [server: result bytes] <|assistant|> answer <|eos|>`.
+  The model writes `<|call|>search: `, the query, then `<|result|>`; the server stops there, runs the
   search, appends the result bytes and an `<|assistant|>`, and resumes from the saved recurrent
   state (`forward_from_state`) — no prefix recomputation.
 * Result bytes: up to 3 hits, `1. Title — snippet` per line, ≤ 1024 bytes in total; no hits →
