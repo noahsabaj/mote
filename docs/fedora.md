@@ -80,18 +80,18 @@ than a 28 MB, thrice-compacted transcript.
    *before* filling them (`chattr +C .../data .../runs`); that did not happen and `+C` only takes on an empty
    directory, so `lsattr` shows no `C` today. Applying it now would mean re-copying both trees into freshly
    flagged directories — worth doing only if fragmentation shows up in the step-5 numbers.
-2. **[~] GPU**: `nvidia-smi` works — driver 610.57.04 sees the RTX 4060 Ti. Toolkit **not** installed yet. Install CUDA toolkit matching the driver for Triton
+2. **[x] GPU** (done 2026-08-23 evening): `nvidia-smi` works — driver 610.57.04 sees the RTX 4060 Ti. Toolkit **not** installed yet. Install CUDA toolkit matching the driver for Triton
    (`sudo dnf install cuda-toolkit` from the NVIDIA repo, or the `nvidia-cuda-toolkit` build that matches).
-3. **[ ] Python** (`uv` is installed; `.venv` exists but is empty — no torch): `uv venv --python 3.11 .venv && source .venv/bin/activate && uv pip install -e .` then
+3. **[x] Python** (done: uv venv **3.12.13** — matches the WSL training env, not the 3.11 first written here; torch 2.13.0+cu126, triton 3.7.1; `MAMBA_SKIP_CUDA_BUILD=TRUE uv pip install -e ~/Development/mamba` at e9594ce. **tilelang note**: mamba pulls in a `tilelang` wheel that crashes on import on this stack; its upstream guard only catches ImportError, so `uv pip uninstall tilelang apache-tvm-ffi torch-c-dlpack-ext` — we use only the Triton SISO kernel. No CUDA toolkit was needed, as predicted.) (`uv` is installed; `.venv` exists but is empty — no torch): `uv venv --python 3.11 .venv && source .venv/bin/activate && uv pip install -e .` then
    `uv pip install torch --index-url https://download.pytorch.org/whl/cu126` (or the wheel matching the
    toolkit), `triton`, and build the Mamba-3 kernels the way `cloud/bootstrap.sh` does.
-4. **[ ] Tests**: `python -m pytest -q` — the 23 GPU tests that skip on Windows run here; FlashRelation's
+4. **[x] Tests** (done: **72 passed, 0 skipped, 3 m 31 s** — the 23 GPU tests green on first run; FlashRelation exact against the reference): `python -m pytest -q` — the 23 GPU tests that skip on Windows run here; FlashRelation's
    exactness tests against the reference are the gate before any training.
 5. **[ ] Speed check**: `python -m mote.train.profile_step --data data/local_mix --preset local --init-from runs/overnight/last.pt --batch-size 4 --grad-accum 4 --bucket 64`
    and compare with `docs/results/2026-08-23-chain.md` (80.8 KB/s, 23.5 % MFU on WSL2).
-6. **[ ] Studio** (no `~/.config/systemd/user/mote-studio.service` yet; `.mote/token` came over with the repo): `mote service install` writes a systemd *user* unit (`~/.config/systemd/user/mote-studio.service`)
+6. **[x] Studio** (done: systemd user unit `mote.service`, linger on, device **cuda**; steady-state cold read ~150 ms vs 2.1–3.5 s on the Windows CPU, warm 45 ms, regenerate 27 ms, decode ~130 B/s at batch 1 — first request after a restart pays ~3 s of Triton JIT) (no `~/.config/systemd/user/mote-studio.service` yet; `.mote/token` came over with the repo): `mote service install` writes a systemd *user* unit (`~/.config/systemd/user/mote-studio.service`)
    and enables it; `loginctl enable-linger $USER` keeps it running without a session. Port 7861.
-7. **[ ] Tailscale** (not installed): `sudo dnf install tailscale && sudo systemctl enable --now tailscaled && sudo tailscale up`,
+7. **[~] Tailscale** (installed and up as `<your-node>`; `tailscale serve` still needs `sudo tailscale set --operator=$USER` once, then `tailscale serve --bg http://127.0.0.1:7861`): `sudo dnf install tailscale && sudo systemctl enable --now tailscaled && sudo tailscale up`,
    then `tailscale serve --bg https+insecure://localhost:7861` (or plain `tailscale serve 7861`); the phone
    keeps the same `https://<machine>.<tailnet>.ts.net/` name if the machine name is reused.
 8. **[ ] Pairing**: open `http://127.0.0.1:7861/pair` on the Fedora desktop and pair the phone again (the
