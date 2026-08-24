@@ -51,6 +51,8 @@ def ru_n(n: int, forms, acc: bool = False) -> str:
     if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
         return f"{n} {forms[1]}"
     return f"{n} {forms[2]}"
+RU_OBJ_GENDER = {"key": "m", "book": "f", "lamp": "f", "coin": "f", "apple": "n", "letter": "n", "cup": "f", "knife": "m"}
+RU_WAS = {"m": "был", "f": "была", "n": "было"}
 RU_TITLES = {"standup": "летучка", "review": "ревью", "lunch": "обед", "planning": "планирование",
              "call": "созвон", "workshop": "воркшоп"}
 
@@ -78,6 +80,17 @@ def _ru_v(verb_mf: Tuple[str, str], who: str) -> str:
 def _ev_en(e, kin_names=None) -> str:
     d = e.data
     k = e.kind
+    if k == "init_household":
+        out = [f"{_cap(p)} is in {EN['rooms'][r]}." for p, r in d["people"].items()]
+        out += [f"{_cap(EN['containers'][c])} is in {EN['rooms'][r]}." for c, r in d["containers"].items()]
+        out += [f"{_cap(EN['objects'][o])} is in {EN['rooms'][r]}." for o, r in d["objects"].items()]
+        return " ".join(out)
+    if k == "init_stock":
+        out = []
+        for p, st in d["start"].items():
+            goods = ", ".join(f"{n} {EN['goods'][g]}" for g, n in st["goods"].items())
+            out.append(f"{_cap(p)} starts with {goods} and {st['coins']} coins.")
+        return " ".join(out)
     if k == "move":
         return f"{_cap(d['who'])} went to {EN['rooms'][d['to']]}."
     if k == "take":
@@ -106,6 +119,17 @@ def _ev_en(e, kin_names=None) -> str:
 def _ev_ru(e) -> str:
     d = e.data
     k = e.kind
+    if k == "init_household":
+        out = [f"{_cap(p)} в {RU_ROOMS[r][2]}." for p, r in d["people"].items()]
+        out += [f"{_cap(RU_CONT[c][0])} в {RU_ROOMS[r][2]}." for c, r in d["containers"].items()]
+        out += [f"{_cap(RU_OBJ[o][0])} в {RU_ROOMS[r][2]}." for o, r in d["objects"].items()]
+        return " ".join(out)
+    if k == "init_stock":
+        out = []
+        for p, st in d["start"].items():
+            goods = ", ".join(ru_n(n, RU_GOODS_FORMS[g]) for g, n in st["goods"].items())
+            out.append(f"У {_cap(p)} вначале {goods} и {ru_n(st['coins'], RU_COIN_FORMS)}.")
+        return " ".join(out)
     if k == "move":
         return f"{_cap(d['who'])} {_ru_v(('пошёл', 'пошла'), d['who'])} в {RU_ROOMS[d['to']][1]}."
     if k == "take":
@@ -134,6 +158,17 @@ def _ev_ru(e) -> str:
 def _ev_ja(e) -> str:
     d = e.data
     k = e.kind
+    if k == "init_household":
+        out = [f"{_cap(p)}は{JA['rooms'][r]}にいる。" for p, r in d["people"].items()]
+        out += [f"{JA['containers'][c]}は{JA['rooms'][r]}にある。" for c, r in d["containers"].items()]
+        out += [f"{JA['objects'][o]}は{JA['rooms'][r]}にある。" for o, r in d["objects"].items()]
+        return "".join(out)
+    if k == "init_stock":
+        out = []
+        for p, st in d["start"].items():
+            goods = "、".join(f"{JA['goods'][g]}{n}{JA_COUNTER[g]}" for g, n in st["goods"].items())
+            out.append(f"{_cap(p)}は最初、{goods}とコイン{st['coins']}枚を持っている。")
+        return "".join(out)
     if k == "move":
         return f"{_cap(d['who'])}は{JA['rooms'][d['to']]}へ移動した。"
     if k == "take":
@@ -236,7 +271,8 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
         return m["where_obj"]
     if q.qtype == "where_obj_start":
         o = RU_OBJ[a["obj"]][0]
-        return (f"Где {o} был(а) в начале?", f"{_cap(o)} {_place_ru(q.answer)}.", f"{_cap(o)} {_place_ru(q.wrong)}.")
+        was = RU_WAS[RU_OBJ_GENDER[a["obj"]]]
+        return (f"Где {o} {was} в начале?", f"{_cap(o)} {was} {_place_ru(q.answer)}.", f"{_cap(o)} {was} {_place_ru(q.wrong)}.")
     if q.qtype == "where_person":
         return (f"Где сейчас {_cap(a['who'])}?", f"{_cap(a['who'])} в {RU_ROOMS[q.answer[1]][2]}.",
                 f"{_cap(a['who'])} в {RU_ROOMS[q.wrong[1]][2]}.")

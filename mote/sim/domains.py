@@ -122,7 +122,11 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
                 "cont": w.get(byname[o], InContainer).container}
 
     history: List[Tuple[int, str, Dict[str, str]]] = [(0, o, snap(o)) for o in objects]
-    events: List[Event] = []
+    events: List[Event] = [Event(0, "init_household", {
+        "people": {p: w.get(byname[p], InRoom).room for p in people},
+        "containers": dict(cont_room),
+        "objects": {o: w.get(byname[o], InRoom).room for o in objects},
+    })]
     for _ in range(diff["ticks"]):
         # script one action per tick from the true state, then let the SYSTEM apply it
         p = rng.choice(people)
@@ -200,8 +204,9 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
         st = Stock({g: rng.randint(0, 6) for g in goods}, rng.randint(10, 30))
         stock[p] = st
         w.add(eid, st)
-    events: List[Event] = []
     start = {p: (dict(s.goods), s.coins) for p, s in stock.items()}
+    events: List[Event] = [Event(0, "init_stock", {"start": {p: {"goods": g, "coins": c} for p, (g, c) in start.items()},
+                                                    "price": dict(price)})]
     for t in range(diff["ticks"]):
         buyer, seller = rng.sample(people, 2)
         g = rng.choice(goods)
