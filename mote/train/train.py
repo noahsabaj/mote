@@ -271,6 +271,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--ratio-weight", type=float, default=None, help="override dc.ratio_loss_weight (\u03b1)")
     ap.add_argument("--bf16-residual", action="store_true", help="A/B: keep the residual stream in bf16 instead of fp32")
     ap.add_argument("--relation-window", type=int, default=None, help="A/B: each chunk sees at most the last N chunks (materialized path)")
+    ap.add_argument("--attention-main", action="store_true", help="ablation: parameter-matched causal attention instead of Relation in the main network")
     ap.add_argument("--no-flash", action="store_true", help="A/B: materialized Relation instead of the Triton kernel")
     ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
     return ap
@@ -317,6 +318,8 @@ class Trainer:
             cfg.residual_in_fp32 = False
         if args.relation_window is not None:
             cfg.main.window_chunks = args.relation_window
+        if args.attention_main:
+            cfg.main.mixer = "attention"
         if args.no_flash:
             from ..model import relation as _relation
             _relation.USE_FLASH = False

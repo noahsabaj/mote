@@ -37,6 +37,7 @@ class RelationCfg:
     """Full Relation main network (Ge, Yang, Nie 2026)."""
 
     n_layers: int = 6
+    mixer: str = "relation"  # "attention" = parameter-matched causal-attention ablation control
     window_chunks: int | None = None
     d_model: int = 384
     n_heads: int = 8  # must be even (Givens head pairs)

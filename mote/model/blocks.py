@@ -132,7 +132,12 @@ def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=N
     """Main network: Full Relation mixers with SwiGLU FFNs ('R' blocks)."""
     blocks = []
     for i in range(cfg.n_layers):
-        mixer = FullRelation(
+        mixer_cls = FullRelation
+        if getattr(cfg, "mixer", "relation") == "attention":
+            from .attention import CausalAttention
+
+            mixer_cls = CausalAttention
+        mixer = mixer_cls(
             cfg.d_model,
             cfg.n_heads,
             layer_idx=i,
