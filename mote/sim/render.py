@@ -17,6 +17,13 @@ GENDER = {  # for Russian verb agreement
     "hugo": "m", "irene": "f", "janos": "m", "katia": "f", "luca": "m",
 }
 
+EN_GOODS_ONE = {"apples": "apple", "loaves": "loaf", "candles": "candle", "nails": "nail", "eggs": "egg"}
+
+
+def en_n(n: int, g: str) -> str:
+    return f"{n} {EN_GOODS_ONE[g] if n == 1 else EN['goods'][g]}"
+
+
 EN = {
     "rooms": {"kitchen": "the kitchen", "garden": "the garden", "study": "the study", "hall": "the hall",
               "cellar": "the cellar", "attic": "the attic"},
@@ -88,7 +95,7 @@ def _ev_en(e, kin_names=None) -> str:
     if k == "init_stock":
         out = []
         for p, st in d["start"].items():
-            goods = ", ".join(f"{n} {EN['goods'][g]}" for g, n in st["goods"].items())
+            goods = ", ".join(en_n(n, g) for g, n in st["goods"].items())
             out.append(f"{_cap(p)} starts with {goods} and {st['coins']} coins.")
         return " ".join(out)
     if k == "move":
@@ -100,9 +107,10 @@ def _ev_en(e, kin_names=None) -> str:
     if k == "put_down":
         return f"{_cap(d['who'])} put {EN['objects'][d['obj']]} down in {EN['rooms'][d['room']]}."
     if k == "trade":
-        return f"{_cap(d['buyer'])} bought {d['n']} {EN['goods'][d['goods']]} from {_cap(d['seller'])} for {d['cost']} coins."
+        coins = "1 coin" if d['cost'] == 1 else f"{d['cost']} coins"
+        return f"{_cap(d['buyer'])} bought {en_n(d['n'], d['goods'])} from {_cap(d['seller'])} for {coins}."
     if k == "harvest":
-        return f"{_cap(d['who'])} gathered {d['n']} more {EN['goods'][d['goods']]}."
+        return f"{_cap(d['who'])} gathered {en_n(d['n'], d['goods'])} more."
     if k == "booked":
         return f"{_cap(d['who'])} booked {EN['titles'][d['title']]} from {d['start_h']}:00 to {d['end_h']}:00."
     if k == "moved":
