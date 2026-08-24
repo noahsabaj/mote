@@ -64,6 +64,17 @@ equivalence, stop/resume, queue/cancel/interrupt, gate pause, EMA math, engine h
 Still deferred from the original list: online updates from votes (v1 is batch DPO), and the
 process-boundary alternatives (moot — one process shipped).
 
+## Flagship config FROZEN (2026-08-24)
+
+All gates read. **Muon** (1.177 vs Muon-SW 1.180); **lr 8e-4** (1.716/1.707/1.693/1.935 across
+3e-4/5e-4/8e-4/12e-4 — clean peak, 12e-4 destabilized the router); **fp32 residual** (bf16 cost
++0.0058 > the 0.005 gate); **full-attention Relation** (win128 1.379 vs winctl 1.361 at matched
+materialized-path steps = +0.018, 3.5x over the gate — long-range chunk lookups are load-bearing;
+no window kernel gets built); head off; EMA 0.999; batch 1 x accum 4 @ 16384; fused norm
+(68.1 KB/s @ 4.31 GB). Data: 10 GB FLAGSHIP mix + per-domain val shards (data/flagship_val/).
+Launch gated on the pre-launch queue (JEPA round 1+2, attention ablation, seed-noise calibration)
+and Noah's word.
+
 ## CUDA graphs for serving decode (grilled 2026-08-24; spike done, build after flagship launch)
 
 Decode is host-launch-bound: every byte is ~50–100 tiny kernel launches driven from Python, and the
@@ -76,7 +87,7 @@ GPU idles between them. The settled design:
   sync/byte is the floor regardless (the byte must reach the host to stream text and check STOP).
 - **Sampling stays on the host**: the graph writes logits into a static output buffer; `multinomial`
   over the 259-vocab runs eager, so temperature/top_p never get baked into a capture.
-- **Cache arena**: decided by the win128 gate. Window adopted → the Relation decode cache is a fixed
+- **Cache arena**: RESOLVED 2026-08-24 — the window lost, so the arena is the full-context preallocation (~3200 chunks, order 100-300 MB). Original fork: Window adopted → the Relation decode cache is a fixed
   128-chunk ring, static for free. Full attention → preallocate the full-context arena (~3200 chunks,
   order 100–300 MB). Either way the engine copies incoming prefix-cache states into the static arena
   at reply start, and the build-time surgery is making `step()` write states **in place** (today each
