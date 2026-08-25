@@ -503,6 +503,8 @@ class Trainer:
     def log(self, rec: Dict):
         rec["step"] = self.step
         rec["elapsed_min"] = (time.time() - self.t_start) / 60
+        if self.device.type == "cuda":
+            rec["peak_gb"] = torch.cuda.max_memory_allocated() / 2**30  # the process peak (serving residue included in the daemon)
         self.log_f.write(json.dumps(rec) + "\n")
         self.log_f.flush()
         print(json.dumps(rec), flush=True)
