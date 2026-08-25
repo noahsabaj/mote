@@ -180,3 +180,17 @@ python -m pytest -q tests/
 ## References
 
 H-Net 2507.07955 · Mamba-3 2603.15569 · Relation 2608.20172 · LCA multi-byte prediction 2608.15454 · ATDC 2605.30080.
+
+## License
+
+Dual-licensed, at your option, under either
+
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE), <http://www.apache.org/licenses/LICENSE-2.0>), or
+* MIT license ([LICENSE-MIT](LICENSE-MIT), <http://opensource.org/licenses/MIT>).
+
+Unless you state otherwise, any contribution you intentionally submit for inclusion in this work, as defined in
+Apache-2.0, is dual-licensed on the same terms with no additional conditions.
+
+The model architecture follows published work cited above; the implementation, the dynamic-chunking studio, the
+Triton kernels and the training pipeline are original. Checkpoints and datasets are not covered by this license
+and are not distributed here.

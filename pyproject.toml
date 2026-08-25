@@ -3,6 +3,8 @@ name = "mote"
 version = "0.1.0"
 description = "Byte-level H-Net language model (Mamba-3 encoder/decoder, Relation main network, multi-byte prediction head) and the studio that serves it."
 readme = "README.md"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE", "LICENSE-MIT", "LICENSE-APACHE"]
 requires-python = ">=3.11"
 dependencies = [
     "torch>=2.6.0",
@@ -27,7 +29,7 @@ mote = "mote.cli:main"
 cloud = ["lightning-sdk>=2026.8"]
 
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]  # PEP 639 SPDX license expression
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
