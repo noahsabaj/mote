@@ -2,7 +2,7 @@
 // can unfold. The votes themselves are posted from the chat store, which owns the turns.
 
 import { api, ApiError } from '../api';
-import type { PairVote, PrefsSummary, Rubric, VoteBody } from '../types';
+import type { MarkBody, PairVote, PrefsSummary, ReplyMark, Rubric, VoteBody } from '../types';
 
 class Prefs {
   summary = $state<PrefsSummary | null>(null);
@@ -24,6 +24,30 @@ class Prefs {
       this.rubric = await api.prefsRubric();
     } catch {
       /* the card still works without the rules unfolded */
+    }
+  }
+
+  /** Marks already given, by turn id, so the buttons can show their state without a round trip. */
+  marked = $state<Record<string, ReplyMark>>({});
+
+  /** One thumb on one reply. Unlike a vote this needs no second sample and no comparison, which is the
+   *  point: a pair costs two generations and a judgement, a mark costs a click on something you were
+   *  already reading. mote.train.kto consumes them directly. */
+  async mark(body: MarkBody, turnId: string): Promise<PrefsSummary | null> {
+    const prev = this.marked[turnId];
+    this.marked = { ...this.marked, [turnId]: body.mark }; // optimistic: the button should not lag the click
+    try {
+      const s = await api.prefsMark(body);
+      this.summary = s;
+      this.error = null;
+      return s;
+    } catch (e) {
+      const next = { ...this.marked };
+      if (prev) next[turnId] = prev;
+      else delete next[turnId];
+      this.marked = next;
+      this.error = e instanceof ApiError ? e.message : String(e);
+      return null;
     }
   }
 

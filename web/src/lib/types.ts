@@ -141,7 +141,7 @@ export interface ReplySource {
 }
 
 export type PairVote = 'a' | 'b' | 'tie' | 'both_bad';
-export type PairOrigin = 'retry' | 'compare' | 'arena';
+export type PairOrigin = 'retry' | 'compare' | 'arena' | 'edit';
 
 /** a reply slot with two candidates up for a vote; ids point into the slot's sample pool */
 export interface ComparePair {
@@ -166,6 +166,18 @@ export interface VoteBody {
   reason: string;
 }
 
+export type ReplyMark = 'up' | 'down';
+
+/** One thumb on one reply — the collection path that needs no second sample and no comparison.
+ *  KTO (mote.train.kto) trains on these directly; a pair needs two generations and a judgement. */
+export interface MarkBody {
+  messages: { role: ChatRole; content: string }[];
+  reply: string;
+  source: ReplySource;
+  mark: ReplyMark;
+  reason: string;
+}
+
 export interface PrefsTableRow {
   a: string;
   b: string;
@@ -180,11 +192,14 @@ export interface PrefsSummary {
   pairs: number;
   votes: { user: number; claude: number };
   unrated_by_claude: number;
+  marks: { n: number; up: number; down: number; user: number };
   table: PrefsTableRow[];
   agreement: { n: number; agree: number; rate: number | null };
   rubric: string | null;
   /** the id of the pair just stored (POST /api/prefs/vote only) */
   pair?: string;
+  /** the id of the mark just stored (POST /api/prefs/mark only) */
+  mark?: string;
 }
 
 export interface Rubric {

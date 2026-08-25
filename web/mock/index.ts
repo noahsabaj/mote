@@ -47,6 +47,8 @@ function jobsStatus() {
 
 // Preference votes (docs/prefs.md): kept in memory for the session, enough for the Model sheet's table.
 const PREF_VOTES: { vote: string | null; a: string; b: string }[] = [];
+// Marks are the unpaired half of the loop (mote.train.kto): one thumb on one reply, no comparison.
+const PREF_MARKS: { mark: string }[] = [];
 
 function prefsSummary() {
   const table = new Map<string, { a: string; b: string; a_wins: number; b_wins: number; ties: number; both_bad: number; n: number }>();
@@ -67,6 +69,12 @@ function prefsSummary() {
     pairs: PREF_VOTES.length,
     votes: { user, claude: 0 },
     unrated_by_claude: PREF_VOTES.length,
+    marks: {
+      n: PREF_MARKS.length,
+      up: PREF_MARKS.filter((m) => m.mark === 'up').length,
+      down: PREF_MARKS.filter((m) => m.mark === 'down').length,
+      user: PREF_MARKS.length
+    },
     table: [...table.values()],
     agreement: { n: 0, agree: 0, rate: null },
     rubric: 'mock00000000'
@@ -199,6 +207,12 @@ async function handle(
     const pair = body.pair as { a_source?: { checkpoint?: string; step?: number }; b_source?: { checkpoint?: string; step?: number } };
     PREF_VOTES.push({ vote, a: `${pair.a_source?.checkpoint}@${pair.a_source?.step}`, b: `${pair.b_source?.checkpoint}@${pair.b_source?.step}` });
     return json(res, 200, { pair: `p${PREF_VOTES.length}`, ...prefsSummary() });
+  }
+
+  if (path === '/api/prefs/mark' && req.method === 'POST') {
+    const body = await readJson(req);
+    PREF_MARKS.push({ mark: String(body.mark ?? '') });
+    return json(res, 200, { mark: `m${PREF_MARKS.length}`, ...prefsSummary() });
   }
 
   if (path === '/api/prefs/summary' && req.method === 'GET') {

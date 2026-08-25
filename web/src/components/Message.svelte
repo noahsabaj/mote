@@ -2,6 +2,7 @@
   import type { Turn } from '../lib/stores/chat.svelte';
   import { chat } from '../lib/stores/chat.svelte';
   import { ui } from '../lib/stores/ui.svelte';
+  import { prefs } from '../lib/stores/prefs.svelte';
   import { clock } from '../lib/clock.svelte';
   import { autosize, tip } from '../lib/actions';
   import ChunkedText from './ChunkedText.svelte';
@@ -65,6 +66,11 @@
   // clipboard API; the selection fallback can still be refused).
   let copied = $state<'ok' | 'fail' | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
+  // A thumb is the cheap half of the preference loop: no second sample, no comparison, one click on a reply
+  // you were already reading. mote.train.kto trains on marks directly (docs/prefs.md).
+  const mark = $derived(prefs.marked[turn.id]);
+  const markable = $derived(turn.role === 'assistant' && !streaming && !!turn.content && !turn.error);
+
   const copyLabel = $derived(copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed — select the text instead' : 'Copy');
 
   async function copy() {
@@ -97,6 +103,45 @@
     const text = draft;
     ui.editing = null;
     chat.editAndResend(turn.id, text);
+  }
+
+  // ------------------------------------------------------- correcting a reply
+  // Correcting is not editing: it never rewrites the transcript. Mote's words stay on screen and the fix
+  // is stored as a preference pair (yours chosen over its), which is the strongest pair there is.
+  const fixing = $derived(ui.fixing === turn.id);
+  const FIX_NOTE = 'Kept as training data. The reply on screen stays as Mote wrote it.';
+  let fixNoteOpen = $state(false);
+  let fixDraft = $state('');
+  let fixArea = $state<HTMLTextAreaElement | null>(null);
+  let fixed = $state(false);
+  const fixChanged = $derived(fixDraft.trim().length > 0 && fixDraft.trim() !== turn.content);
+
+  $effect(() => {
+    if (!fixing) return;
+    fixDraft = turn.content;
+    queueMicrotask(() => {
+      if (!fixArea) return;
+      fixArea.focus();
+      fixArea.setSelectionRange(fixArea.value.length, fixArea.value.length);
+    });
+  });
+
+  async function saveFix() {
+    if (!fixChanged) return;
+    const text = fixDraft;
+    ui.fixing = null;
+    await chat.fixReply(turn.id, text);
+    fixed = true;
+  }
+
+  function onFixKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      ui.fixing = null;
+    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      void saveFix();
+    }
   }
 
   function onEditKey(e: KeyboardEvent) {
@@ -268,6 +313,35 @@
             · you chose {verdict.label} — A was {verdict.a}, B was {verdict.b}
           {/if}
         </p>
+        {#if fixing}
+          <div class="edit fix">
+            <textarea
+              bind:this={fixArea}
+              bind:value={fixDraft}
+              use:autosize={320}
+              rows="1"
+              aria-label="Write what this reply should have said"
+              onkeydown={onFixKey}
+            ></textarea>
+            <div class="edit-foot">
+              <button
+                type="button"
+                class="note"
+                aria-expanded={fixNoteOpen}
+                aria-label="What saving a correction does"
+                onclick={() => (fixNoteOpen = !fixNoteOpen)}
+                use:tip={FIX_NOTE}
+              >
+                <Icon name="info" size={14} />
+              </button>
+              <button class="btn" onclick={() => (ui.fixing = null)}>Cancel</button>
+              <button class="btn accent" onclick={saveFix} disabled={!fixChanged}>Save correction</button>
+            </div>
+            {#if fixNoteOpen}
+              <p class="note-text meta">{FIX_NOTE}</p>
+            {/if}
+          </div>
+        {/if}
         <div class="actions">
           {#if pool.length > 1}
             <span class="samples" role="group" aria-label="Samples of this reply">
@@ -287,6 +361,34 @@
                 aria-label="Next sample"
               >
                 <Icon name="chevron" size={13} />
+              </button>
+            </span>
+          {/if}
+          {#if markable && !fixing}
+            <button class="quiet" onclick={() => (ui.fixing = turn.id)} use:tip={FIX_NOTE}>Fix</button>
+          {/if}
+          {#if fixed}
+            <span class="meta">correction kept</span>
+          {/if}
+          {#if markable}
+            <span class="marks" role="group" aria-label="Was this reply good?">
+              <button
+                class="quiet"
+                aria-pressed={mark === 'up'}
+                onclick={() => chat.markTurn(turn.id, 'up')}
+                use:tip={'Good reply — kept as training signal'}
+                aria-label="Good reply"
+              >
+                <Icon name="thumb-up" size={13} />
+              </button>
+              <button
+                class="quiet"
+                aria-pressed={mark === 'down'}
+                onclick={() => chat.markTurn(turn.id, 'down')}
+                use:tip={'Bad reply — kept as training signal'}
+                aria-label="Bad reply"
+              >
+                <Icon name="thumb-down" size={13} />
               </button>
             </span>
           {/if}
@@ -501,6 +603,21 @@
   }
   .off {
     color: var(--accent-ink);
+  }
+
+  /* The correction box sits inside the reply's footer rather than replacing the reply, because the reply
+     stays on screen: you are writing what it should have said, not overwriting what it did say. */
+  .fix {
+    margin: 0.35rem 0 0.5rem;
+  }
+
+  .marks {
+    display: inline-flex;
+    gap: 0.1rem;
+  }
+  /* A recorded mark stays visible after the pointer leaves — it is a stored fact, not a hover state. */
+  .marks button[aria-pressed='true'] {
+    color: var(--accent);
   }
 
   .actions {

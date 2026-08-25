@@ -477,6 +477,25 @@ def prefs_vote(body: VoteBody):
     return {"pair": rec["id"], **PREFS.summary()}
 
 
+class MarkBody(BaseModel):
+    messages: list
+    reply: str
+    source: dict
+    mark: str          # up | down
+    reason: str = ""
+
+
+@app.post("/api/prefs/mark")
+def prefs_mark(body: MarkBody):
+    """One thumb on one reply — the collection path that does not need a second generation or a comparison.
+    KTO (mote.train.kto) trains on these directly; docs/prefs.md."""
+    try:
+        rec = PREFS.add_mark(body.messages, body.reply, body.source, body.mark, "user", body.reason)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"mark": rec["id"], **PREFS.summary()}
+
+
 @app.get("/api/prefs/summary")
 def prefs_summary():
     return PREFS.summary()

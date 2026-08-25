@@ -26,6 +26,7 @@ import type {
   DoneEvent,
   FoldInfo,
   ReplySource,
+  ReplyMark,
   PairVote,
   PairOrigin,
   EngineRole,
@@ -378,6 +379,40 @@ class Chat {
     this.turns = this.turns.slice(0, idx);
     this.#pairNext = { withId: t.id, origin: 'compare' };
     this.#dispatch(samples, this.#secondEngine);
+  }
+
+  /** A thumb on one reply. No second sample, no comparison — it is the cheap collection path, and KTO
+   *  (mote.train.kto) trains on marks directly. Clicking the mark already given takes it back. */
+  async markTurn(turnId: string, mark: ReplyMark): Promise<void> {
+    const idx = this.turns.findIndex((t) => t.id === turnId);
+    const turn = this.turns[idx];
+    if (!turn || turn.role !== 'assistant' || !turn.content) return;
+    if (prefs.marked[turnId] === mark) return; // already recorded; a second click is a no-op, not a duplicate row
+    const messages = this.turns.slice(0, idx).map((t) => ({ role: t.role, content: t.content }));
+    await prefs.mark(
+      { messages, reply: turn.content, source: turn.source ?? this.#fallbackSource(turn), mark, reason: '' },
+      turnId
+    );
+  }
+
+  /** A corrected version of a reply, stored as a preference pair (your text chosen over Mote's).
+   *
+   *  It deliberately does NOT enter the transcript. The transcript is a record of what Mote produced and
+   *  it feeds the exports and the byte traces, so a reply that Mote never wrote would make all of those
+   *  slightly untrue — the same reason /help never enters it. The correction goes to the prefs store,
+   *  where it is the strongest kind of pair there is: not "I liked this one better" but "this is right". */
+  async fixReply(turnId: string, text: string): Promise<void> {
+    const idx = this.turns.findIndex((t) => t.id === turnId);
+    const turn = this.turns[idx];
+    if (!turn || turn.role !== 'assistant' || !turn.content) return;
+    const fixed = text.trim();
+    if (!fixed || fixed === turn.content) return;
+    const messages = this.turns.slice(0, idx).map((t) => ({ role: t.role, content: t.content }));
+    const source = turn.source ?? this.#fallbackSource(turn);
+    await prefs.vote(
+      { messages, a: fixed, b: turn.content, a_source: source, b_source: source, origin: 'edit' },
+      'a'
+    );
   }
 
   /** Your verdict on a compare card; null keeps the pair unrated. The preferred reply becomes the shown one. */

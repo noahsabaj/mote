@@ -12,7 +12,8 @@ from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams
 from mote.serve.jobs import _argparser_for, _job_args, make_trainer
 from mote.tokenizer import PAD_ID
-from mote.train.rlvr import RlvrTrainer, group_advantages, has_signal, pad_batch, token_logprobs
+from mote.train.rlvr import (RlvrTrainer, goal_anchor, group_advantages, has_signal, mix_advantages,
+                             pad_batch, prospect, token_logprobs)
 
 
 def _tiny_ckpt(tmp_path):
@@ -32,9 +33,48 @@ def _tiny_ckpt(tmp_path):
 
 def test_advantages_and_signal():
     assert has_signal([1, 0, 0, 1]) and not has_signal([0, 0, 0]) and not has_signal([1.0, 1.0])
-    a = group_advantages([1, 0, 0, 1])
+    a, pivot = group_advantages([1, 0, 0, 1], baseline="mean")
+    assert pivot is None
     assert a[0] == a[3] == pytest.approx(1.0, abs=1e-4) and a[1] == a[2] == pytest.approx(-1.0, abs=1e-4)
-    assert sum(group_advantages([0.2, 0.5, 0.9])) == pytest.approx(0.0, abs=1e-6)
+    assert sum(group_advantages([0.2, 0.5, 0.9], baseline="mean")[0]) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_median_baseline_avoids_sign_flips():
+    """MC-GRPO 2601.22582: one outlier drags the mean past the successes, so rollouts that succeeded get a
+    negative advantage and are pushed away from. The median does not move."""
+    rewards = [1.0, 1.0, 1.0, 0.0, 5.0]
+    mean_z, _ = group_advantages(rewards, baseline="mean")
+    med_z, pivot = group_advantages(rewards, baseline="median")
+    assert all(z < 0 for z in mean_z[:3])          # the sign flip
+    assert all(z == pytest.approx(0.0) for z in med_z[:3])   # the median sits on them
+    assert pivot in (0, 1, 2) and med_z[pivot] == pytest.approx(0.0)
+    assert med_z[3] < 0 < med_z[4]                  # failure down, success up — correct signs
+
+
+def test_goal_anchor_is_defined_at_zero_variance():
+    """MDP-GRPO Eq. 4: a group where every rollout failed has no group-relative signal at all; the absolute
+    anchor still says 'all of these were bad'."""
+    z, _ = group_advantages([0.0] * 5, baseline="median")
+    assert all(v == pytest.approx(0.0) for v in z)
+    delta = goal_anchor([0.0] * 5, n_constraints=4)
+    assert all(d == pytest.approx(-2.0) for d in delta)          # -sqrt(4)
+    assert all(d == pytest.approx(2.0) for d in goal_anchor([1.0] * 5, 4))
+    assert all(a < 0 for a in mix_advantages(z, delta, alpha=0.2))
+
+
+def test_prospect_is_bounded_and_loss_averse():
+    """MDP-GRPO Eq. 5 with the paper's (beta_pt, lam_pos, lam_neg) = (0.8, 1.25, 2.0)."""
+    for v in (0.5, 1.0, 2.0):
+        assert abs(prospect(-v)) > prospect(v)                    # losses loom larger
+    assert prospect(1e6) == pytest.approx(1.25, abs=1e-6)         # bounded above
+    assert prospect(-1e6) == pytest.approx(-2.0, abs=1e-6)        # and below
+    assert prospect(3.0, beta_pt=0.0) == 3.0                      # shaping off = identity
+
+
+def test_alpha_zero_and_no_shaping_is_plain_grpo():
+    z, _ = group_advantages([1.0, 0.0, 1.0, 0.0], baseline="mean")
+    plain = mix_advantages(z, goal_anchor([1, 0, 1, 0], 4), alpha=0.0, beta_pt=0.0)
+    assert plain == pytest.approx(z)
 
 
 def test_pad_and_logprobs(tmp_path):
@@ -76,8 +116,21 @@ def test_one_step_without_signal_then_with_signal(tmp_path, monkeypatch):
     recs = [json.loads(l) for l in (tmp_path / "rl0" / "log.jsonl").read_text().splitlines()]
     step = next(r for r in recs if "reward" in r)
     assert phases.count("step") == 1 and phases.count("slice") >= 4  # one slice per rollout at least
-    assert step["groups"] == 2 and step["success"] == 0.0 and step["groups_used"] == 0 and "note" in step  # a random model never solves a task
+    # A random model never solves a task, so both groups are homogeneous. Before the 2026-08-25 revision
+    # those were discarded and no update ran; with the absolute anchor on (--anchor-alpha > 0) delta_i is
+    # still defined and says "all of these were bad", so the groups are kept and DO teach. --anchor-alpha 0
+    # restores the old behaviour, asserted below.
+    assert step["groups"] == 2 and step["success"] == 0.0
+    assert step["groups_used"] == 2 and "note" not in step and step["pivots_dropped"] == 2
     assert (tmp_path / "rl0" / "last.pt").exists() and recs[-1]["done"] is True
+
+    # --anchor-alpha 0: no absolute anchor, so a homogeneous group carries no signal and is skipped, which
+    # is the pre-revision GRPO behaviour exactly.
+    t = RlvrTrainer(_argv(ck, tmp_path / "rl0b", ("--anchor-alpha", "0", "--pt-beta", "0", "--baseline", "mean")))
+    list(t.run())
+    t.close()
+    step0 = next(r for r in (json.loads(l) for l in (tmp_path / "rl0b" / "log.jsonl").read_text().splitlines()) if "reward" in r)
+    assert step0["groups_used"] == 0 and "note" in step0
 
     # give the first rollout of every group the reward: the group has signal and the update runs
     t = RlvrTrainer(_argv(ck, tmp_path / "rl1"))

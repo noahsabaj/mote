@@ -23,6 +23,12 @@ class Ui {
    * reach back into the transcript to open the last prompt.
    */
   editing = $state<string | null>(null);
+  /**
+   * Id of the ASSISTANT turn open for correction, or null. Separate from `editing` because the two do
+   * opposite things: editing a prompt rewrites the conversation, correcting a reply does not touch the
+   * transcript at all — the correction is stored as preference data and Mote's own words stay on screen.
+   */
+  fixing = $state<string | null>(null);
   /** The header's conversation menu. Here so a keyboard shortcut can reach it. */
   switcher = $state(false);
   /**

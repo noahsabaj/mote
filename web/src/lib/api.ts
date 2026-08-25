@@ -9,6 +9,7 @@ import type {
   Health,
   JobsStatus,
   LogPage,
+  MarkBody,
   ModelInfo,
   PrefsSummary,
   PrevFold,
@@ -105,6 +106,11 @@ export const api = {
     request<PrefsSummary>('/api/prefs/vote', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }),
+  prefsMark: (body: MarkBody) =>
+    request<PrefsSummary>('/api/prefs/mark', {
+      method: 'POST',
       body: JSON.stringify(body)
     }),
   prefsSummary: () => request<PrefsSummary>('/api/prefs/summary'),

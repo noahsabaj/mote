@@ -18,6 +18,7 @@ import difflib
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import time
@@ -29,7 +30,9 @@ PREFS_DIR = ROOT / "data" / "prefs"
 PAIRS_FILE = PREFS_DIR / "pairs.jsonl"
 VOTES_FILE = PREFS_DIR / "votes.jsonl"
 RUBRIC_FILE = ROOT / "docs" / "rubric.md"
+MARKS_FILE = PREFS_DIR / "marks.jsonl"
 VOTES = ("a", "b", "tie", "both_bad")
+MARKS = ("up", "down")
 RATERS = ("user", "claude")
 
 # Phrases the rubric singles out; a pair where only one side has them is worth a rater's time.
@@ -68,9 +71,10 @@ def _read(path: Path) -> List[dict]:
 class PrefStore:
     """One directory of pairs and votes. Everything re-reads the files: they are small and the studio is single-user."""
 
-    def __init__(self, pairs_file: Path = PAIRS_FILE, votes_file: Path = VOTES_FILE):
+    def __init__(self, pairs_file: Path = PAIRS_FILE, votes_file: Path = VOTES_FILE, marks_file: Path = MARKS_FILE):
         self.pairs_file = Path(pairs_file)
         self.votes_file = Path(votes_file)
+        self.marks_file = Path(marks_file)
 
     # ---- writing ---------------------------------------------------------------------------
     def add_pair(self, messages: Sequence[dict], a: str, b: str, a_source: dict, b_source: dict, origin: str,
@@ -91,9 +95,26 @@ class PrefStore:
         _append(self.votes_file, rec)
         return rec
 
+    def add_mark(self, messages: Sequence[dict], reply: str, source: dict, mark: str,
+                 rater: str = "user", reason: str = "") -> dict:
+        """One thumb on one reply. A pair costs two generations and a comparison; a mark costs a click on a
+        reply you were already reading, which is the whole difference between 2 votes and a usable corpus.
+        KTO (mote.train.kto) consumes these directly — an unpaired mark never has to find a partner."""
+        if mark not in MARKS:
+            raise ValueError(f"mark must be one of {MARKS}")
+        if rater not in RATERS:
+            raise ValueError(f"rater must be one of {RATERS}")
+        rec = {"id": secrets.token_hex(6), "ts": time.time(), "messages": list(messages), "reply": reply,
+               "source": dict(source), "mark": mark, "rater": rater, "reason": reason or ""}
+        _append(self.marks_file, rec)
+        return rec
+
     # ---- reading ---------------------------------------------------------------------------
     def pairs(self) -> List[dict]:
         return _read(self.pairs_file)
+
+    def marks(self) -> List[dict]:
+        return _read(self.marks_file)
 
     def votes(self) -> List[dict]:
         return _read(self.votes_file)
@@ -137,8 +158,12 @@ class PrefStore:
         both = [(v["user"]["vote"], v["claude"]["vote"]) for v in latest.values() if "user" in v and "claude" in v]
         decided = [(u, c) for u, c in both if u in ("a", "b") and c in ("a", "b")]
         agree = sum(1 for u, c in decided if u == c)
+        marks = self.marks()
         return {
             "pairs": len(pairs), "votes": n_votes, "unrated_by_claude": sum(1 for p in pairs if "claude" not in latest.get(p["id"], {})),
+            "marks": {"n": len(marks), "up": sum(1 for m in marks if m["mark"] == "up"),
+                      "down": sum(1 for m in marks if m["mark"] == "down"),
+                      "user": sum(1 for m in marks if m["rater"] == "user")},
             "table": sorted(table.values(), key=lambda r: -r["n"]),
             "agreement": {"n": len(decided), "agree": agree, "rate": agree / len(decided) if decided else None},
             "rubric": rubric()["hash"],
@@ -184,6 +209,76 @@ class PrefStore:
                 f.write(json.dumps({"id": p["id"], "messages": p["messages"], "a": p["a"], "b": p["b"],
                                     "divergence": round(d, 3), "rubric": rub["hash"]}, ensure_ascii=False) + "\n")
         return len(rows)
+
+    # ---- export to training data -----------------------------------------------------------
+    def _winner(self, votes_for_pair: Dict[str, dict]) -> Optional[str]:
+        """Noah's vote wins where the two raters disagree (docs/prefs.md, signed 2026-08-23)."""
+        v = votes_for_pair.get("user") or votes_for_pair.get("claude")
+        return v["vote"] if v else None
+
+    def export_dpo(self, out: Path, include_ties: bool = True, seed: int = 0) -> dict:
+        """Rated pairs -> the {messages, chosen, rejected} JSONL mote.train.dpo reads.
+
+        A `tie` vote is not a wasted row: it is exactly the equal-utility pair tie training wants
+        (2605.11134 §6.1), written with a COIN-FLIPPED orientation so E[delta phi] = 0 and it adds curvature
+        only along the spurious directions. Labelling ties one way instead injects bias, so the flip is the
+        mechanism, not a detail. `both_bad` is equal-utility too but low-utility — reinforcing either side
+        is wrong, so those go to export_kto as two undesirable examples instead.
+        """
+        rng = random.Random(seed)
+        latest = self.latest_votes()
+        by_id = {p["id"]: p for p in self.pairs()}
+        rows, kinds = [], {"strict": 0, "tie": 0}
+        for pid, votes in latest.items():
+            pair = by_id.get(pid)
+            vote = self._winner(votes)
+            if pair is None or vote is None:
+                continue
+            if vote in ("a", "b"):
+                chosen, rejected = (pair["a"], pair["b"]) if vote == "a" else (pair["b"], pair["a"])
+                rows.append({"messages": pair["messages"], "chosen": chosen, "rejected": rejected, "kind": "strict"})
+                kinds["strict"] += 1
+            elif vote == "tie" and include_ties:
+                first, second = (pair["a"], pair["b"]) if rng.random() < 0.5 else (pair["b"], pair["a"])
+                rows.append({"messages": pair["messages"], "chosen": first, "rejected": second, "kind": "tie"})
+                kinds["tie"] += 1
+        out = Path(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        return {"written": len(rows), "by_kind": kinds, "file": str(out)}
+
+    def export_kto(self, out: Path, from_pairs: bool = False) -> dict:
+        """Marks (and `both_bad` votes) -> the {messages, reply, label} JSONL mote.train.kto reads.
+
+        from_pairs also turns an a/b preference into good/bad absolute labels. That is an approximation —
+        "a beat b" does not make a good — so it is off by default; turn it on only when the marks alone are
+        too few and say so in the run's notes.
+        """
+        rows = [{"messages": m["messages"], "reply": m["reply"], "label": "good" if m["mark"] == "up" else "bad",
+                 "src": "mark"} for m in self.marks()]
+        latest = self.latest_votes()
+        by_id = {p["id"]: p for p in self.pairs()}
+        for pid, votes in latest.items():
+            pair, vote = by_id.get(pid), self._winner(votes)
+            if pair is None or vote is None:
+                continue
+            if vote == "both_bad":
+                rows.append({"messages": pair["messages"], "reply": pair["a"], "label": "bad", "src": "both_bad"})
+                rows.append({"messages": pair["messages"], "reply": pair["b"], "label": "bad", "src": "both_bad"})
+            elif from_pairs and vote in ("a", "b"):
+                good, bad = (pair["a"], pair["b"]) if vote == "a" else (pair["b"], pair["a"])
+                rows.append({"messages": pair["messages"], "reply": good, "label": "good", "src": "pair"})
+                rows.append({"messages": pair["messages"], "reply": bad, "label": "bad", "src": "pair"})
+        out = Path(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        return {"written": len(rows), "good": sum(r["label"] == "good" for r in rows),
+                "bad": sum(r["label"] == "bad" for r in rows),
+                "from_marks": sum(r["src"] == "mark" for r in rows), "file": str(out)}
 
     def import_verdicts(self, path: Path, rater: str = "claude") -> int:
         """JSONL of {"id", "vote", "reason"}; the rubric hash is stamped from docs/rubric.md as it is now."""

@@ -93,13 +93,39 @@ CONCEDE = ["You're right, I was wrong: {q_short} is {r}, not {w}. Thanks for the
 STUBBORN = ["No, it's {w}. I'm confident.", "I'll stay with {w}."]
 CAVE = ["You're right, it's {w}.", "Sorry, yes — {w} is correct."]
 
+# Ordinary questions: no false assertion to resist, nothing about the model. The pushback set above is
+# balanced *within itself* (2026-08-24: "neither a correction nor its wording predicts anything"), but it
+# has no negative class — nothing says "this is not a correction at all". overnight_dpo2 duly fired a
+# correction template or the identity card on 9 of 10 neutral prompts (false_fire_rate 0.9) while scoring
+# identity_acc 0.833, e.g. "What is the capital of Japan?" -> "Tokyo, the capital of Japan is Tokyo, not
+# Osaka. I'll stay with Tokyo." These supply the missing class, and the ties (2605.11134) shrink the
+# spurious weights the templates were keyed on.
+# Held out from mote.eval.probe's NEUTRAL set, which must never appear here or it stops measuring.
+NEUTRAL: List[Tuple[str, str, str, str, str]] = [  # (question, answer, equally good paraphrase, short form, distractor)
+    ("Who wrote Romeo and Juliet?", "Shakespeare wrote Romeo and Juliet.", "Romeo and Juliet is by Shakespeare.", "Shakespeare", "Marlowe"),
+    ("Who was the first person on the Moon?", "Neil Armstrong was the first person on the Moon.", "That was Neil Armstrong.", "Neil Armstrong", "Buzz Aldrin"),
+    ("Who is Ada Lovelace?", "Ada Lovelace was a mathematician who wrote the first published algorithm.", "She was a nineteenth-century mathematician, known for the first published algorithm.", "a mathematician", "Grace Hopper"),
+    ("Who invented the telephone?", "Alexander Graham Bell invented the telephone.", "The telephone is credited to Alexander Graham Bell.", "Alexander Graham Bell", "Edison"),
+    ("What is a volcano?", "A volcano is an opening in the Earth's crust that erupts lava, ash and gas.", "It's a vent in the crust through which lava, ash and gas escape.", "an erupting vent in the crust", "a glacier"),
+    ("What is a telescope used for?", "A telescope is used to see distant objects, especially in the sky.", "You use one to look at faraway things, mostly stars and planets.", "seeing distant objects", "measuring time"),
+    ("What is the capital of Spain?", "The capital of Spain is Madrid.", "Madrid is Spain's capital.", "Madrid", "Barcelona"),
+    ("How many hours are in two days?", "Forty-eight.", "There are 48 hours in two days.", "48", "36"),
+    ("Name a fruit.", "An apple.", "A banana is one.", "an apple", "a carrot"),
+    ("What is rain made of?", "Rain is made of water that condensed in clouds and fell.", "It's condensed water falling from clouds.", "water", "sand"),
+    ("Why do we sleep?", "Sleep lets the body and brain rest, repair and consolidate memory.", "It's how the body and brain recover and store what was learned.", "rest and repair", "to grow taller"),
+    ("What language is spoken in Brazil?", "Portuguese is spoken in Brazil.", "Brazilians speak Portuguese.", "Portuguese", "Spanish"),
+    ("What does a thermometer measure?", "A thermometer measures temperature.", "It measures how hot or cold something is.", "temperature", "pressure"),
+    ("How many strings does a guitar usually have?", "Six.", "A guitar usually has six strings.", "six", "four"),
+]
+
 
 def _q_short(q: str) -> str:
     q = q.rstrip("?").strip()
     return q[0].lower() + q[1:] if q.lower().startswith("what is ") else q.lower()
 
 
-def generate(n_dialogues: int, n_pairs: int, n_params: int, seed: int, author: str) -> Tuple[List[List[Dict]], List[Dict]]:
+def generate(n_dialogues: int, n_pairs: int, n_params: int, seed: int, author: str,
+             n_neg: int = 0, n_ties: int = 0, neutral_frac: float = 0.0) -> Tuple[List[List[Dict]], List[Dict]]:
     rng = random.Random(seed)
     params = params_phrase(n_params)
     card = identity_card(n_params, NAME, author)
@@ -110,8 +136,17 @@ def generate(n_dialogues: int, n_pairs: int, n_params: int, seed: int, author: s
     def base(with_card: bool) -> List[Dict]:
         return [{"role": "system", "content": card}] if with_card else []
 
-    # identity (40%): plain questions, with and without the card; some with a challenge turn
-    for i in range(int(n_dialogues * 0.4)):
+    # neutral: an ordinary question answered plainly. The identity dialogues teach "a question about me
+    # gets the card" and nothing taught "a question about anything else does not" — overnight_sft2 recited
+    # the card on 7 of 10 neutral prompts before DPO ever ran (identity_recite_rate 0.70). These are that
+    # missing half. `--neutral-frac 0` reproduces the pre-2026-08-25 mix exactly.
+    for _ in range(int(n_dialogues * neutral_frac)):
+        q, a, b, _short, _w = rng.choice(NEUTRAL)
+        dialogues.append(base(rng.random() < 0.3) + [{"role": "user", "content": q},
+                                                     {"role": "assistant", "content": rng.choice([a, b])}])
+
+    # identity (40% of what is left): plain questions, with and without the card; some with a challenge turn
+    for i in range(int(n_dialogues * 0.4 * (1.0 - neutral_frac))):
         msgs = base(rng.random() < 0.5)
         msgs += [{"role": "user", "content": rng.choice(IDENTITY_Q)}, {"role": "assistant", "content": rng.choice(answers)}]
         if rng.random() < 0.35:
@@ -151,7 +186,33 @@ def generate(n_dialogues: int, n_pairs: int, n_params: int, seed: int, author: s
         else:
             ctx += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{w}."}, {"role": "user", "content": rng.choice(PUSH).format(x=r)}]
             pairs.append({"messages": ctx, "chosen": rng.choice(CONCEDE).format(q_short=qs, r=r, w=w), "rejected": rng.choice(STUBBORN).format(w=w)})
+
+    # negative class: an ordinary question is not a correction and is not about the model. Strict pairs —
+    # answering plainly beats firing a template, and beats reciting the card.
+    for i in range(n_neg):
+        q, a, b, short, w = rng.choice(NEUTRAL)
+        qs = _q_short(q)
+        ctx = base(rng.random() < 0.3) + [{"role": "user", "content": q}]
+        if i % 3 == 0:
+            bad = rng.choice(HOLD).format(q_short=qs, r=short, w=w)
+        elif i % 3 == 1:
+            bad = rng.choice(CONCEDE).format(q_short=qs, r=short, w=w)
+        else:
+            bad = rng.choice(answers)  # the identity card recited instead of an answer
+        pairs.append({"messages": ctx, "chosen": rng.choice([a, b]), "rejected": bad, "kind": "negative"})
+
+    # ties (2605.11134 §6.1): equal utility, differing only in surface form, and the winner is decided by a
+    # COIN FLIP. The random orientation is the mechanism — it makes E[Δφ] = 0, so ties add curvature only
+    # along the spurious directions and shrink the weights there. Labelling them one way injects bias
+    # instead. They need no change to the loss: they are ordinary hard-labelled pairs.
+    for _ in range(n_ties):
+        q, a, b, _short, _w = rng.choice(NEUTRAL)
+        ctx = base(rng.random() < 0.3) + [{"role": "user", "content": q}]
+        first, second = (a, b) if rng.random() < 0.5 else (b, a)
+        pairs.append({"messages": ctx, "chosen": first, "rejected": second, "kind": "tie"})
+
     rng.shuffle(dialogues)
+    rng.shuffle(pairs)
     return dialogues, pairs
 
 
@@ -180,17 +241,23 @@ def main(argv=None):
     ap.add_argument("--params", type=int, required=True, help="parameter count of the model this data is for")
     ap.add_argument("--author", default="Noah")
     ap.add_argument("--n", type=int, default=800, help="SFT dialogues")
-    ap.add_argument("--pairs", type=int, default=400, help="DPO pairs")
+    ap.add_argument("--pairs", type=int, default=400, help="pushback DPO pairs (hold vs cave, concede vs stubborn)")
+    ap.add_argument("--neg", type=int, default=200, help="negative-class pairs: an ordinary question answered plainly beats a fired template or a recited card")
+    ap.add_argument("--ties", type=int, default=200, help="tie pairs: equal utility, coin-flipped orientation (2605.11134)")
+    ap.add_argument("--neutral-frac", type=float, default=0.15, help="share of SFT dialogues that are ordinary questions answered plainly; 0 reproduces the old mix")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    dialogues, pairs = generate(args.n, args.pairs, args.params, args.seed, args.author)
+    dialogues, pairs = generate(args.n, args.pairs, args.params, args.seed, args.author, args.neg, args.ties, args.neutral_frac)
     meta = pack_sft(out, dialogues)
     with open(out.parent / f"{out.name}.dpo.jsonl", "w", encoding="utf-8") as f:
         for p in pairs:
             f.write(json.dumps(p, ensure_ascii=False) + "\n")
-    print(json.dumps({"train": meta["train"], "val": meta["val"], "dpo_pairs": len(pairs)}, indent=1))
+    kinds: Dict[str, int] = {}
+    for pr in pairs:
+        kinds[pr.get("kind", "pushback")] = kinds.get(pr.get("kind", "pushback"), 0) + 1
+    print(json.dumps({"train": meta["train"], "val": meta["val"], "dpo_pairs": len(pairs), "by_kind": kinds}, indent=1))
 
 
 if __name__ == "__main__":

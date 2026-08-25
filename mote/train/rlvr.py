@@ -6,11 +6,32 @@
 Each step: sample --tasks fresh tasks (seeds from --seed-base, never the probe's or the traces'), roll out
 --group replies per task through the engine's tool hook at --temperature (eager decoding on the live
 policy weights, the sim as the `sim` tool, the task's step budget as the call cap), reward 1 iff the goal
-holds at the end (+ --partial × the fraction of goal facts, 0 by default), keep only the groups with mixed
-outcomes (edge of competence: a group that all fails or all succeeds carries no signal), group-normalise
-the advantages, and take ONE gradient step on
+holds at the end (+ --partial × the fraction of goal facts, 0 by default), build the advantages (below),
+and take ONE gradient step on
 
-    −A · mean_t log π(y_t)  +  β · KL(π ‖ π_ref)      (KL: k3 estimator on the sampled bytes; π_ref = the initial policy)
+    −A · mean_t log π(y_t)  +  β_i · KL(π ‖ π_ref)    (KL: k3 estimator on the sampled bytes; π_ref = the initial policy)
+
+Advantages (revised 2026-08-25 — the binary, low-dispersion, small-G regime this stage runs in is exactly
+the one plain GRPO is worst at):
+
+    z_i     = (r_i − median r) / (σ + eps)          MC-GRPO 2601.22582 — the mean baseline's noise flips
+                                                     advantage signs at small G; the pivot at the median
+                                                     gets z = 0 and is dropped, so G+1 rollouts give G
+                                                     gradients and G=2 lands within 1% of G=8
+    δ_i     = 2·√C·(frac_i − 0.5)                    MDP-GRPO 2606.06058 Eq. 4 — an absolute anchor against
+                                                     a p=0.5 binomial over the C goal predicates. Defined
+                                                     at zero group variance, so an all-failed group teaches
+                                                     instead of being discarded
+    ṽ       = λ± · tanh(β_PT · v)                    Eq. 5 — bounded and loss-averse (λ₋ 2.0 > λ₊ 1.25), so
+                                                     an unmet predicate moves the policy harder than a met
+                                                     one and a near-zero σ cannot produce a huge gradient
+    A_i     = (1−α)·z̃_i + α·δ̃_i                     Eq. 6, α = 0.2
+    β_i     = --kl if A_i ≥ 0 else --kl-high         Eq. 8 — move while improving, hold when regressing
+
+Note what this does NOT do: the *reward* stays all-or-nothing over the predicates, so there is nothing to
+game by satisfying the easy three of four. The graded fraction enters only as δ_i, an advantage anchor
+that prospect shaping bounds. `--anchor-alpha 0 --pt-beta 0 --baseline mean` is the pre-revision algorithm
+exactly, for the ablation.
 
 over the model's own bytes only (tool results carry no loss). Strictly on-policy, one update per batch: no
 importance ratios, no clipping. Every --eval-every steps: held-out pass@1 (greedy) and pass@k over
@@ -66,17 +87,75 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--max-minutes", type=float, default=1440.0)
     ap.add_argument("--ckpt-minutes", type=float, default=10.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--baseline", default="median", choices=["median", "mean"],
+                    help="MC-GRPO (2601.22582): median resists the outlier that flips advantage signs at small G; "
+                         "the pivot rollout is dropped from backprop, so G+1 rollouts give G gradients")
+    ap.add_argument("--anchor-alpha", type=float, default=0.2,
+                    help="MDP-GRPO (2606.06058) Eq. 6: weight of the absolute goal anchor against the group-relative "
+                         "signal. 0 is standard GRPO exactly; the paper sweeps {0.1,0.2,0.4} and settles on 0.2")
+    ap.add_argument("--pt-beta", type=float, default=0.8, help="prospect shaping slope (Eq. 5)")
+    ap.add_argument("--pt-lam-pos", type=float, default=1.25, help="prospect gain weight; 1.25*0.8 = slope 1 at the origin")
+    ap.add_argument("--pt-lam-neg", type=float, default=2.0, help="prospect loss weight; > lam-pos is the loss aversion")
+    ap.add_argument("--kl-high", type=float, default=None,
+                    help="asymmetric KL (Eq. 8): this coefficient on rollouts with a negative advantage, --kl on the "
+                         "rest, so the policy may move while improving and is held when regressing. Default: = --kl")
     ap.add_argument("--device", default=None)
     ap.add_argument("--resume", action="store_true")
     return ap
 
 
-def group_advantages(rewards: Sequence[float], eps: float = 1e-6) -> List[float]:
-    """GRPO: (r − mean) / (std + eps) within one prompt's group."""
+def group_advantages(rewards: Sequence[float], eps: float = 1e-6, baseline: str = "median") -> Tuple[List[float], Optional[int]]:
+    """z_i within one prompt's group: (r − baseline) / (std + eps). Returns (z, pivot).
+
+    baseline="median" is MC-GRPO (2601.22582): with a small G, noise in the *mean* baseline flips the sign
+    of some advantages, so those rollouts are pushed the wrong way; the median barely moves under one
+    outlier. One completion sits at the median, gets z = 0, and is excluded from backprop — so G+1 rollouts
+    still contribute G gradients. Their result: G=2 comes within 1% of G=8, which is what makes this stage
+    affordable on 8 GB.  baseline="mean" is the original GRPO.
+    """
     n = len(rewards)
-    mean = sum(rewards) / n
-    var = sum((r - mean) ** 2 for r in rewards) / n
-    return [(r - mean) / (math.sqrt(var) + eps) for r in rewards]
+    if baseline == "median":
+        srt = sorted(rewards)
+        centre = srt[n // 2] if n % 2 else 0.5 * (srt[n // 2 - 1] + srt[n // 2])
+        pivot = min(range(n), key=lambda i: (abs(rewards[i] - centre), i))
+    else:
+        centre, pivot = sum(rewards) / n, None
+    var = sum((r - centre) ** 2 for r in rewards) / n
+    return [(r - centre) / (math.sqrt(var) + eps) for r in rewards], pivot
+
+
+def goal_anchor(fracs: Sequence[float], n_constraints: int) -> List[float]:
+    """δ_i = 2·√C·(frac_i − 0.5) — MDP-GRPO (2606.06058) Eq. 4, the second, *absolute* anchor.
+
+    A neutral policy that satisfied each of the C goal predicates independently with p = 0.5 would score
+    mean 0.5, so this measures the rollout against that rather than against its group. It stays defined and
+    informative when the group variance is zero — the case where mean-centring makes every advantage 0 and
+    an all-failed group teaches nothing. All predicates met gives +√C, none gives −√C.
+    """
+    c = max(1, n_constraints)
+    return [2.0 * math.sqrt(c) * (f - 0.5) for f in fracs]
+
+
+def prospect(v: float, beta_pt: float = 0.8, lam_pos: float = 1.25, lam_neg: float = 2.0) -> float:
+    """MDP-GRPO Eq. 5: a bounded, loss-averse tanh over a raw advantage.
+
+    λ₋ > λ₊ is loss aversion — an unmet predicate moves the policy harder than a met one, which is what
+    stops partial credit paying for "satisfy the easy three of four and never attempt the fourth". tanh
+    gives diminishing sensitivity and bounds the advantage to [−λ₋, λ₊], so a near-zero group σ can no
+    longer produce an unbounded gradient. The paper's (β_PT, λ₊, λ₋) = (0.8, 1.25, 2.0) makes the slope
+    ≈ 1.0 for small positive advantages.
+    """
+    if beta_pt <= 0:
+        return v  # shaping off: --anchor-alpha 0 --pt-beta 0 is the pre-2026-08-25 GRPO exactly
+    lam = lam_pos if v >= 0 else lam_neg
+    return lam * math.tanh(beta_pt * v)
+
+
+def mix_advantages(z: Sequence[float], delta: Sequence[float], alpha: float = 0.2,
+                   beta_pt: float = 0.8, lam_pos: float = 1.25, lam_neg: float = 2.0) -> List[float]:
+    """A_i = (1−α)·z̃_i + α·δ̃_i — MDP-GRPO Eq. 6, both signals shaped first. α = 0 is standard GRPO exactly."""
+    return [(1.0 - alpha) * prospect(zi, beta_pt, lam_pos, lam_neg) + alpha * prospect(di, beta_pt, lam_pos, lam_neg)
+            for zi, di in zip(z, delta)]
 
 
 def has_signal(rewards: Sequence[float]) -> bool:
@@ -202,7 +281,11 @@ class RlvrTrainer:
         d = ref - logp
         kl = ((torch.exp(d) - d - 1.0) * tgt_mask).sum(dim=1) / n_tok  # k3 estimator, ≥ 0
         A = torch.tensor(advs, dtype=torch.float32, device=self.device)
-        loss = (-(A * mean_logp) + self.args.kl * kl).sum() / n_total
+        # Asymmetric KL (MDP-GRPO Eq. 8): a rollout that is improving may move further from the reference
+        # than one that is regressing. kl_high == kl reproduces the symmetric penalty.
+        kl_high = self.args.kl if self.args.kl_high is None else self.args.kl_high
+        beta_kl = torch.where(A >= 0, A.new_full((), self.args.kl), A.new_full((), kl_high))
+        loss = (-(A * mean_logp) + beta_kl * kl).sum() / n_total
         loss.backward()
         return float(loss.detach()), float(kl.mean().detach()), float(mean_logp.mean().detach())
 
@@ -248,12 +331,23 @@ class RlvrTrainer:
                 groups.append(g)
             t_roll = time.time() - t0
             all_r = [r["reward"] for g in groups for r in g]
-            used = [g for g in groups if has_signal([r["reward"] for r in g])]
-            rollouts = [r for g in used for r in g]
-            advs = [a for g in used for a in group_advantages([r["reward"] for r in g])]
+            # With the absolute anchor on, a homogeneous group still teaches (delta_i is defined at zero
+            # variance) — that is the whole point of the second anchor, so stop discarding those groups.
+            used = [g for g in groups if args.anchor_alpha > 0 or has_signal([r["reward"] for r in g])]
+            rollouts, advs, n_pivot = [], [], 0
+            for g in used:
+                z, pivot = group_advantages([r["reward"] for r in g], baseline=args.baseline)
+                delta = goal_anchor([r["frac"] for r in g], len(g[0]["task"].goal))
+                a = mix_advantages(z, delta, args.anchor_alpha, args.pt_beta, args.pt_lam_pos, args.pt_lam_neg)
+                for i, r in enumerate(g):
+                    if i == pivot:  # MC-GRPO: the median rollout is the reference, not a gradient
+                        n_pivot += 1
+                        continue
+                    rollouts.append(r)
+                    advs.append(a[i])
             rec = {"reward": sum(all_r) / len(all_r), "success": sum(r["reward"] >= 1.0 for g in groups for r in g) / len(all_r),
                    "frac": sum(r["frac"] for g in groups for r in g) / len(all_r),
-                   "groups": len(groups), "groups_used": len(used),
+                   "groups": len(groups), "groups_used": len(used), "pivots_dropped": n_pivot,
                    "all_fail": sum(max(r["reward"] for r in g) < 1.0 for g in groups), "all_pass": sum(min(r["reward"] for r in g) >= 1.0 for g in groups),
                    "calls_mean": sum(r["calls"] for g in groups for r in g) / len(all_r),
                    "eos_rate": sum(r["eos"] for g in groups for r in g) / len(all_r),

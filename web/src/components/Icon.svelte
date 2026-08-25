@@ -14,6 +14,8 @@
     | 'check'
     | 'chevron'
     | 'structure'
+    | 'thumb-up'
+    | 'thumb-down'
     | 'sun'
     | 'moon'
     | 'auto'
@@ -43,6 +45,9 @@
     check: 'M3 8.4l3.4 3.4L13 4.6',
     chevron: 'M5.5 3.5 10 8l-4.5 4.5',
     structure: 'M2.5 4h4M9.5 4h4M2.5 12h4M9.5 12h4M8 2.2v11.6',
+    // a hand: the palm as a rounded box, the raised thumb and three folded fingers as one outline
+    'thumb-up': 'M5.2 13.4V7.1h1.6l2.3-4.4a1.3 1.3 0 0 1 2.4.9L11 6.4h2.1a1.2 1.2 0 0 1 1.2 1.4l-.8 4.3a1.4 1.4 0 0 1-1.4 1.3H5.2ZM2.6 7.1h2.6v6.3H2.6Z',
+    'thumb-down': 'M5.2 2.6v6.3h1.6l2.3 4.4a1.3 1.3 0 0 0 2.4-.9L11 9.6h2.1a1.2 1.2 0 0 0 1.2-1.4l-.8-4.3a1.4 1.4 0 0 0-1.4-1.3H5.2ZM2.6 2.6h2.6v6.3H2.6Z',
     sun: 'M8 1.6v1.7M8 12.7v1.7M1.6 8h1.7M12.7 8h1.7M3.5 3.5l1.2 1.2M11.3 11.3l1.2 1.2M3.5 12.5l1.2-1.2M11.3 4.7l1.2-1.2',
     moon: 'M13.2 9.8A5.6 5.6 0 0 1 6.2 2.8a5.6 5.6 0 1 0 7 7Z',
     auto: '',

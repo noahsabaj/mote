@@ -109,14 +109,29 @@ control. The winner's final checkpoint is the **flagship base**; the pair is the
 mid-training A/B (docs/results).
 
 **Post — SFT → DPO stages → RLVR last.**
+
+*Additions signed 2026-08-25 (docs/research/dpo-rlvr-2026-08-25.md).* The probe grew a **negative class**:
+`false_fire_rate` over neutral prompts that must draw neither the identity card nor a pushback template, a
+shipping guard on every stage below. `overnight_dpo2` scored `identity_acc` 0.833 and `false_fire_rate` **0.90**
+at the same time — the three original scores only ever reward a behaviour, so a model that recites its card at
+every prompt scored full marks. Before any stage runs, **Round A** bakes off DPO / IPO / ORPO (all carrying the
+new negative-class and tie pairs) off a shared 30-min SFT from `t3l_dense_8e-4`, with a second SFT at
+`--neutral-frac 0.15` as its own arm — 70% of the false firing is in the SFT checkpoint before DPO ever runs, so
+the SFT half is measured too. **Round B** runs the winner and runner-up on the 20k sim pairs against the real
+gate. SFT-1 additionally gets difficulty selection (`mote.data.select_sft`, ~4 GPU-min on the 4060 Ti — not free,
+the earlier "CPU only" estimate was wrong) and On-Policy Replay between stages (`mote.data.replay`), which turns
+the no-regression guards from detectors into a mechanism.
 1. **SFT-1** (format): init = the flagship base; `sft_local` + identity 5 % + sim QA ~10 % + tool-protocol
    traces if built (else SFT-2 adds them); search data only once the reading gate (docs/search.md, ≥ 50 %
    EM after a small QA SFT) passes on the flagship base. lr: T2 {1e-4, 3e-4} (overnight_sft2 used AdamW
    3e-4). After it: identity ≥ 5/6, chat val, reading, sim-QA, needle, and pass@1 / pass@64 on the sim
    tasks — the RL headroom numbers.
 2. **Correctness DPO**: the sim's 20k verifiable pairs; gate pass@1 > 0 on held-out sim QA; 1 epoch,
-   lr 5e-7, β 0.1, SFT term on; guards identity/hold/concede + chat val (no regression).
-3. **Prefs DPO**: the docs/prefs.md gate unchanged (≥ 1000 rated, ≥ 150 Noah's); skipped while unmet.
+   lr 5e-7, β 0.1, SFT term on; guards identity/hold/concede + **false_fire_rate** + chat val (no regression).
+   *Objective decided by the Round A/B bake-off (below), not assumed to be DPO.*
+3. **Prefs DPO**: gate re-derived from whichever objective prefs runs (pairs vs KTO's binary marks); the old
+   ≥ 1000 rated / ≥ 150 Noah's was written for batch DPO on pairs and does not carry over unchanged
+   (docs/prefs.md). Skipped while unmet.
 4. **RLVR-1, multi-turn actions in the sim** (household, inventory, schedule — kinship has no agent
    actions). Tasks State2State-style (2608.04934): k scripted actions from a seeded world → goal =
    predicates over the reached state (holdings, locations, bookings) rendered in the locale; reward 1 iff
@@ -124,11 +139,29 @@ mid-training A/B (docs/results).
    happened". Protocol: `<|call|>` = 262 and `<|result|>` = 263 with the tool named in the bytes
    (`<|call|>sim: take candle<|result|>…`; search is `<|call|>search: …`, docs/search.md), one server hook
    for every tool, only the model's bytes carry loss. Cold start = SFT on expert traces from per-domain
-   planners. Algorithm: GRPO-style outcome reward, G = 8, group-normalised advantage, KL β to the post-DPO
-   reference, lr ~1e-6, on-policy rollouts through the graph decoder at T = 1, prompts kept at the edge of
-   competence (group pass rate in (0, 1)), ~200 steps, pass@k on a held-out task set every N steps. Start
-   gate: pass@1 < 0.5 and pass@64 − pass@1 ≥ 0.2. Guards: pass@64 never below the pre-RL model;
-   identity/hold/concede and chat val no regression; KL bounded.
+   planners. Algorithm (**revised 2026-08-25**, docs/research/dpo-rlvr-2026-08-25.md — plain GRPO is worst at
+   exactly this regime: binary reward, low dispersion, small G):
+
+       z_i = (r_i − median r) / (σ + eps)     MC-GRPO 2601.22582. The *mean* baseline's noise flips advantage
+                                              signs at small G. G+1 rollouts, the pivot at the median gets 0 and
+                                              is dropped, so G still contribute — and G=2 lands within 1% of
+                                              G=8, which is what makes this stage affordable on 8 GB.
+       δ_i = 2·√C·(frac_i − 0.5)              MDP-GRPO 2606.06058 Eq. 4, C = len(task.goal). Defined at zero
+                                              group variance, so an all-failed group teaches instead of being
+                                              discarded — the "mean-centering blindness" the edge-of-competence
+                                              filter does not cover.
+       ṽ  = λ± · tanh(β_PT · v)               Eq. 5, (β_PT, λ₊, λ₋) = (0.8, 1.25, 2.0). Bounded and loss-averse.
+       A_i = (1−α)·z̃_i + α·δ̃_i               Eq. 6, α = 0.2.
+       β_i = --kl if A_i ≥ 0 else --kl-high   Eq. 8, asymmetric: move while improving, hold when regressing.
+
+   **The reward stays all-or-nothing** — shaping applies to the advantages, not the reward, so there is nothing
+   to game by satisfying the easy three predicates of four. `frac` enters only as δ_i, which tanh bounds. No sim
+   change was needed. `--anchor-alpha 0 --pt-beta 0 --baseline mean` is the pre-revision algorithm, for ablation.
+
+   Otherwise unchanged: KL β to the post-DPO reference, lr ~1e-6, on-policy rollouts through the graph decoder at
+   T = 1, prompts kept at the edge of competence (group pass rate in (0, 1)), ~200 steps, pass@k on a held-out
+   task set every N steps. Start gate: pass@1 < 0.5 and pass@64 − pass@1 ≥ 0.2. Guards: pass@64 never below the
+   pre-RL model; identity/hold/concede, **false_fire_rate** and chat val no regression; KL bounded.
 
 Served = the last stage that passed its gate; every stage checkpoint sits in the studio picker.
 

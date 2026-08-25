@@ -368,6 +368,12 @@ def prefs_cmd(args) -> int:
             print("usage: mote prefs import <verdicts.jsonl>")
             return 2
         print(f"{store.import_verdicts(Path(args.file))} verdicts imported")
+    elif args.action == "export-dpo":
+        out = args.out if args.out != "data/prefs/to_rate.jsonl" else "data/prefs/prefs.dpo.jsonl"
+        print(json.dumps(store.export_dpo(Path(out), include_ties=not args.no_ties), indent=1))
+    elif args.action == "export-kto":
+        out = args.out if args.out != "data/prefs/to_rate.jsonl" else "data/prefs/prefs.kto.jsonl"
+        print(json.dumps(store.export_kto(Path(out), from_pairs=args.from_pairs), indent=1))
     elif args.action == "summary":
         print(json.dumps(store.summary(), indent=1, ensure_ascii=False))
     elif args.action == "disagreements":
@@ -452,11 +458,13 @@ def main(argv=None) -> int:
     c.add_argument("--device", choices=["cpu", "cuda"])
     c.add_argument("--port", type=int)
     c.add_argument("--host")
-    pr = sub.add_parser("prefs", help="preference votes: export | import | summary | disagreements (docs/prefs.md)")
-    pr.add_argument("action", choices=["export", "import", "summary", "disagreements"])
+    pr = sub.add_parser("prefs", help="preference votes: export | export-dpo | export-kto | import | summary | disagreements (docs/prefs.md)")
+    pr.add_argument("action", choices=["export", "export-dpo", "export-kto", "import", "summary", "disagreements"])
     pr.add_argument("file", nargs="?", help="verdicts JSONL for `import`")
     pr.add_argument("--out", default="data/prefs/to_rate.jsonl")
     pr.add_argument("--limit", type=int, default=None)
+    pr.add_argument("--no-ties", action="store_true", help="export-dpo: leave tie votes out instead of writing them coin-flipped")
+    pr.add_argument("--from-pairs", action="store_true", help="export-kto: also derive good/bad labels from a/b votes (an approximation)")
     tr = sub.add_parser("train", help="training jobs on the resident studio: start [--front] [--serve] -- <train args> | stop [--id] | serve [--id] [--off] | queue")
     tr.add_argument("action", choices=["start", "stop", "serve", "queue"])
     tr.add_argument("--id", default=None, help="job id for `stop` / `serve` (default: the running one)")
