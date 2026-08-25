@@ -26,6 +26,9 @@ import torch
 import torch.nn.functional as F
 
 from ..config import MoteConfig
+from ..model import triton_lock
+
+triton_lock.install()  # the trainer shares autotuned kernels with serving replies in the daemon
 from ..data.loader import ByteShard, MixedShard
 from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.moe import collect_moe, moe_modules

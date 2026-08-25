@@ -29,6 +29,9 @@ from .graph import BUCKET, GraphDecoder
 from .identity import identity_card, with_system_card
 from ..tokenizer import ASSISTANT_ID, BOS_ID, CALL_ID, EOS_ID, PAD_ID, RESULT_ID, SYSTEM_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer, parse_call
 from .prefix_cache import Hit, PrefixStore
+from ..model import triton_lock
+
+triton_lock.install()  # serving launches autotuned kernels beside the training thread (see the module)
 
 STOP_IDS = {EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ASSISTANT_ID, BOS_ID, RESULT_ID}  # <|result|> stops decoding for the tool hook
 
@@ -236,6 +239,17 @@ class Engine:
                 self._setup_decode()
             self._released = False
         return self.warmup()
+
+    def _reply_gate(self):
+        """The GPU gate for a whole reply: always under MOTE_SERVE_GATED=1 (the old behaviour), and by default
+        while released — an eager reply is hundreds of Python-level kernel launches beside the training thread
+        and its arena + prefill would sit on top of the training step's peak; pausing the slices for the reply
+        (seconds) costs the trunk nothing measurable. MOTE_SERVE_RELEASED_GATED=0 keeps replies concurrent."""
+        if self.gpu_gate is None:
+            return contextlib.nullcontext()
+        if self.gated or (self._released and os.environ.get("MOTE_SERVE_RELEASED_GATED", "1") != "0"):
+            return self.gpu_gate
+        return contextlib.nullcontext()
 
     def _reply_arena(self) -> RelationArena:
         """The resident arena, or (released) a fresh one for this reply from the shared allocator."""
@@ -538,8 +552,7 @@ class Engine:
     def generate(self, messages: Sequence[dict], params: GenParams, emit: Callable[[dict], None], stop: threading.Event,
                  context: Optional[dict] = None) -> None:
         """`context`: {"fold": "auto" | "now" | "off", "card": <edited card or None>} — see mote.serve.context."""
-        gate = self.gpu_gate if (self.gated and self.gpu_gate is not None) else contextlib.nullcontext()
-        with gate, self.lock, self._serve_ctx():
+        with self._reply_gate(), self.lock, self._serve_ctx():
             try:
                 self._generate(messages, params, emit, stop, context or {})
             finally:

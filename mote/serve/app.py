@@ -12,6 +12,7 @@ import mimetypes
 import os
 import secrets
 import threading
+import traceback
 import time
 from pathlib import Path
 from typing import Optional
@@ -429,7 +430,8 @@ def _run_generation(eng: Engine, messages, params: GenParams, loop: asyncio.Abst
 
     try:
         eng.generate(messages, params, emit, stop, context=context)
-    except Exception as e:  # surface engine errors to the client
+    except Exception as e:  # surface engine errors to the client — and the traceback to the log
+        traceback.print_exc()
         emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
         emit({"type": "__end__"})

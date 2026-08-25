@@ -61,6 +61,57 @@ def test_release_serves_the_same_bytes_and_keeps_the_prefix_store(tmp_path):
     assert eng.rearm() == 0.0  # idempotent
 
 
+def test_released_replies_hold_the_gpu_gate(tmp_path, monkeypatch):
+    import contextlib
+
+    eng = _engine(tmp_path)
+    assert isinstance(eng._reply_gate(), contextlib.nullcontext)  # no gate set: nothing to hold
+    gate = threading.Lock()
+    eng.gpu_gate = gate
+    assert isinstance(eng._reply_gate(), contextlib.nullcontext)  # warm + ungated: concurrent decode (signed design)
+    eng.release()
+    assert eng._reply_gate() is gate  # released: the whole reply pauses training slices
+    monkeypatch.setenv("MOTE_SERVE_RELEASED_GATED", "0")
+    assert isinstance(eng._reply_gate(), contextlib.nullcontext)
+    monkeypatch.delenv("MOTE_SERVE_RELEASED_GATED")
+    seen = {}
+
+    def probe():
+        seen["free"] = gate.acquire(timeout=0.05)  # False while the reply holds it
+        if seen["free"]:
+            gate.release()
+
+    script = list(b"abcdefgh")
+    ev = []
+    t = None
+
+    def emit(e):
+        nonlocal t
+        ev.append(e)
+        if e["type"] == "byte" and e["i"] == 1 and t is None:
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join()  # probe while the reply is in flight (the reply thread waits for the 50 ms timeout)
+    eng.generate([{"role": "user", "content": "gate"}], GenParams(max_bytes=len(script), script=script, n_candidates=0), emit, threading.Event())
+    assert seen["free"] is False and ev[-1]["type"] == "done"
+    assert gate.acquire(timeout=1.0)  # released after the reply
+    gate.release()
+
+
+def test_triton_autotuner_lock_installs_once():
+    from mote.model import triton_lock
+
+    ok = triton_lock.install()
+    try:
+        from triton.runtime.autotuner import Autotuner
+    except Exception:
+        assert ok is False
+        return
+    assert ok and Autotuner._mote_locked and hasattr(Autotuner.run, "_mote_orig")
+    first = Autotuner.run
+    assert triton_lock.install() and Autotuner.run is first  # idempotent: not wrapped twice
+
+
 def test_engine_can_start_released(tmp_path):
     eng = _engine(tmp_path, released=True)
     assert eng.released and eng.arena is None
