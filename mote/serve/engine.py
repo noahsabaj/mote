@@ -288,30 +288,32 @@ class Engine:
     def warmup(self) -> float:
         """Trigger Triton JIT/autotune for prefill at a few prompt lengths (incl. odd and 16-aligned ones) and one
         decode step, so the first user request doesn't pay the ~40 s compile. Returns seconds spent."""
-        if self.arena is None:  # released: nothing resident to warm; `rearm()` first
-            return 0.0
+        # released: the same kernel warm-up through a throwaway arena, no graph capture (the first eager reply
+        # beside a job paid 24 s of Triton compile without it, 2026-08-24 23:07)
         t0 = time.perf_counter()
         with self.lock, self._serve_ctx():
+            arena = self._reply_arena()
             for L in (5, 16, 33, 128, 257, 512, 640, 1024, 2048, 4096):
                 L = min(L, self.cfg.max_seq_len - 4)
                 ids = torch.randint(0, 256, (1, L), device=self.device)
-                state = self.model.allocate_inference_state(self.device, arena=self.arena)
+                state = self.model.allocate_inference_state(self.device, arena=arena)
                 self.model.prefill(ids, state)
                 self.model.step(torch.tensor([[65]], device=self.device), state)
                 if L >= 16:
                     # resumed reads compile their own kernel variants (Input_States != None,
                     # 2026-08-24): warm them at short and long lengths too, or the first warm turn
                     # (a ~30-byte continuation) pays a multi-second compile
-                    warm = self.model.allocate_inference_state(self.device, arena=self.arena)
+                    warm = self.model.allocate_inference_state(self.device, arena=arena)
                     self.model.prefill(ids[:, : L // 2], warm)
                     self.model.forward_from_state(ids[:, L // 2 :], warm)
                     self.model.forward_from_state(ids[:, : min(3, L)], warm)
-            if self._graph_ok:  # capture the first decode width now, not on the first reply
+            if self._graph_ok and self.arena is not None:  # capture the first decode width now, not on the first reply
                 gd = self._graph_decoder()
                 state = self.model.allocate_inference_state(self.device, arena=self.arena)
                 gd.load(state, torch.zeros(gd.V, device=self.device))
                 gd._graph(BUCKET)
-            self.arena.invalidate()
+            arena.invalidate()
+            del state, arena
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()  # give the warm-up's transient buffers back (training may share this GPU)

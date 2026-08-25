@@ -127,6 +127,16 @@ gap: systemd's SIGTERM ended the process in under a second — no shutdown hook,
 (13 min in, no checkpoint yet) restarted from step 0. `app.main` now calls `jobs.shutdown()` + `join` after
 uvicorn returns (the job checkpoints at its next step boundary, skips the final eval, re-enqueues in front),
 the unit carries `TimeoutStopSec=180`, and the second restart waits for the arm's next checkpoint.
+Two more restarts (22:52, 22:55) still lost their arms to step 0, and showed why the hook never ran: **uvicorn
+captures SIGTERM for its own shutdown, then restores the handlers it found and re-raises the signal — with the
+default handler the process died (`server exited with -15`) before `main()` continued** (`d17764f`: the server
+installs no-op handlers first, so the re-raised signal is swallowed and the hook runs); and the supervisor died on
+its own SIGTERM at once instead of waiting for the server (`3eeff7f`: it forwards the signal and waits). A third
+finding from those restarts: **a resume rebuilt the model from the preset**, so the 264 → 272 vocab padding broke
+every resume of an older run (`lm_head 264 vs 272`); a resume now loads the run's saved `config.json`, and
+`--init-from` pads an older checkpoint's vocabulary rows (`3033897`). Verified 23:00: `stopping the running job at
+its next step boundary` → `{"stopped": "interrupted", "step": 38}` → `job queue stopped` → `server exited with 0`
+→ `resumed from step 38 at 1.1 min`.
 
 Queue after the fixes: `t3l_dense_4e-4` (running since 20:52) → `ab3_jepa_sig` (resume) → `nsweep_4` → the
 other four T3 arms → the nine flagship arms re-queued (they retry-wait for memory if the desktop is still heavy).
@@ -153,6 +163,15 @@ when more work is queued; the server boots released when a job is about to start
 rows); `HNetForCausalLM.head_logits` masks rows ≥ 266 to −inf on every path (forward, prefill, continuation, step,
 the multi-byte head, the decode graph) so a padding row is never produced; old 264-row checkpoints load through
 their own saved config. The rows moved the tiny test models' random init: one RL test now ends rollouts on EOS only.
+
+**The first eager reply beside a job found a latent race**: `TypeError: 'NoneType' object is not a mapping` inside
+mamba_ssm's layer-norm autotuner. Triton's `Autotuner` keeps per-call state on `self` (`nargs`) and resets it at the
+end of `run()`; the training thread and the serving thread launching the same autotuned kernel race on it — the
+graph-decode path had hidden this (no Python launches per byte), the eager path made it immediate. Two fixes:
+`mote/model/triton_lock.py` wraps `Autotuner.run` in one process-wide RLock (installed by the engine and the
+trainer), and a released reply holds the GPU gate for its duration by default (`MOTE_SERVE_RELEASED_GATED=0` keeps
+it concurrent) — the trunk pauses for seconds per reply, and the reply's arena + prefill no longer sit on the
+training step's peak. Verified: two chats through the daemon while nsweep_4 trained.
 
 Also built: `mote/eval/rl_taxonomy.py` (Table 14 of 2607.16097 over each held-out state's legal actions; tested on
 tiny checkpoints), `branch_gate --k 8` by default (pass@8 beside EM), the RLVR-1 budget rule and the self-proposal

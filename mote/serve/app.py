@@ -89,8 +89,7 @@ def _job_finished(rec) -> None:
         try:
             eng = Engine(path, device=STATE.get("device"), released=released)
             eng.gpu_gate = STATE["gate"]
-            if not released:
-                eng.warmup()
+            eng.warmup()  # kernels either way; graphs only when resident
             STATE["engine"] = eng
         except Exception:
             pass  # keep serving the EMA-synced weights; the checkpoint list still shows the run
@@ -598,7 +597,7 @@ def main(argv=None):
     released = jobs.has_runnable()  # a queued job starts right away: no point warming graphs it would release
     eng = Engine(ck, device=args.device, released=released)
     if released:
-        print("training queued: serving starts released (eager decode, per-reply arena)", flush=True)
+        print(f"training queued: serving starts released (eager decode, per-reply arena); kernels warmed in {eng.warmup():.1f} s", flush=True)
     else:
         print(f"warming up kernels ... ({eng.warmup():.1f} s)", flush=True)
     STATE["engine"] = eng

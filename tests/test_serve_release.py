@@ -54,7 +54,7 @@ def test_release_serves_the_same_bytes_and_keeps_the_prefix_store(tmp_path):
     assert done["stats"]["bytes"] == len(script)
     assert eng.prefix_cache.report()["branches"] >= 1
     assert eng.rewarm() == {"branches": 0, "bytes": 0, "ms": 0.0}  # nothing resident to warm while released
-    assert eng.warmup() == 0.0
+    assert eng.warmup() > 0.0 and eng.arena is None and eng._gd is None  # kernels warm through a throwaway arena
     assert eng.rearm() >= 0.0 and not eng.released and eng.arena is not None
     again, _ = _reply(eng, "one", script)
     assert [b["byte"] for b in again] == [b["byte"] for b in warm]
