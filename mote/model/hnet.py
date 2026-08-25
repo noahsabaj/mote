@@ -72,10 +72,22 @@ class HNetForCausalLM(nn.Module):
         self.pad_dimension = nn.Parameter(torch.zeros(D1 - D0, **fk)) if D1 > D0 else None
         self.decoder = make_mamba3_stack(cfg.decoder_layers, D0, cfg.mamba3, cfg.norm_eps, cfg.encoder_layers, **fk, residual_in_fp32=cfg.residual_in_fp32)
         self.lm_head = nn.Linear(D0, V, bias=False, **fk)
+        # rows past the vocabulary (272 − 266 spare protocol ids, 2026-08-24) are never targets and never
+        # sampled: every logit consumer goes through `head_logits`, which masks them to -inf
+        self.register_buffer("logit_mask", torch.zeros(V, device=device, dtype=torch.float32), persistent=False)
+        if V > cfg.vocab_size:
+            self.logit_mask[cfg.vocab_size:] = float("-inf")
         self.mbp_head = LCAHead(D0, cfg.mbp.n_layers, cfg.mbp.n_heads, cfg.mbp.d_ff, cfg.norm_eps, vocab=V, transition=getattr(cfg.mbp, "transition", False), **fk) if cfg.mbp.enabled else None
         if cfg.tie_embeddings:
             self.lm_head.weight = self.embeddings.weight
         self.init_weights()
+
+    def head_logits(self, h: torch.Tensor) -> torch.Tensor:
+        """lm_head with the padding rows masked to -inf (a no-op when pad_vocab_to == vocab_size)."""
+        logits = self.lm_head(h)
+        if self.cfg.pad_vocab_to > self.cfg.vocab_size:
+            logits = logits + self.logit_mask.to(logits.dtype)
+        return logits
 
     # ------------------------------------------------------------------------------
     def init_weights(self) -> None:
@@ -135,7 +147,7 @@ class HNetForCausalLM(nn.Module):
 
         h2 = (z.float() * ste_ones(routing.selected_probs.float()) + residual).to(h.dtype)
         h3 = self.decoder(h2)
-        logits = self.lm_head(h3)
+        logits = self.head_logits(h3)
 
         chunk_id = torch.cumsum(routing.boundary_mask.long(), dim=1) - 1
         chunk_id = chunk_id.clamp(min=0)
@@ -149,7 +161,7 @@ class HNetForCausalLM(nn.Module):
             start_state = torch.gather(h, 1, start[:, :, None].expand(-1, -1, D0))
             x = self.mbp_head.build_inputs(z, start_state, offset)
             x = self.mbp_head(x, chunk_id, mask)
-            mbp_logits = self.lm_head(x)
+            mbp_logits = self.head_logits(x)
             if self.mbp_head.transition is not None:
                 mbp_logits = mbp_logits + self.mbp_head.transition(input_ids).to(mbp_logits.dtype)  # teacher-forced previous byte
         return HNetOutput(logits, mbp_logits, routing, chunk_id, offset)
@@ -201,7 +213,7 @@ class HNetForCausalLM(nn.Module):
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)
         h2 = (z.float() + residual).to(h.dtype)
         h3, state.decoder = self.decoder(h2, caches=None, return_caches=True)
-        logits = self.lm_head(h3)
+        logits = self.head_logits(h3)
 
         chunk_id = torch.cumsum(routing.boundary_mask.long(), dim=1) - 1
         pos = torch.arange(L, device=input_ids.device)[None, :]
@@ -245,7 +257,7 @@ class HNetForCausalLM(nn.Module):
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)
         h2 = (z.float() + residual).to(h.dtype)
         h3, state.decoder = self.decoder(h2, caches=state.decoder, return_caches=True)
-        logits = self.lm_head(h3)
+        logits = self.head_logits(h3)
 
         if self.mbp_head is not None:
             bm = routing.boundary_mask[0]
@@ -363,7 +375,7 @@ class HNetForCausalLM(nn.Module):
         z = self.dechunk_layer.step(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)
         h2 = (z.float() + residual).to(h.dtype)
         h3, state.decoder = self.decoder.step(h2, state.decoder)
-        logits = self.lm_head(h3)
+        logits = self.head_logits(h3)
 
         mbp_logits = None
         if self.mbp_head is not None:
@@ -405,4 +417,4 @@ class HNetForCausalLM(nn.Module):
         cid = torch.cat(ids, dim=1)
         valid = torch.ones_like(cid, dtype=torch.bool)
         y = self.mbp_head(x, cid, valid)
-        return self.lm_head(y[:, -n:])
+        return self.head_logits(y[:, -n:])

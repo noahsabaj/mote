@@ -135,11 +135,18 @@ class JobQueue:
     def __init__(self, state_file: Path, gate: threading.Lock,
                  on_serve_sync: Optional[Callable[[dict, Dict[str, torch.Tensor], str, int], None]] = None,
                  on_finished: Optional[Callable[[JobRecord], None]] = None,
+                 on_started: Optional[Callable[[JobRecord], None]] = None,
+                 on_idle: Optional[Callable[[], None]] = None,
                  sync_steps: int = 100, ema_decay: float = 0.999, keep: int = 50):
         self.state_file = Path(state_file)
         self.gate = gate
         self.on_serve_sync = on_serve_sync
         self.on_finished = on_finished
+        # serving-beside-training root (2026-08-24 night): the engine releases its arena + graphs when a job
+        # starts and re-arms when nothing runnable is left (`on_idle` fires once per idle stretch)
+        self.on_started = on_started
+        self.on_idle = on_idle
+        self._idle_signalled = False
         self.sync_steps = sync_steps
         self.ema_decay = ema_decay
         self.keep = keep
@@ -224,6 +231,10 @@ class JobQueue:
                 self._trainer.request_stop("cancelled")
         return rec
 
+    def has_runnable(self) -> bool:
+        """A queued job that could start now (deferred OOM retries waiting for time or memory do not count)."""
+        return self._next_queued()[0] is not None
+
     def status(self) -> dict:
         with self._lock:
             cur = next((asdict(r) for r in self.jobs if r.state == "running"), None)
@@ -268,10 +279,21 @@ class JobQueue:
             return r, 0.0
         return None, max(wait, 0.05)
 
+    def _call(self, hook, *args) -> None:
+        if hook is None:
+            return
+        try:
+            hook(*args)
+        except Exception as ex:  # a serving-side hook never takes the queue down
+            print(f"job hook {getattr(hook, '__name__', hook)!s} failed: {ex!r}", flush=True)
+
     def _worker(self) -> None:
         while not self._shutdown:
             rec, wait = self._next_queued()
             if rec is None:
+                if not self._idle_signalled:
+                    self._idle_signalled = True
+                    self._call(self.on_idle)
                 self._wake.wait(timeout=wait)
                 self._wake.clear()
                 continue
@@ -279,6 +301,8 @@ class JobQueue:
                 rec.state = "running"
                 rec.started_at = time.time()
                 self._save()
+            self._idle_signalled = False
+            self._call(self.on_started, rec)
             try:
                 self._run_job(rec)
                 reason = self._trainer.stopped_reason if self._trainer else None

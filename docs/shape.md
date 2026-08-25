@@ -132,6 +132,22 @@ mid-training A/B (docs/results).
 
 Served = the last stage that passed its gate; every stage checkpoint sits in the studio picker.
 
+**Post-training additions signed 2026-08-24 night** (2607.16097, docs/research/pretrain-to-rl-scaling-2026-08-24.md):
+*RLVR-1's budget is ~20 % of the rung's total compute* (their 50M–100M optimum, rising with scale — ~34
+GPU-hours ≈ 300 eager GRPO steps at the flagship rung, or ~20 H100 credits), never taken from the trunk: the
+post-RL level is exponential in the base's loss (1 % of loss ≈ 12 % of reward; a decade of RL compute buys
+2–5 points). *pass@8* on the sim probe is reported beside EM by every gate (`branch_gate --k 8`; pass@64 on
+demand for the RL start gate) — pass@k tracks the base, pass@1 tracks RL. `mote/eval/rl_taxonomy.py` scores the
+before/after policies over each held-out state's legal actions and bins the change (ground-truth amplification /
+tail discovery / top-k correction / regression / wrong-mode amplification) by expert-line length; it runs on the
+SFT-1 → RLVR-1 pair and is read with the pass@64 guard (wrong-mode amplification is why pass@k stalls). An
+**SFT-1 arm with self-proposal traces** — K base rollouts in the sim, merged into a prefix tree and serialised
+between `<|think|>` (264) and `<|end_think|>` (265) before the verified commit — is queued against the
+pruned-expert traces, gated on sim pass@8/64 (answer-only SFT killed pass@k in their runs); it needs the sim's
+replay-to-step API (shared with the PIVOT item). The two ids are reserved now: `VOCAB_SIZE` 266,
+`pad_vocab_to` 272 in the default config (six spare rows for later protocol ids; the head masks rows ≥ 266 to
+−inf; old 264-row checkpoints keep their own config).
+
 Build order (all local): trainer schedules + snapshots + `:plain` mixes + the anneal/skip builder +
 `build_local` (built 2026-08-24, `tests/test_pipeline_stages.py`; live at the next daemon restart at an
 arm boundary) → mixes B and C (building 2026-08-24 on CPU; `data/sim_plain` + `data/sim_sft` built) →
@@ -207,7 +223,20 @@ The decode graph's conditional nodes move to `torch.cond` capture (torch 2.12) i
 holds. Gates: reply equality with today's path; under a running training slice, first byte < 1 s (the
 existing contract) and p95 per-byte decode ≤ 2× idle; trainer + serving peak ≤ 7.2 GB on the flagship
 preset (8.2 GB − the desktop's 0.7 − margin), measured in an idle window. Lands before launch if it passes,
-else at the first swap restart (a daemon restart; the trunk auto-resumes). A green-context SM partition
+else at the first swap restart (a daemon restart; the trunk auto-resumes).
+
+**Released serving (grilled and signed 2026-08-24 night, root; built the same night).** The desktop measured
+1.5–1.9 GB of the card (docs/results/2026-08-24-evening-gates.md), so the resident arena + decode graphs + MemPool
+(~0.5 GB) cost training the margin it needed: eight flagship arms OOM'd in a row. Now **while any training job
+runs the engine holds only its weights** — `Engine.release()` drops the arena, the captured graphs and the pool
+when a job starts (`JobQueue.on_started`); a reply allocates a per-reply arena from the shared allocator, the
+prefix store's CPU pages rehydrate it, decoding takes the eager per-byte path, and the memory goes back at the
+end of the reply; `Engine.rearm()` + one warm-up (~12 s) restore the fast path when nothing runnable is queued
+(`on_idle`). A checkpoint loaded at a job's end starts released when more work is queued. Gate restated: idle —
+unchanged (first byte < 1 s, p95 ≤ 2× idle); **during a job — first byte ≤ 1 s + the prefill of the context,
+per-byte ≤ 4× idle**; the 7-day trunk runs in the released mode throughout. The queue retries a CUDA OOM from the
+front once free + cached memory covers the failed run's peak (jobs.py), and `mote train start --front` jumps the
+queue. Hard isolation (green contexts) stays a measured later option. A green-context SM partition
 (`torch.cuda.GreenContext`, works on cu126, even SM counts on Ada, no forward-progress guarantee) stays a
 measured later option (`--serve-sms k`) — hard isolation at a permanent k/34 training cost.
 

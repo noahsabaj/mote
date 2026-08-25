@@ -93,7 +93,8 @@ def _make(cls, d: dict):
 @dataclass
 class MoteConfig:
     vocab_size: int = VOCAB_SIZE
-    pad_vocab_to: int = 264  # embedding rows rounded up for alignment; ids >= vocab_size are never produced
+    pad_vocab_to: int = 272  # embedding rows (16-aligned); logits for ids >= vocab_size are masked to -inf by the head
+    # (2026-08-24 night: 266 ids + 6 spare rows so future protocol ids need no checkpoint surgery; old checkpoints keep 264)
     d_model_outer: int = 256  # encoder / decoder width (bytes)
     encoder_layers: int = 2  # Mamba-3 layers, no FFN ("m" blocks in H-Net notation)
     decoder_layers: int = 2

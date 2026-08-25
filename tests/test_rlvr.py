@@ -63,7 +63,12 @@ def _argv(ck, out, extra=()):
             "--eval-every", "0", "--micro", "2", "--device", "cpu", "--max-minutes", "99", "--ckpt-minutes", "99999", *extra]
 
 
-def test_one_step_without_signal_then_with_signal(tmp_path):
+def test_one_step_without_signal_then_with_signal(tmp_path, monkeypatch):
+    # the tiny random model (272 embedding rows since 2026-08-24) puts <|assistant|> on top and would end every
+    # rollout at byte 0; the update needs non-empty rollouts, so only EOS ends one here
+    import mote.serve.engine as E
+    from mote.tokenizer import EOS_ID
+    monkeypatch.setattr(E, "STOP_IDS", {EOS_ID})
     ck = _tiny_ckpt(tmp_path)
     t = RlvrTrainer(_argv(ck, tmp_path / "rl0"))
     phases = [ph for ph, _ in t.run()]

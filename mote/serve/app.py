@@ -57,18 +57,39 @@ def _serve_sync(cfg_dict: dict, state_dict, name: str, step: int) -> None:
             print(f"rewarm after swap failed: {ex!r}", flush=True)
 
 
+def _job_started(rec) -> None:
+    """Serving-beside-training root (signed 2026-08-24 night): while a job runs the engine holds only its
+    weights — no arena, no decode graphs, no MemPool; replies decode eagerly with a per-reply arena."""
+    e = STATE["engine"]
+    if e is not None and not STATE["swapping"] and not e.released:
+        rep = e.release()
+        print(f"job {rec.id} started: serving released its arena + graphs ({rep['vram_used_mb']} MB resident)", flush=True)
+
+
+def _queue_idle() -> None:
+    """Nothing runnable is queued: back to the resident arena + graphs (one warm-up, ~12 s)."""
+    e = STATE["engine"]
+    if e is not None and not STATE["swapping"] and e.released:
+        secs = e.rearm()
+        print(f"queue idle: serving re-armed its arena + graphs ({secs:.1f} s warm-up)", flush=True)
+
+
 def _job_finished(rec) -> None:
-    """A finished job's final checkpoint becomes the served model (done jobs only)."""
+    """A finished job's final checkpoint becomes the served model (done jobs only). Released while more work
+    is queued (the next job starts within seconds); `_queue_idle` re-arms otherwise."""
     out = rec.out_dir
     path = (ROOT / out / "last.pt") if out else None
     if rec.state != "done" or path is None or not path.exists():
         return
+    jobs = STATE["jobs"]
+    released = bool(jobs is not None and jobs.has_runnable())
     with STATE["lock"]:
         STATE["swapping"] = True
         try:
-            eng = Engine(path, device=STATE.get("device"))
+            eng = Engine(path, device=STATE.get("device"), released=released)
             eng.gpu_gate = STATE["gate"]
-            eng.warmup()
+            if not released:
+                eng.warmup()
             STATE["engine"] = eng
         except Exception:
             pass  # keep serving the EMA-synced weights; the checkpoint list still shows the run
@@ -567,14 +588,19 @@ def main(argv=None):
         raise SystemExit("no checkpoint found; train one first or pass --checkpoint")
     print(f"loading {ck} ...", flush=True)
     STATE["device"] = args.device
-    eng = Engine(ck, device=args.device)
-    print(f"warming up kernels ... ({eng.warmup():.1f} s)", flush=True)
-    STATE["engine"] = eng
     gate = threading.Lock()
-    eng.gpu_gate = gate
     STATE["gate"] = gate
-    jobs = JobQueue(ROOT / ".mote" / "jobs.json", gate, on_serve_sync=_serve_sync, on_finished=_job_finished)
+    jobs = JobQueue(ROOT / ".mote" / "jobs.json", gate, on_serve_sync=_serve_sync, on_finished=_job_finished,
+                    on_started=_job_started, on_idle=_queue_idle)
     STATE["jobs"] = jobs
+    released = jobs.has_runnable()  # a queued job starts right away: no point warming graphs it would release
+    eng = Engine(ck, device=args.device, released=released)
+    if released:
+        print("training queued: serving starts released (eager decode, per-reply arena)", flush=True)
+    else:
+        print(f"warming up kernels ... ({eng.warmup():.1f} s)", flush=True)
+    STATE["engine"] = eng
+    eng.gpu_gate = gate
     jobs.start()
     print(json.dumps(eng.info(), indent=1), flush=True)
     uvicorn.run(app, host=args.host, port=args.port)

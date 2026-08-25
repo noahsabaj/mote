@@ -161,7 +161,8 @@ def main(argv=None):
     ap.add_argument("--device", default=None)
     ap.add_argument("--n-read", type=int, default=100)
     ap.add_argument("--n-sim", type=int, default=120)
-    ap.add_argument("--k", type=int, default=1, help="sim-QA samples per question (pass@k; the RL headroom numbers)")
+    ap.add_argument("--k", type=int, default=8, help="sim-QA samples per question: pass@8 is reported beside EM by default "
+                    "(2607.16097: pass@k tracks the base, pass@1 tracks RL); pass@64 on demand for the RL start gate")
     ap.add_argument("--val-data", default="data/flagship_mix")
     ap.add_argument("--val-domains", default="data/flagship_val")
     ap.add_argument("--val-batches", type=int, default=64)

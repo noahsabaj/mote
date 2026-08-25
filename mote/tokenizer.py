@@ -22,7 +22,12 @@ ASSISTANT_ID = 261
 # <|assistant|>, and generation resumes. One call id for every tool; the name before the colon routes.
 CALL_ID = 262
 RESULT_ID = 263
-VOCAB_SIZE = 264  # 256 bytes + 8 specials (the embedding was already padded to 264 rows)
+# Reserved 2026-08-24 night (signed) for the self-proposal SFT traces (2607.16097: the model's own sampled
+# alternatives serialised before the committed action): <|think|> alternatives <|end_think|> then the call.
+# Never produced by a pretrained model; the embedding is padded to 272 rows so ids up to 271 need no surgery.
+THINK_ID = 264
+END_THINK_ID = 265
+VOCAB_SIZE = 266  # 256 bytes + 10 specials; MoteConfig.pad_vocab_to (272) rounds the embedding up
 
 SPECIAL_NAMES = {
     BOS_ID: "<|bos|>",
@@ -33,6 +38,8 @@ SPECIAL_NAMES = {
     ASSISTANT_ID: "<|assistant|>",
     CALL_ID: "<|call|>",
     RESULT_ID: "<|result|>",
+    THINK_ID: "<|think|>",
+    END_THINK_ID: "<|end_think|>",
 }
 
 

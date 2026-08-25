@@ -131,6 +131,33 @@ the unit carries `TimeoutStopSec=180`, and the second restart waits for the arm'
 Queue after the fixes: `t3l_dense_4e-4` (running since 20:52) → `ab3_jepa_sig` (resume) → `nsweep_4` → the
 other four T3 arms → the nine flagship arms re-queued (they retry-wait for memory if the desktop is still heavy).
 
+## 22:00–23:00 — grilled and signed: the desktop, the E8 arms, released serving, the think ids
+
+Noah's calls (four rounds): Discord's hardware acceleration off and Plasma's virtual keyboard off — done from
+the shell at his request (Discord killed, `enableHardwareAcceleration: false` written to its settings for the next
+launch; kwin respawns `plasma-keyboard`, but the fresh process idles at 2 MiB — the 261 MB was its rendered scene;
+the proper toggle is System Settings → Keyboard → Virtual Keyboard → None). **Desktop share now ≈ 0.56 GB, daemon
+ceiling ≈ 7.3 GB.** The seven flagship-preset T2 arms (six MoE + a dense control on the same machine) run as four
+on-demand L4 jobs (`mote-t2-{0..3}-08242225`, ≈ $1.9, account A; `peak_gb` logged per record since `b5cfe21`).
+
+**Released serving (root, Noah's pick over the renumbered gate).** While a training job runs the engine keeps only
+its weights: `Engine.release()` on `JobQueue.on_started` drops the arena, the captured graphs and the MemPool; a
+reply allocates a per-reply arena from the shared allocator, the prefix store's CPU pages rehydrate it, decoding
+takes the eager path, the memory goes back after the reply; `Engine.rearm()` on `on_idle` (nothing runnable
+queued) restores the resident arena + graphs with one warm-up. A checkpoint loaded at a job's end starts released
+when more work is queued; the server boots released when a job is about to start. Gate restated in docs/shape.md
+(during a job: first byte ≤ 1 s + prefill, per-byte ≤ 4× idle; idle unchanged). The bench
+(`bench_serve_beside_training.py`) still needs an idle window to put numbers on the released mode.
+
+**Think ids reserved.** `<|think|>` = 264, `<|end_think|>` = 265, `VOCAB_SIZE` 266, `pad_vocab_to` 272 (six spare
+rows); `HNetForCausalLM.head_logits` masks rows ≥ 266 to −inf on every path (forward, prefill, continuation, step,
+the multi-byte head, the decode graph) so a padding row is never produced; old 264-row checkpoints load through
+their own saved config. The rows moved the tiny test models' random init: one RL test now ends rollouts on EOS only.
+
+Also built: `mote/eval/rl_taxonomy.py` (Table 14 of 2607.16097 over each held-out state's legal actions; tested on
+tiny checkpoints), `branch_gate --k 8` by default (pass@8 beside EM), the RLVR-1 budget rule and the self-proposal
+SFT arm in docs/shape.md.
+
 ## Other findings
 
 - Dynamo cannot trace the Triton kernels inside the custom ops (`triton_kernel_wrap`: "`_semantic` argument

@@ -193,7 +193,7 @@ class GraphDecoder:
         st.dechunk.last_value.copy_(z.to(st.dechunk.last_value.dtype))
         h2 = (z[:, None, :] + residual).to(h.dtype)
         h3 = self._mamba_stack_step(m.decoder, h2, st.decoder)
-        self.logits.copy_(m.lm_head(h3)[0, 0].float())
+        self.logits.copy_(m.head_logits(h3)[0, 0].float())
         if self.ret_dev:  # per-layer retention the mixers wrote into their device buffers this step
             self.ring_ret.index_copy_(0, slot, torch.stack([d["retention"] for d in self.ret_dev])[None])
         self.n_out.add_(1)
