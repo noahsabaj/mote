@@ -66,8 +66,8 @@
     <dd>{total}</dd>
     <dt>Chunks</dt>
     <dd>{trace.chunkCount}{trace.chunkCount ? ` · ${num(total / trace.chunkCount, 1)} B each` : ''}</dd>
-    <dt>Parallel</dt>
-    <dd>{pct(trace.mbpFraction(), 1)} of bytes came from the multi-byte head</dd>
+    <dt>From the multi-byte head</dt>
+    <dd>{pct(trace.mbpFraction(), 1)} of this reply's bytes (the footer's figure is the share of <em>drafts</em> accepted)</dd>
     {#if drawnAt}
       <dt>Drawn at</dt>
       <dd>{drawnAt}</dd>

@@ -60,12 +60,46 @@ def test_job_runs_to_done_and_syncs_and_finishes(tmp_path):
                  on_serve_sync=lambda cfg, sd, name, step: synced.append((name, step)),
                  on_finished=lambda rec: finished.append(rec.state))
     q.start()
-    rec = q.submit(_argv(tmp, tmp / "runA", steps=5))
+    rec = q.submit(_argv(tmp, tmp / "runA", steps=5), serve=True)  # on the air: its EMA syncs
     assert _wait(lambda: q.status()["current"] is None and any(r["id"] == rec.id and r["state"] == "done" for r in q.status()["recent"]))
     assert finished == ["done"]
     assert synced and synced[-1][0].endswith("/ema") and synced[-1][1] >= 4  # every 2 steps
     assert (tmp / "runA" / "last.pt").exists()
+    # a plain job (an arm) never touches what is served
+    synced.clear()
+    rec2 = q.submit(_argv(tmp, tmp / "runA2", steps=3))
+    assert _wait(lambda: any(r["id"] == rec2.id and r["state"] == "done" for r in q.status()["recent"]))
+    assert synced == [] and finished == ["done", "done"]
     q.shutdown()
+
+
+def test_serve_flag_can_be_toggled_and_survives_a_resume_copy(tmp_path, monkeypatch):
+    q = _fake_queue(tmp_path, monkeypatch)
+    a = tmp_path / "runA"
+    _FakeTrainer.plans[str(a)] = ["slow"]
+    q.start()
+    ra = q.submit(_argv(tmp_path, a), serve=True)
+    assert _wait(lambda: _by_id(q)[ra.id].state == "running")
+    assert q.current().serve and q.status()["current"]["serve"]
+    assert q.set_serve(None, False).id == ra.id and not q.current().serve  # the pick wins
+    assert q.set_serve(ra.id, True).serve
+    q.shutdown()
+    assert q.join(timeout=30.0)
+    copy = next(r for r in q.jobs if r.resumed)
+    assert copy.serve  # an interrupted job on the air comes back on the air
+
+
+def test_phase_is_read_from_the_trainer(tmp_path, monkeypatch):
+    q = _fake_queue(tmp_path, monkeypatch)
+    a = tmp_path / "runA"
+    _FakeTrainer.plans[str(a)] = ["slow"]
+    q.start()
+    assert q.phase() is None and q.status()["phase"] is None
+    q.submit(_argv(tmp_path, a))
+    assert _wait(lambda: q.phase() == "eval 2/16")
+    assert q.status()["phase"] == "eval 2/16"
+    q.shutdown()
+    q.join(30.0)
 
 
 def test_cancel_running_job_checkpoints_and_moves_on(tmp_path):
@@ -145,6 +179,7 @@ class _FakeTrainer:
         self.cfg = _cfg()
         self.step = 0
         self.stopped_reason = None
+        self.phase = "eval 2/16"  # what the queue's phase() reports while this runs
         key = str(self.out_dir)
         n = _FakeTrainer.attempts.get(key, 0)
         _FakeTrainer.attempts[key] = n + 1

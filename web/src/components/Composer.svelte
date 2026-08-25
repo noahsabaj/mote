@@ -5,6 +5,7 @@
   import { settings, showParam } from '../lib/stores/settings.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { autosize, dismissable, tip } from '../lib/actions';
+  import * as persist from '../lib/persist';
   import { looksLikeCommand, matching, parseCommand, type Command } from '../lib/commands';
   import { layout } from '../lib/layout.svelte';
   import SamplingControls from './SamplingControls.svelte';
@@ -43,8 +44,16 @@
     area?.focus();
   }
 
+  // The key hint is hidden on a phone once a message has been sent from this browser (R9, 2026-08-25):
+  // the first visit gets it, every later one gets the room back.
+  let hintFresh = $state<boolean>(!persist.read('hint.seen', false));
+
   function submit() {
     if (!canSubmit) return;
+    if (hintFresh) {
+      hintFresh = false;
+      persist.write('hint.seen', true);
+    }
     chat.enter(value);
     value = '';
     menuClosed = false;
@@ -292,7 +301,7 @@
     </Sheet>
   {/if}
 
-  <p class="hint" class:visible={focused || chat.busy}>
+  <p class="hint" class:visible={focused || chat.busy} class:fresh={hintFresh}>
     {#if chat.busy}
       Enter queues · Esc interrupts · / for commands
     {:else}
@@ -501,7 +510,7 @@
   }
 
   @media (max-width: 34rem) {
-    .hint {
+    .hint:not(.fresh) {
       display: none;
     }
     /* The checkpoint name is what the row is for; Sampling gives up its word and its summary

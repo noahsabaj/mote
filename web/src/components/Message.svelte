@@ -22,6 +22,26 @@
   const streaming = $derived(chat.streamingId === turn.id);
   const text = $derived(streaming && trace ? trace.text : turn.content);
   const empty = $derived(streaming && text.length === 0);
+  // A finished reply of only whitespace or control bytes renders as nothing: say what it is (QA 2026-08-24).
+  const blank = $derived(!streaming && !!turn.stats && turn.stats.bytes > 0 && !/\S/.test(turn.content));
+
+  // "Waiting" arrives from the server the moment a reply queues behind something slow (a cold prompt read on
+  // the CPU, a weight swap); it is shown only once it has lasted long enough to be worth a sentence.
+  let waited = $state(false);
+  $effect(() => {
+    const w = streaming ? turn.waiting : null;
+    waited = false;
+    if (!w) return;
+    const t = setTimeout(() => (waited = true), 3000);
+    return () => clearTimeout(t);
+  });
+  const waitingText = $derived.by(() => {
+    const w = turn.waiting;
+    if (!w) return '';
+    if (w.on === 'prefill') return `Waiting — reading ${w.bytes ? `${(w.bytes / 1024).toFixed(1)} KB of` : 'the'} prompt on the CPU`;
+    if (w.on === 'swap') return 'Waiting — the served weights are being swapped';
+    return `Waiting — ${w.on}`;
+  });
   // A turn that failed before its first byte has a trace object but nothing in it, so the
   // byte-level tools and Copy would open on an empty reply. Only Retry is any use there.
   const hasBytes = $derived(!!trace && trace.count > 0);
@@ -206,6 +226,12 @@
           {#if empty}<span class="waiting" aria-hidden="true"></span>{/if}
         {/if}
       </div>
+      {#if empty && waited && waitingText}
+        <p class="notice" role="status">{waitingText}</p>
+      {/if}
+      {#if blank}
+        <p class="notice">({turn.stats?.bytes} bytes, none printable)</p>
+      {/if}
     {/if}
 
     {#if turn.error}
@@ -224,7 +250,7 @@
               0
             )} B/s
             {#if turn.stats.mbp_proposed > 0}
-              · {pct(turn.stats.mbp_accept_rate)} multi-byte accepted
+              · {pct(turn.stats.mbp_accept_rate)} of drafts accepted
             {/if}
             {#if turn.ttfbMs !== undefined}· first byte in {num(turn.ttfbMs, 0)} ms{/if}
             {#if turn.prefix && turn.prefix.reused > 0}· {turn.prefix.reused} B reused{/if}

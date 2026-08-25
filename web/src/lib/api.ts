@@ -87,6 +87,13 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id })
     }),
+  /** put a running or queued job on the air (its EMA answers chats), or take it off */
+  trainingServe: (id: string | null, on: boolean) =>
+    request<JobsStatus>('/api/training/serve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, on })
+    }),
   loadChallenger: (id: string) =>
     request<ModelInfo>('/api/challenger/load', {
       method: 'POST',

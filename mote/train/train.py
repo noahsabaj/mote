@@ -541,6 +541,9 @@ class Trainer:
             log_path.rename(out_dir / f"log.{n}.jsonl")
         self.log_f = open(log_path, "a", encoding="utf-8")
         self.tokens_per_step = args.batch_size * args.seq_len * args.grad_accum
+        # What the run is doing right now, read by the daemon for the studio ("train", "eval 3/16",
+        # "eval ema 3/16", "checkpoint") — a reply that waits on the GPU gate can say why (2026-08-25).
+        self.phase = "train"
         self.total_steps = args.max_steps
         self.time_driven = args.max_steps == 0  # schedules follow wall-clock progress; step count is only an estimate
         self.budget_sec = args.max_minutes * 60
@@ -563,6 +566,13 @@ class Trainer:
         self.stopped_reason = reason
 
     def save(self):
+        self.phase = "checkpoint"
+        try:
+            self._save_checkpoint()
+        finally:
+            self.phase = "train"
+
+    def _save_checkpoint(self):
         extra = {"generator_state": self.gen.get_state().tolist(), "total_steps": self.total_steps,
                  "sched_total": self.sched_total, "schedule": self.args.schedule,
                  "n_params": self.n_params, "bytes_seen": self.step * self.tokens_per_step,
@@ -598,21 +608,27 @@ class Trainer:
             return evaluate_batches(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device,
                                     target_ratio, spread=args.eval_spread)
 
-        def drain(gen):
+        def drain(gen, label):
+            i = 0
             while True:
+                self.phase = f"{label} {i + 1}/{args.eval_batches}"
                 try:
                     next(gen)
                 except StopIteration as done:
                     return done.value
+                i += 1
                 yield ("slice", None)
 
-        ev = yield from drain(windows())
-        if self.ema is not None:
-            raw = self._swap_in_ema()
-            try:
-                ev["val_bpb_ema"] = (yield from drain(windows()))["val_bpb"]
-            finally:
-                self._restore(raw)
+        try:
+            ev = yield from drain(windows(), "eval")
+            if self.ema is not None:
+                raw = self._swap_in_ema()
+                try:
+                    ev["val_bpb_ema"] = (yield from drain(windows(), "eval ema"))["val_bpb"]
+                finally:
+                    self._restore(raw)
+        finally:
+            self.phase = "train"
         return ev
 
     def _train_step(self, target_ratio: float):

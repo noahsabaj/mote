@@ -23,7 +23,6 @@
   let runs = $state<TrainingRun[]>([]);
   // the daemon's job queue (docs/shape.md): training runs the studio owns
   let jobs = $state<JobsStatus | null>(null);
-  let jobArgs = $state('--preset local --data data/local_mix --out runs/studio_job --optimizer muon --max-minutes 30');
   let jobBusy = $state(false);
   let jobError = $state<string | null>(null);
 
@@ -36,14 +35,14 @@
     }
   }
 
-  async function startJob() {
-    const argv = jobArgs.trim().split(/\s+/);
-    if (!argv.length || jobBusy) return;
+  // Jobs are started from the terminal (`mote train start … --serve`); the sheet is for watching them,
+  // stopping them, and choosing which one is on the air (R8 + R1, signed 2026-08-25).
+  async function serveJob(id: string | null, on: boolean) {
+    if (jobBusy) return;
     jobBusy = true;
     try {
-      jobs = await api.trainingStart(argv);
+      jobs = await api.trainingServe(id, on);
       jobError = null;
-      void loadRuns();
     } catch (e) {
       jobError = e instanceof ApiError ? e.message : String(e);
     } finally {
@@ -232,17 +231,37 @@
   {#if jobError}<p class="fail"><Icon name="alert" size={13} />{jobError}</p>{/if}
   {#if jobs?.current}
     <p class="jobline" title={argline(jobs.current)}>
-      <span class="live">running</span> <span class="mono">{runOf(jobs.current)}</span>
+      <span class="live">running</span>
+      {#if jobs.phase && jobs.phase !== 'train'}<span class="phase">{jobs.phase}</span>{/if}
+      <span class="mono">{runOf(jobs.current)}</span>
+      {#if jobs.current.serve}<span class="air">on the air</span>{/if}
       <span class="meta args">{argline(jobs.current)}</span>
+      <button
+        class="quiet"
+        disabled={jobBusy}
+        onclick={() => serveJob(jobs?.current?.id ?? null, !jobs?.current?.serve)}
+        title={jobs.current.serve
+          ? 'Stop answering chats from this run; the pinned checkpoint takes over'
+          : 'Answer chats from this run’s EMA while it trains; its final checkpoint becomes the pin'}
+      >
+        {jobs.current.serve ? 'Take off the air' : 'Put on the air'}
+      </button>
     </p>
   {:else}
-    <p class="meta">Nothing running. The queue is sequential; a chat makes a run yield for the length of the reply.</p>
+    <p class="meta">
+      Nothing running. Start one from the terminal: <span class="mono">mote train start … --serve</span> puts it on
+      the air. The queue is sequential; while a job runs, chats are answered from the CPU.
+    </p>
   {/if}
   {#each jobs?.queued ?? [] as j, i (j.id)}
     <p class="jobline" title={argline(j)}>
       <span class="meta">{i + 1} · queued{j.resumed ? ' (resume)' : ''}{j.retry_of ? ` · retry ${j.retries ?? ''}`.trimEnd() : ''}{j.needs_bytes ? ` · waits for ${(j.needs_bytes / 2 ** 30).toFixed(1)} GB free` : ''}</span>
       <span class="mono">{runOf(j)}</span>
+      {#if j.serve}<span class="air">on the air</span>{/if}
       <span class="meta args">{argline(j)}</span>
+      <button class="quiet" disabled={jobBusy} onclick={() => serveJob(j.id, !j.serve)} aria-label="{j.serve ? 'Take' : 'Put'} {runOf(j)} {j.serve ? 'off' : 'on'} the air">
+        {j.serve ? 'Off the air' : 'On the air'}
+      </button>
       <button class="quiet" disabled={jobBusy} onclick={() => stopJob(j.id)} aria-label="Cancel {runOf(j)}">Cancel</button>
     </p>
   {/each}
@@ -252,17 +271,6 @@
       <span class="meta args">{argline(j)}</span>
     </p>
   {/each}
-  <form
-    class="jobrow"
-    onsubmit={(e) => {
-      e.preventDefault();
-      void startJob();
-    }}
-  >
-    <input class="mono" bind:value={jobArgs} aria-label="Training arguments" />
-    <button class="btn accent" disabled={jobBusy}>Start</button>
-  </form>
-  <p class="meta">Args exactly as <span class="mono">python -m mote.train.train</span> takes them; the run lands in the list below.</p>
 </section>
 
 {#if runsError}
@@ -402,15 +410,20 @@
     justify-content: space-between;
     margin-bottom: 0.3rem;
   }
-  .jobrow input {
-    flex: 1;
-    font-size: 0.8rem;
-    padding: 0.4rem 0.55rem;
-    border: 1px solid var(--rule);
-    border-radius: calc(var(--radius) - 2px);
-    background: var(--bg);
-    color: var(--ink);
-    min-width: 0;
+  /* what the running job is doing (eval 3/16, checkpoint) and which job answers chats */
+  .phase,
+  .air {
+    flex: none;
+    font-size: 0.6875rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .air {
+    padding: 0 0.35em;
+    border: 1px solid var(--accent-line);
+    border-radius: 999px;
+    color: var(--accent-ink);
   }
   .jobline {
     display: flex;

@@ -24,7 +24,17 @@
   <section>
     <p class="note"><span class="tag">{info.status}</span> {info.status_note}</p>
     {#if info.live}
-      <p class="note"><span class="tag">live</span> serving {info.live} — a training job's EMA is answering chats</p>
+      <p class="note">
+        <span class="tag">on the air</span>
+        <span class="mono">{displayName(info.live.split('/ema@')[0])}</span> is training and its EMA answers chats;
+        loading a checkpoint takes it off the air.
+      </p>
+    {/if}
+    {#if info.serving_device === 'cpu'}
+      <p class="note">
+        <span class="tag">cpu</span> replies come from the CPU while a training job owns the GPU — slower (about 45
+        bytes/s, a long first read takes seconds); serving returns to the GPU when the queue idles.
+      </p>
     {/if}
   </section>
 
@@ -122,8 +132,22 @@
       </p>
     {/if}
     <dl class="rows">
-      <dt>Serving</dt>
-      <dd>{loadedCkpt ? displayName(loadedCkpt.id) : displayName(info.checkpoint.path)}</dd>
+      <dt>Answering</dt>
+      <dd>
+        {#if info.live}
+          the EMA of <span class="mono">{displayName(info.live.split('/ema@')[0])}</span> at step {info.live.split('@')[1]} — a job on the air
+        {:else}
+          {loadedCkpt ? displayName(loadedCkpt.id) : displayName(info.checkpoint.path)}
+        {/if}
+        {#if info.serving_device === 'cpu'}
+          · on the CPU while training runs
+        {/if}
+      </dd>
+      <dt>Pinned</dt>
+      <dd>
+        {info.pin ? displayName(info.pin) : '—'}
+        <span class="meta">— the boot default; a load here re-pins, a finished job on the air pins itself</span>
+      </dd>
       <dt>Challenger</dt>
       <dd>
         {#if info.challenger}
@@ -280,5 +304,8 @@
     font-size: 0.75rem;
     text-decoration: underline;
     text-underline-offset: 2px;
+  }
+  .mono {
+    font-family: var(--font-mono);
   }
 </style>

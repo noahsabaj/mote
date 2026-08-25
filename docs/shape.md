@@ -240,6 +240,21 @@ queue. Hard isolation (green contexts) stays a measured later option. A green-co
 (`torch.cuda.GreenContext`, works on cu126, even SM counts on Ada, no forward-progress guarantee) stays a
 measured later option (`--serve-sms k`) — hard isolation at a permanent k/34 training cost.
 
+**Serving policy and device (grilled and signed 2026-08-25 after the web QA; built the same night).** Two things
+the released mode left open. *Policy (root):* the served model is the **pin** (`.mote/config.json`'s `checkpoint`)
+unless a job is **on the air** — `mote train start … --serve` (or the Training sheet's "Put on the air",
+`POST /api/training/serve`); its EMA answers while it runs (the EMA sync is skipped for every other job) and its
+final checkpoint is pinned when it finishes. Screening arms never touch what is served (a queue of 15 arms used to
+mean 15 silent swaps — the night's chat answered 512 bytes of whitespace from a 30-minute checkpoint). A manual load
+wins: it re-pins and takes the running job off the air for the rest of its life, with a notice. *Device (root):*
+**while any job runs the engine lives on the CPU** — `Engine.moved("cpu")` carries the weights, the prefix-store
+budget, the tools and the provenance across; no arena, graphs, pool or GPU gate — so training gets the whole card
+and a reply never waits for it (measured: 35M 1.5 KB prefill 0.68 s then ~50 B/s; 96M ~45 B/s; a cold 4.6 KB read
+10 s; continuations stay cheap through the prefix store). When the queue drains the engine moves back to the GPU with
+arena + graphs and one warm-up. The reply says why it is waiting (`{"type":"waiting","on":"prefill"|"swap"}`) so the
+CPU's cold-read cliff is a sentence, not a cursor. The released mode stays as a mechanism (an engine on the GPU
+beside a job) but the daemon no longer runs it; **the 7-day trunk is launched with `--serve`**.
+
 Also settled the same evening: **fp8** linears parked until the 1B (`_scaled_mm` runs on the 4060 Ti;
 tensorwise e4m3 = 3.8 % relative GEMM error; GEMMs are 13–22 % of the step at d = 768/512, where torchao's
 own guidance says the cast overhead can make it a loss — the six-shape measurement lives in

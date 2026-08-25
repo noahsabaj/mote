@@ -40,7 +40,8 @@ mimetypes.add_type("application/manifest+json", ".webmanifest")
 app = FastAPI(title="Mote Studio")
 STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "token": None,
                "challenger": None, "challenger_loading": False,  # challenger: a second Engine for blind A/B (docs/prefs.md)
-               "jobs": None, "gate": None}  # the training job queue and the GPU gate it shares with serving (docs/shape.md)
+               "jobs": None, "gate": None,  # the training job queue and the GPU gate it shares with serving (docs/shape.md)
+               "config_file": ROOT / ".mote" / "config.json"}  # where the pin (the boot checkpoint) lives
 
 
 def _serve_sync(cfg_dict: dict, state_dict, name: str, step: int) -> None:
@@ -58,41 +59,90 @@ def _serve_sync(cfg_dict: dict, state_dict, name: str, step: int) -> None:
             print(f"rewarm after swap failed: {ex!r}", flush=True)
 
 
-def _job_started(rec) -> None:
-    """Serving-beside-training root (signed 2026-08-24 night): while a job runs the engine holds only its
-    weights — no arena, no decode graphs, no MemPool; replies decode eagerly with a per-reply arena."""
-    e = STATE["engine"]
-    if e is not None and not STATE["swapping"] and not e.released:
-        rep = e.release()
-        print(f"job {rec.id} started: serving released its arena + graphs ({rep['vram_used_mb']} MB resident)", flush=True)
-
-
-def _queue_idle() -> None:
-    """Nothing runnable is queued: back to the resident arena + graphs (one warm-up, ~12 s)."""
-    e = STATE["engine"]
-    if e is not None and not STATE["swapping"] and e.released:
-        secs = e.rearm()
-        print(f"queue idle: serving re-armed its arena + graphs ({secs:.1f} s warm-up)", flush=True)
-
-
-def _job_finished(rec) -> None:
-    """A finished job's final checkpoint becomes the served model (done jobs only). Released while more work
-    is queued (the next job starts within seconds); `_queue_idle` re-arms otherwise."""
-    out = rec.out_dir
-    path = (ROOT / out / "last.pt") if out else None
-    if rec.state != "done" or path is None or not path.exists():
-        return
+def _serve_device() -> str:
+    """Where the studio's engine belongs right now: the CPU while any job runs or is about to, the configured
+    device (the GPU) when the queue idles (signed 2026-08-25: training gets the whole card, replies never wait
+    for it; ~45 B/s on the CPU vs 85–190 on the GPU, a cold 4.6 KB read is 10 s)."""
     jobs = STATE["jobs"]
-    released = bool(jobs is not None and jobs.has_runnable())
+    busy = jobs is not None and (jobs.current() is not None or jobs.has_runnable())
+    return "cpu" if busy else (STATE.get("device") or "cpu")
+
+
+def _move_engine(device: str, warm: bool) -> None:
+    e = STATE["engine"]
+    if e is None or e.device.type == torch.device(device).type:
+        return
     with STATE["lock"]:
         STATE["swapping"] = True
         try:
-            eng = Engine(path, device=STATE.get("device"), released=released)
-            eng.gpu_gate = STATE["gate"]
-            eng.warmup()  # kernels either way; graphs only when resident
-            STATE["engine"] = eng
-        except Exception:
-            pass  # keep serving the EMA-synced weights; the checkpoint list still shows the run
+            moved = e.moved(device)
+            STATE["engine"] = moved
+            if warm:
+                print(f"serving on {device}: warm-up {moved.warmup():.1f} s", flush=True)
+            else:
+                print(f"serving on {device}", flush=True)
+        except Exception as ex:
+            print(f"moving the engine to {device} failed: {ex!r}", flush=True)
+        finally:
+            STATE["swapping"] = False
+
+
+def _job_started(rec) -> None:
+    """A job owns the GPU: serving moves to the CPU (same weights, fresh prefix store)."""
+    _move_engine("cpu", warm=False)
+
+
+def _queue_idle() -> None:
+    """Nothing runnable is queued: serving comes back to the GPU with its arena + graphs (one warm-up)."""
+    _move_engine(STATE.get("device") or "cpu", warm=True)
+
+
+def _pin_path() -> Optional[str]:
+    try:
+        return json.loads(Path(STATE["config_file"]).read_text(encoding="utf-8")).get("checkpoint")
+    except Exception:
+        return None
+
+
+def _write_pin(path: Path) -> None:
+    """The pin is the boot default in .mote/config.json: a manual load or a finished --serve job sets it."""
+    f = Path(STATE["config_file"])
+    try:
+        cfg = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    except Exception:
+        cfg = {}
+    cfg["checkpoint"] = ckpt_id(path)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    tmp.replace(f)
+
+
+def _load_engine(path: Path) -> Engine:
+    """A fresh engine for `path` on the device serving belongs on right now; warmed only on the GPU."""
+    device = _serve_device()
+    eng = Engine(path, device=device)
+    eng.gpu_gate = STATE["gate"]
+    if eng.device.type == "cuda":
+        eng.warmup()
+    return eng
+
+
+def _job_finished(rec) -> None:
+    """A finished job that was on the air pins its final checkpoint and serves it; anything else leaves the
+    served model alone (a queue of screening arms used to replace the chat model every time one ended)."""
+    out = rec.out_dir
+    path = (ROOT / out / "last.pt") if out else None
+    if rec.state != "done" or not rec.serve or path is None or not path.exists():
+        return
+    with STATE["lock"]:
+        STATE["swapping"] = True
+        try:
+            STATE["engine"] = _load_engine(path)
+            _write_pin(path)
+            print(f"job {rec.id} finished on the air: pinned and serving {ckpt_id(path)}", flush=True)
+        except Exception as ex:
+            print(f"serving the finished job's checkpoint failed: {ex!r}", flush=True)
         finally:
             STATE["swapping"] = False
 PREFS = PrefStore()
@@ -169,8 +219,15 @@ def health():
 
 @app.get("/api/model")
 def model_info():
-    info = engine().info()
+    e = engine()
+    info = e.info()
     info["challenger"] = challenger_info()
+    # what is answering and why (signed 2026-08-25): the pin, the device, and the job on the air if any
+    info["pin"] = _pin_path()
+    info["serving_device"] = e.device.type
+    jobs = STATE["jobs"]
+    cur = jobs.current() if jobs is not None else None
+    info["following"] = (cur.out_dir or cur.id) if cur is not None and cur.serve else None
     return info
 
 
@@ -236,25 +293,54 @@ def load_checkpoint(body: LoadBody):
         STATE["swapping"] = True
         try:
             old = STATE["engine"]
+            STATE["engine"] = None
             del old
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            eng = Engine(path, device=STATE.get("device"))
-            eng.gpu_gate = STATE["gate"]
-            eng.warmup()
-            STATE["engine"] = eng
+            STATE["engine"] = _load_engine(path)
+            _write_pin(path)  # the pick is the new pin
         finally:
             STATE["swapping"] = False
-    return STATE["engine"].info()
+    # The pick wins: a job that was on the air stops following for the rest of its life (signed 2026-08-25).
+    jobs = STATE["jobs"]
+    unfollowed = None
+    if jobs is not None:
+        cur = jobs.current()
+        if cur is not None and cur.serve:
+            jobs.set_serve(cur.id, False)
+            unfollowed = cur.out_dir or cur.id
+            print(f"manual load of {body.id}: no longer following {unfollowed}", flush=True)
+    info = model_info()
+    if unfollowed:
+        info["unfollowed"] = unfollowed
+    return info
 
 
 class TrainStartBody(BaseModel):
     args: list
     front: bool = False  # ahead of everything queued
+    serve: bool = False  # on the air: EMA while it runs, final checkpoint pinned when it ends
 
 
 class TrainStopBody(BaseModel):
     id: Optional[str] = None
+
+
+class TrainServeBody(BaseModel):
+    id: Optional[str] = None  # None = the running job
+    on: bool = True
+
+
+@app.post("/api/training/serve")
+def training_serve(body: TrainServeBody):
+    """Put a running or queued job on the air, or take it off ("Put on the air" in the Training sheet)."""
+    jobs = STATE["jobs"]
+    if jobs is None:
+        raise HTTPException(503, "job queue not running")
+    rec = jobs.set_serve(body.id, body.on)
+    if rec is None:
+        raise HTTPException(404, "no such running or queued job")
+    return jobs.status()
 
 
 @app.post("/api/training/start")
@@ -264,7 +350,7 @@ def training_start(body: TrainStartBody):
     if jobs is None:
         raise HTTPException(503, "job queue not running")
     try:
-        rec = jobs.submit([str(a) for a in body.args], front=body.front)
+        rec = jobs.submit([str(a) for a in body.args], front=body.front, serve=body.serve)
     except SystemExit:
         raise HTTPException(400, "bad training args (see `python -m mote.train.train --help`)")
     return {"submitted": rec.id, **jobs.status()}
@@ -606,14 +692,16 @@ def main(argv=None):
     jobs = JobQueue(ROOT / ".mote" / "jobs.json", gate, on_serve_sync=_serve_sync, on_finished=_job_finished,
                     on_started=_job_started, on_idle=_queue_idle)
     STATE["jobs"] = jobs
-    released = jobs.has_runnable()  # a queued job starts right away: no point warming graphs it would release
-    eng = Engine(ck, device=args.device, released=released)
-    if released:
-        print(f"training queued: serving starts released (eager decode, per-reply arena); kernels warmed in {eng.warmup():.1f} s", flush=True)
-    else:
-        print(f"warming up kernels ... ({eng.warmup():.1f} s)", flush=True)
-    STATE["engine"] = eng
+    # A queued job starts right away and owns the GPU: serving starts on the CPU and moves to the GPU when the
+    # queue idles (signed 2026-08-25). No warm-up on the CPU: there is nothing to JIT there.
+    device = _serve_device()
+    eng = Engine(ck, device=device)
     eng.gpu_gate = gate
+    if eng.device.type == "cuda":
+        print(f"warming up kernels ... ({eng.warmup():.1f} s)", flush=True)
+    else:
+        print(f"training queued: serving on the {device} until the queue idles", flush=True)
+    STATE["engine"] = eng
     jobs.start()
     print(json.dumps(eng.info(), indent=1), flush=True)
     # uvicorn captures SIGTERM/SIGINT for its graceful shutdown, then restores the handlers it found and

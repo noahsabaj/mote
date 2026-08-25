@@ -94,6 +94,10 @@ class JobRecord:
     ended_at: Optional[float] = None
     error: Optional[str] = None
     resumed: bool = False  # re-enqueued after an interruption: Trainer gets --resume
+    # Opted in to serving (signed 2026-08-25): its EMA goes on the air every `sync_steps` and its final
+    # checkpoint becomes the pin when it finishes. Arms never set it; the trunk and the branches do. A manual
+    # checkpoint load while it runs clears it for the rest of the job ("the pick wins").
+    serve: bool = False
     retries: int = 0  # OOM retries already spent by this lineage (a retry copy carries retries + 1)
     retry_of: Optional[str] = None
     not_before: float = 0.0  # a retry waits at least until then...
@@ -184,7 +188,7 @@ class JobQueue:
 
     @staticmethod
     def _resume_copy(rec: JobRecord, **fields) -> JobRecord:
-        fields = {"resumed": True, "retries": rec.retries, **fields}
+        fields = {"resumed": True, "retries": rec.retries, "serve": rec.serve, **fields}
         nxt = JobRecord(id=secrets.token_hex(4), argv=list(rec.argv), **fields)
         if "--resume" not in nxt.argv:
             nxt.argv.append("--resume")
@@ -202,9 +206,9 @@ class JobQueue:
             self._thread = threading.Thread(target=self._worker, name="mote-jobs", daemon=True)
             self._thread.start()
 
-    def submit(self, argv: List[str], front: bool = False) -> JobRecord:
+    def submit(self, argv: List[str], front: bool = False, serve: bool = False) -> JobRecord:
         _argparser_for(argv).parse_args(_job_args(argv))  # reject malformed args at submit time, not hours later
-        rec = JobRecord(id=secrets.token_hex(4), argv=list(argv))
+        rec = JobRecord(id=secrets.token_hex(4), argv=list(argv), serve=serve)
         with self._lock:
             if front:
                 self._insert_front(rec)
@@ -235,11 +239,32 @@ class JobQueue:
         """A queued job that could start now (deferred OOM retries waiting for time or memory do not count)."""
         return self._next_queued()[0] is not None
 
+    def current(self) -> Optional[JobRecord]:
+        with self._lock:
+            return next((r for r in self.jobs if r.state == "running"), None)
+
+    def phase(self) -> Optional[str]:
+        """What the running trainer is doing right now ("train", "eval 3/16", "checkpoint"), for the studio."""
+        t = self._trainer
+        return getattr(t, "phase", None) if t is not None else None
+
+    def set_serve(self, job_id: Optional[str], on: bool) -> Optional[JobRecord]:
+        """Put a job on the air (its EMA + final checkpoint) or take it off; None = the running one."""
+        with self._lock:
+            rec = (next((r for r in self.jobs if r.state == "running"), None) if job_id is None
+                   else next((r for r in self.jobs if r.id == job_id), None))
+            if rec is None or rec.state not in ("running", "queued"):
+                return None
+            rec.serve = on
+            self._save()
+        return rec
+
     def status(self) -> dict:
         with self._lock:
             cur = next((asdict(r) for r in self.jobs if r.state == "running"), None)
             return {
                 "current": cur,
+                "phase": self.phase() if cur else None,
                 "queued": [asdict(r) for r in self.jobs if r.state == "queued"],
                 "recent": [asdict(r) for r in reversed(self.jobs) if r.state in ("done", "failed", "cancelled", "interrupted")][:10],
             }
@@ -361,7 +386,7 @@ class JobQueue:
                 continue
             ema.update(t.model)
             steps_since_sync += 1
-            if self.on_serve_sync and steps_since_sync >= self.sync_steps:
+            if self.on_serve_sync and rec.serve and steps_since_sync >= self.sync_steps:  # only a job on the air
                 steps_since_sync = 0
                 with self.gate:
                     self.on_serve_sync(t.cfg.to_dict(), ema.state_dict(t.model),

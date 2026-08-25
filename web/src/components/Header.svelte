@@ -88,6 +88,13 @@
   let surfacesOpen = $state(false);
   let surfacesTrigger = $state<HTMLElement | null>(null);
 
+  // Three named choices instead of an icon that cycles: on a phone the state of a cycle is a glyph you have
+  // to decode (R6, 2026-08-25).
+  const THEMES = ['system', 'light', 'dark'] as const;
+  const THEME_LABELS: Record<(typeof THEMES)[number], string> = { system: 'System', light: 'Light', dark: 'Dark' };
+  let themeOpen = $state(false);
+  let themeTrigger = $state<HTMLElement | null>(null);
+
   function openSurface(view: (typeof SURFACES)[number]['view']) {
     surfacesOpen = false;
     onopen(view);
@@ -192,7 +199,7 @@
             </span>
           </div>
           <p class="meta keys">
-            {MOD}K conversations · Esc to the composer
+            {MOD}K conversations · Esc to the composer · the newest 30 are kept
           </p>
         </div>
       {/if}
@@ -231,14 +238,43 @@
         </div>
       {/if}
     </div>
-    <button
-      class="quiet theme"
-      onclick={() => ui.cycleTheme()}
-      title={`Theme: ${ui.theme} — click to change`}
-      aria-label={`Theme: ${ui.theme}. Click to change.`}
-    >
-      <Icon name={ui.theme === 'light' ? 'sun' : ui.theme === 'dark' ? 'moon' : 'auto'} size={15} />
-    </button>
+    <div class="menu-anchor surfaces">
+      <button
+        bind:this={themeTrigger}
+        class="quiet theme"
+        aria-expanded={themeOpen}
+        aria-haspopup="true"
+        onclick={() => (themeOpen = !themeOpen)}
+        aria-label={`Theme: ${THEME_LABELS[ui.theme]}`}
+        title={`Theme: ${THEME_LABELS[ui.theme]}`}
+      >
+        <Icon name={ui.theme === 'light' ? 'sun' : ui.theme === 'dark' ? 'moon' : 'auto'} size={15} />
+      </button>
+      {#if themeOpen}
+        <div
+          class="menu panels theme-menu"
+          role="menu"
+          aria-label="Theme"
+          use:dismissable={{ onDismiss: () => (themeOpen = false), trigger: themeTrigger }}
+        >
+          {#each THEMES as t (t)}
+            <button
+              class="item"
+              role="menuitemradio"
+              aria-checked={ui.theme === t}
+              onclick={() => {
+                ui.setTheme(t);
+                themeOpen = false;
+              }}
+            >
+              <Icon name={t === 'light' ? 'sun' : t === 'dark' ? 'moon' : 'auto'} size={15} />
+              <span class="label"><span class="name">{THEME_LABELS[t]}</span></span>
+              {#if ui.theme === t}<Icon name="check" size={14} />{/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
   </nav>
 </header>
 
@@ -320,7 +356,15 @@
   .panels .item:focus-visible {
     background: var(--surface);
   }
-  .panels .item[aria-current='true'] .name {
+  .panels .item[aria-current='true'] .name,
+  .theme-menu .item[aria-checked='true'] .name {
+    color: var(--accent-ink);
+  }
+  .theme-menu .item {
+    min-width: 9rem;
+  }
+  .theme-menu .item > :global(svg:last-child) {
+    margin-left: auto;
     color: var(--accent-ink);
   }
   .panels .label {

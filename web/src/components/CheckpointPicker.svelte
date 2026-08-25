@@ -27,6 +27,13 @@
   // Before the first list arrives the pill still has something true to say: /api/model names
   // the checkpoint it is serving.
   const label = $derived(displayName(loaded?.id ?? model.info?.checkpoint.path ?? ''));
+  // What is actually answering: a job on the air (its EMA), the CPU while training runs (R2, 2026-08-25).
+  const live = $derived(model.info?.live ?? null);
+  const onCpu = $derived(model.info?.serving_device === 'cpu');
+  const spoken = $derived(
+    (live ? `Answering: the EMA of ${live.replace('/ema@', ' at step ')}` : `Answering: ${label}`) +
+      (onCpu ? ' — on the CPU while training runs' : '')
+  );
 
   async function pick(id: string) {
     open = false;
@@ -95,10 +102,14 @@
     class="quiet pill"
     aria-expanded={open}
     aria-haspopup="true"
+    aria-label={spoken}
+    title={spoken}
     onclick={() => (open = !open)}
   >
     <Icon name="model" size={14} />
-    <span class="label">{label || 'Checkpoint'}</span>
+    <span class="label">{live ? displayName(live.split('/ema@')[0]) : label || 'Checkpoint'}</span>
+    {#if live}<span class="live-dot" aria-hidden="true"></span>{/if}
+    {#if onCpu}<span class="cpu" aria-hidden="true">cpu</span>{/if}
     <Icon name="chevron" size={12} />
   </button>
 
@@ -135,6 +146,21 @@
   .pill :global(svg):last-child {
     transform: rotate(90deg);
     transition: transform 140ms ease;
+  }
+  /* a job on the air: the pill names the run and carries a live mark; the full sentence is the label */
+  .live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex: none;
+  }
+  .cpu {
+    flex: none;
+    font-size: 0.625rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
   }
   .pill[aria-expanded='true'] :global(svg):last-child {
     transform: rotate(-90deg);

@@ -39,7 +39,12 @@ def _argv(cfg_path, prefix, out, extra=()):
 def test_drained_run_counts_slices_steps_and_checkpoints(tmp_path):
     cfg_path, prefix = _fixture(tmp_path)
     t = Trainer(_argv(cfg_path, prefix, tmp_path / "run1", ["--max-steps", "4"]))
-    phases = [ph for ph, _ in t.run()]
+    assert t.phase == "train"
+    phases, seen = [], set()
+    for ph, _ in t.run():
+        phases.append(ph)
+        seen.add(t.phase)  # what the Training sheet shows beside "running" (2026-08-25)
+    assert seen == {"train", "eval 1/1"} and t.phase == "train"
     t.close()
     # 4 steps × 2 micro-batches, plus one slice per evaluation window (--eval-batches 1: the final eval) — the
     # daemon slots a reply between eval windows too (2026-08-24)

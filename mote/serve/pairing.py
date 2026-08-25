@@ -172,10 +172,14 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Pair
     <div class="meta">Pairing code · valid for <span id="ttl">{ttl}</span> · single use · a new one appears when it expires</div>
     <div class="code" id="code">{code}</div>
     <div class="meta">Studio address: <code>{base}</code></div>
-    <p class="meta" style="margin-top:1.2rem">Link in the QR: <code>{link}</code></p>
+    <p class="meta" style="margin-top:1.2rem">Link in the QR: <button id="show" type="button" style="font:inherit;color:#8f3f18;background:none;border:0;padding:0;cursor:pointer;text-decoration:underline">show</button> <code id="link" hidden>{link}</code></p>
   </div>
 </div>
 <script>
+  // The link carries the token: off the screen until asked for (a shared desk, a screenshot).
+  document.getElementById('show').addEventListener('click', (e) => {{
+    const c = document.getElementById('link'); c.hidden = !c.hidden; e.target.textContent = c.hidden ? 'show' : 'hide';
+  }});
   // The code stays put until it expires; only then is it replaced (and the page says so).
   let ttl = {ttl};
   const el = document.getElementById('ttl');

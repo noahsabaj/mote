@@ -38,9 +38,19 @@ shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair
   "defaults": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "n_candidates": 3 },
   "probe": { "identity_acc": 0.83, "hold_rate": 0.5, "concede_rate": 0.75, "n_identity": 6, "n_facts": 8,
              "identity_acc_seen": 1.0, "hold_rate_seen": 0.875, "concede_rate_seen": 0.75, "n_identity_seen": 6, "n_facts_seen": 8 },
-  "identity_card": "You are Mote, a small byte-level language model ..."
+  "identity_card": "You are Mote, a small byte-level language model ...",
+  "live": null | "t3l_dense_8e-4/ema@12508",   // a job on the air: its EMA is answering
+  "pin": "runs/overnight_sft/last.pt",          // the boot default in .mote/config.json (null if none)
+  "serving_device": "cuda" | "cpu",             // cpu while any training job runs, the configured device when the queue idles
+  "following": null | "runs/trunk"              // the run on the air (the --serve job), else null
 }
 ```
+
+Serving policy (signed 2026-08-25): what answers chats is the **pin** unless a job is **on the air** — a job submitted
+with `--serve` (or switched on with `/api/training/serve`) whose EMA answers while it runs and whose final checkpoint
+becomes the pin when it finishes. Every other job (a screening arm) leaves the served model alone. Serving lives on
+the CPU while any job runs (the GPU is training's) and moves back to the GPU with its arena + graphs when the queue
+idles; the CPU path is ~45 bytes/s and a cold read of a long prompt takes seconds (the `waiting` frame below).
 
 ### `POST /api/context`  body `{ "messages": [...], "max_bytes": 512, "fold": "auto", "card": null, "prev": null | { "from", "card" } }`
 What the next prompt would look like, without generating — for the studio's meter and fold line:
@@ -71,14 +81,19 @@ was read as the file. The file-derived half of each row is cached on the checkpo
 run log's mtime — the log is what gains `val_bpb` while a run is still going.
 
 ### `POST /api/checkpoints/load`  body `{ "id": "pilot_1h/last.pt" }`
-Hot-swaps the served model. Returns the new `/api/model` payload. Generation requests during a swap get `503`.
+Hot-swaps the served model and makes it the pin. Returns the new `/api/model` payload; if a job was on the air it is
+taken off for the rest of its life (the pick wins) and the payload carries `"unfollowed": "runs/<run>"` once.
+Generation requests during a swap get `503`.
 
-### `POST /api/training/start`  body `{ "args": ["--preset", "local", "--data", "data/local_mix", "--out", "runs/x", ...] }`
+### `POST /api/training/start`  body `{ "args": ["--preset", "local", "--data", "data/local_mix", "--out", "runs/x", ...], "front": false, "serve": false }`
 Enqueue a training job on the resident daemon (docs/shape.md) — args exactly as `python -m mote.train.train`
-takes them; malformed args are rejected at submit time (400). `POST /api/training/stop` body `{ "id": null }`
+takes them; malformed args are rejected at submit time (400). `front` puts it ahead of everything queued; `serve`
+puts it on the air (above). `POST /api/training/stop` body `{ "id": null }`
 stops the running job at its next step boundary (final eval + checkpoint still happen) or cancels a queued one
-by id. `GET /api/training/queue` → `{ "current", "queued": [...], "recent": [...] }`. While a job runs, chats are
-answered by its EMA (`/api/model.live`); training yields to each reply at the next accumulation slice.
+by id. `POST /api/training/serve` body `{ "id": null, "on": true }` puts the running (`id: null`) or a queued job on
+the air, or takes it off. `GET /api/training/queue` → `{ "current", "phase", "queued": [...], "recent": [...] }` —
+`phase` is what the running job is doing (`"train"`, `"eval 3/16"`, `"eval ema 3/16"`, `"checkpoint"`) and each
+job carries `"serve": bool`. Training yields to each reply at the next accumulation slice (or eval window).
 
 ### `GET /api/training/runs`
 `[{ "id": "pilot_1h", "steps": 3100, "last_val_bpb": 1.63, "running": false, "started_at": "..." }]`
@@ -112,6 +127,9 @@ Client → server
 
 Server → client (in order)
 ```json
+{ "type": "waiting", "on": "prefill" | "swap", "bytes": 4711 }   // optional, before start: the reply is queued behind
+  // a cold read of a long prompt on the CPU (bytes = what has to be read) or a weight swap; the studio shows the
+  // reason once it has lasted ~3 s.
 { "type": "start", "prompt_bytes": 61, "context_bytes": 61, "context_limit": 2048, "truncated": false,
   "fold": null | { "from": 6, "turns": 6, "card": "(Earlier in this conversation, 6 turns folded. ...)" },
   "prefix": { "reused": 1402, "prefilled": 38, "prefill_ms": 310, "snapshots": 5, "cache_bytes": 52428800,

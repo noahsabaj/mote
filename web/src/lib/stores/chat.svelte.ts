@@ -71,6 +71,8 @@ export interface Turn {
   offDefault?: (keyof SamplingParams)[];
   /** assistant only — step of the checkpoint that produced it, for the swap rule */
   checkpointStep?: number;
+  /** the server said the reply is queued behind something slow; cleared by `start` / the first byte */
+  waiting?: { on: string; bytes?: number } | null;
 }
 
 interface StoredConversation {
@@ -648,9 +650,13 @@ class Chat {
 
     for (const ev of queue) {
       switch (ev.type) {
+        case 'waiting':
+          this.#patch(id, { waiting: { on: ev.on, bytes: ev.bytes } });
+          break;
         case 'start':
           this.awaitingStart = false;
           this.#patch(id, {
+            waiting: null,
             truncated: ev.truncated,
             fold: ev.fold ?? null,
             prefix: ev.prefix ?? null,
@@ -669,7 +675,7 @@ class Chat {
           break;
         case 'byte':
           if (trace && trace.size === 0) {
-            this.#patch(id, { ttfbMs: performance.now() - this.#sentAt });
+            this.#patch(id, { ttfbMs: performance.now() - this.#sentAt, waiting: null });
           }
           trace?.push(ev);
           break;

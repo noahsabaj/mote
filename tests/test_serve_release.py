@@ -70,10 +70,14 @@ def test_released_replies_hold_the_gpu_gate(tmp_path, monkeypatch):
     eng.gpu_gate = gate
     assert isinstance(eng._reply_gate(), contextlib.nullcontext)  # warm + ungated: concurrent decode (signed design)
     eng.release()
-    assert eng._reply_gate() is gate  # released: the whole reply pauses training slices
+    assert isinstance(eng._reply_gate(), contextlib.nullcontext)  # on the CPU the gate is never taken (2026-08-25)
+    monkeypatch.setattr(eng, "device", torch.device("cuda"))  # the policy for a GPU engine, without a GPU
+    assert eng._reply_gate() is gate  # released on the GPU: the whole reply pauses training slices
     monkeypatch.setenv("MOTE_SERVE_RELEASED_GATED", "0")
     assert isinstance(eng._reply_gate(), contextlib.nullcontext)
     monkeypatch.delenv("MOTE_SERVE_RELEASED_GATED")
+    monkeypatch.setattr(eng, "device", torch.device("cpu"))
+    monkeypatch.setattr(eng, "_reply_gate", lambda: gate)  # generate() must hold whatever the policy returns
     seen = {}
 
     def probe():
@@ -110,6 +114,51 @@ def test_triton_autotuner_lock_installs_once():
     assert ok and Autotuner._mote_locked and hasattr(Autotuner.run, "_mote_orig")
     first = Autotuner.run
     assert triton_lock.install() and Autotuner.run is first  # idempotent: not wrapped twice
+
+
+def test_moved_engine_serves_the_same_bytes(tmp_path):
+    """Serving device root (signed 2026-08-25): the engine follows the queue between the CPU and the GPU."""
+    eng = _engine(tmp_path)
+    eng.gpu_gate = threading.Lock()
+    eng.tools["search"] = lambda q: q
+    script = list(b"moved engine")
+    warm, _ = _reply(eng, "three", script)
+    new = eng.moved("cpu")  # cpu → cpu on this box; the same path serves cpu → cuda
+    assert new is not eng and new.device.type == "cpu" and new.model is eng.model
+    assert new.info_ckpt is eng.info_ckpt and "search" in new.tools and new.gpu_gate is eng.gpu_gate
+    assert eng.arena is None and eng._gd is None and eng.pool is None  # the old engine is empty
+    again, done = _reply(new, "three", script)
+    assert [b["byte"] for b in again] == [b["byte"] for b in warm]
+    assert done["stats"]["bytes"] == len(script)
+    assert new.info()["device"]["name"] and not any(e["type"] == "waiting" for e in [])
+
+
+def test_waiting_frames(tmp_path):
+    """A busy lock and a long cold read on the CPU are announced before the first byte (R3, 2026-08-25)."""
+    eng = _engine(tmp_path)
+    ev = []
+    long = "x" * 1800
+    eng.generate([{"role": "user", "content": long}], GenParams(max_bytes=2, script=[65, 66], n_candidates=0),
+                 ev.append, threading.Event())
+    w = [e for e in ev if e["type"] == "waiting"]
+    assert w and w[0]["on"] == "prefill" and w[0]["bytes"] >= 1800 and ev.index(w[0]) < ev.index(next(e for e in ev if e["type"] == "start"))
+    ev.clear()
+    eng.generate([{"role": "user", "content": long}], GenParams(max_bytes=2, script=[65, 66], n_candidates=0),
+                 ev.append, threading.Event())
+    assert not [e for e in ev if e["type"] == "waiting"]  # the prefix store makes the second read cheap
+    # a held lock: the reply says it is waiting for the swap
+    ev.clear()
+    eng.lock.acquire()
+    t = threading.Thread(target=lambda: eng.generate([{"role": "user", "content": "hi"}], GenParams(max_bytes=1, script=[65], n_candidates=0), ev.append, threading.Event()))
+    t.start()
+    for _ in range(200):
+        if ev:
+            break
+        threading.Event().wait(0.01)
+    assert ev and ev[0] == {"type": "waiting", "on": "swap"}
+    eng.lock.release()
+    t.join(10.0)
+    assert ev[-1]["type"] == "done"
 
 
 def test_engine_can_start_released(tmp_path):

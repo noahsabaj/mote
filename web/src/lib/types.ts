@@ -68,6 +68,14 @@ export interface ModelInfo {
   challenger?: ChallengerInfo | null;
   /** "<run>/ema@<step>" while a training job's EMA answers chats (docs/shape.md), else null */
   live?: string | null;
+  /** the boot default (.mote/config.json): a manual load or a finished --serve job sets it */
+  pin?: string | null;
+  /** 'cpu' while a training job owns the GPU, the configured device when the queue idles */
+  serving_device?: string;
+  /** the run on the air (a --serve job whose EMA answers chats), else null */
+  following?: string | null;
+  /** a manual load just took a job off the air (one-shot, on the load response) */
+  unfollowed?: string | null;
 }
 
 // ------------------------------------------------------------------- training jobs (docs/shape.md)
@@ -81,6 +89,8 @@ export interface TrainingJob {
   ended_at: number | null;
   error: string | null;
   resumed: boolean;
+  /** on the air: its EMA answers chats while it runs, its final checkpoint becomes the pin */
+  serve?: boolean;
   /** OOM retries (mote/serve/jobs.py, 2026-08-24): a retry copy names its origin and what it waits for */
   retries?: number;
   retry_of?: string | null;
@@ -90,6 +100,8 @@ export interface TrainingJob {
 
 export interface JobsStatus {
   current: TrainingJob | null;
+  /** what the running job is doing right now: "train", "eval 3/16", "eval ema 3/16", "checkpoint" */
+  phase?: string | null;
   queued: TrainingJob[];
   recent: TrainingJob[];
 }
@@ -390,7 +402,15 @@ export interface ErrorEvent {
   message: string;
 }
 
+/** The reply is queued behind something slow — a cold prompt read on the CPU, a weight swap (2026-08-25). */
+export interface WaitingEvent {
+  type: 'waiting';
+  on: 'prefill' | 'swap' | string;
+  bytes?: number;
+}
+
 export type ServerEvent =
+  | WaitingEvent
   | StartEvent
   | ByteEvent
   | ChunkEvent

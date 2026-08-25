@@ -39,7 +39,11 @@ class Ui {
   }
 
   cycleTheme(): void {
-    this.theme = THEMES[(THEMES.indexOf(this.theme) + 1) % THEMES.length];
+    this.setTheme(THEMES[(THEMES.indexOf(this.theme) + 1) % THEMES.length]);
+  }
+
+  setTheme(t: Theme): void {
+    this.theme = t;
     persist.write('ui.theme', this.theme);
     this.applyTheme();
   }

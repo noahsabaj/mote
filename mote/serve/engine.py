@@ -240,12 +240,42 @@ class Engine:
             self._released = False
         return self.warmup()
 
+    @torch.no_grad()
+    def moved(self, device) -> "Engine":
+        """The same weights, prefix-store budget, tools and provenance on another device — the studio serves from
+        the CPU while a training job owns the GPU and moves back when the queue idles (signed 2026-08-25). The
+        old engine is left empty: its graphs, arena and pool are gone, its model object now lives on `device`."""
+        target = torch.device(device)
+        with self.lock:
+            self.drain()
+            if self._gd is not None:
+                self._gd.close()
+                self._gd = None
+            self.arena = None
+            self.pool = None
+            model = self.model.to(target)
+            self._released = True
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+        new = Engine.__new__(Engine)
+        new._setup(model, self.cfg, self.ckpt_path, self.info_ckpt.step, {}, str(target), self.prefix_cache.budget >> 20,
+                   describe=False)
+        new.info_ckpt = self.info_ckpt
+        new.serving_live = self.serving_live
+        new.tools = dict(self.tools)
+        new.tool_result_limit = self.tool_result_limit
+        new.gpu_gate = self.gpu_gate
+        new.gated = self.gated
+        return new
+
     def _reply_gate(self):
         """The GPU gate for a whole reply: always under MOTE_SERVE_GATED=1 (the old behaviour), and by default
         while released — an eager reply is hundreds of Python-level kernel launches beside the training thread
         and its arena + prefill would sit on top of the training step's peak; pausing the slices for the reply
-        (seconds) costs the trunk nothing measurable. MOTE_SERVE_RELEASED_GATED=0 keeps replies concurrent."""
-        if self.gpu_gate is None:
+        (seconds) costs the trunk nothing measurable. MOTE_SERVE_RELEASED_GATED=0 keeps replies concurrent.
+        An engine on the CPU never touches the GPU and never takes the gate."""
+        if self.gpu_gate is None or self.device.type != "cuda":
             return contextlib.nullcontext()
         if self.gated or (self._released and os.environ.get("MOTE_SERVE_RELEASED_GATED", "1") != "0"):
             return self.gpu_gate
@@ -554,13 +584,21 @@ class Engine:
     def generate(self, messages: Sequence[dict], params: GenParams, emit: Callable[[dict], None], stop: threading.Event,
                  context: Optional[dict] = None) -> None:
         """`context`: {"fold": "auto" | "now" | "off", "card": <edited card or None>} — see mote.serve.context."""
-        with self._reply_gate(), self.lock, self._serve_ctx():
+        with self._reply_gate():
+            # A weight swap (or another reply) holds the lock: say so instead of a silent cursor (2026-08-25).
+            if not self.lock.acquire(blocking=False):
+                emit({"type": "waiting", "on": "swap"})
+                self.lock.acquire()
             try:
-                self._generate(messages, params, emit, stop, context or {})
+                with self._serve_ctx():
+                    try:
+                        self._generate(messages, params, emit, stop, context or {})
+                    finally:
+                        if self.arena is None and self.device.type == "cuda":  # released: the reply's arena goes back
+                            torch.cuda.synchronize(self.device)
+                            torch.cuda.empty_cache()
             finally:
-                if self.arena is None and self.device.type == "cuda":  # released: the reply's arena goes back
-                    torch.cuda.synchronize(self.device)
-                    torch.cuda.empty_cache()
+                self.lock.release()
 
     def _generate(self, messages, params: GenParams, emit, stop: threading.Event, context: dict) -> None:
         limit = self.cfg.max_seq_len
@@ -573,6 +611,11 @@ class Engine:
         P = len(prompt_ids)
         t0 = time.perf_counter()
         self._last_card = self._card_ids(messages)
+        # A cold read of a long prompt on the CPU takes seconds (10 s at 4.6 KB, 2026-08-25): announce it.
+        hit = self.prefix_cache.lookup(prompt_ids)
+        fresh = P - (hit.n_ids if hit else 0)
+        if self.device.type != "cuda" and fresh > 1500:
+            emit({"type": "waiting", "on": "prefill", "bytes": fresh})
         arena = self._reply_arena()  # released: this reply's own arena (freed with the frame)
         state, logits, n_chunks, reused, warm_bm, session = self._read_prompt(prompt_ids, self._last_card, arena)
         prefill_ms = (time.perf_counter() - t0) * 1000
