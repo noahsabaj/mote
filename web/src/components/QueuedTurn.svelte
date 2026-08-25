@@ -154,8 +154,8 @@
     font-size: 0.9375rem;
     line-height: 1.55;
     text-align: left;
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
+    white-space: break-spaces;
+    overflow-wrap: anywhere;
     cursor: text;
   }
   /* A command is an instruction to the studio, not a prompt for Mote, and the difference

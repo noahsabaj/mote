@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import Icon from './Icon.svelte';
+  import { ui } from '../lib/stores/ui.svelte';
 
   let {
     title,
@@ -33,7 +34,13 @@
     queueMicrotask(() =>
       (panel?.querySelector<HTMLElement>('[data-autofocus]') ?? focusables()[0])?.focus()
     );
-    return () => previous?.focus?.();
+    // The opener is often a menu item that has since unmounted (the Panels menu closes as the sheet
+    // opens): focus then fell to <body> and the next Tab started from the top of the page (QA
+    // 2026-08-24). The composer is where the keyboard belongs when nothing is open.
+    return () => {
+      if (previous?.isConnected) previous.focus?.();
+      else ui.focusComposer += 1;
+    };
   });
 
   function onkeydown(e: KeyboardEvent) {
@@ -153,11 +160,19 @@
     .sheet {
       inset: auto 0 0 0;
       width: 100%;
-      height: min(88vh, 100%);
+      /* dvh: with vh the bottom of the drawer sat under a phone's toolbar */
+      height: min(88dvh, 100%);
       border-left: 0;
       border-top: 1px solid var(--rule);
       border-radius: 16px 16px 0 0;
       animation-name: slideUp;
+    }
+    /* A real thumb target: the header's close control was 25×28 on a phone (QA 2026-08-24). */
+    .close {
+      width: 40px;
+      min-height: 40px;
+      justify-content: center;
+      margin: -0.45rem -0.6rem 0 0;
     }
     @keyframes slideUp {
       from {

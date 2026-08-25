@@ -281,5 +281,9 @@
     .vs {
       min-height: 44px;
     }
+    /* the pill was 28 px tall beside a 40 px Sampling button (QA 2026-08-24) */
+    .pill {
+      min-height: 40px;
+    }
   }
 </style>

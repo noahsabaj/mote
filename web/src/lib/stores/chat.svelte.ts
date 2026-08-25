@@ -216,7 +216,16 @@ class Chat {
     this.#resetFolding();
     if (this.busy) this.stop();
     const stored = persist.read<StoredConversation | null>(convKey(id), null);
-    if (!stored) return;
+    if (!stored) {
+      // The index outlived its conversation (storage cleared or evicted): drop the dead entry and say
+      // so, rather than a menu pick that silently does nothing (QA 2026-08-24).
+      if (this.index.some((c) => c.id === id)) {
+        this.index = this.index.filter((c) => c.id !== id);
+        persist.write(INDEX_KEY, this.index);
+        notices.show('That conversation is no longer stored in this browser.');
+      }
+      return;
+    }
     this.id = stored.id;
     this.title = stored.title;
     this.#titleLocked = !!stored.titleLocked;

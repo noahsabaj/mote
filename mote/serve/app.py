@@ -549,14 +549,26 @@ async def ws_generate(ws: WebSocket):
 # --- static frontend --------------------------------------------------------------
 DIST = ROOT / "web" / "dist"
 if DIST.exists():
-    app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
+
+    class _ImmutableAssets(StaticFiles):
+        """Hashed build assets: cache for a year, they never change under the same name."""
+
+        def file_response(self, *args, **kwargs):  # type: ignore[override]
+            resp = super().file_response(*args, **kwargs)
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            return resp
+
+    app.mount("/assets", _ImmutableAssets(directory=DIST / "assets"), name="assets")
 
     @app.get("/{path:path}")
     def spa(path: str):
+        # Vite's hashed assets under /assets are immutable; everything else (index.html above all) must be
+        # revalidated, or a paired phone keeps an index.html that points at asset hashes a rebuild removed
+        # and opens a blank studio (QA 2026-08-24).
         f = DIST / path
         if path and f.is_file():
-            return FileResponse(f)
-        return FileResponse(DIST / "index.html")
+            return FileResponse(f, headers={"Cache-Control": "no-cache"})
+        return FileResponse(DIST / "index.html", headers={"Cache-Control": "no-cache"})
 else:
 
     @app.get("/")

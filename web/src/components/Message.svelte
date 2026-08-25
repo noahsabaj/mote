@@ -9,6 +9,8 @@
   import Icon from './Icon.svelte';
   import { ago, num, pct } from '../lib/format';
   import { showParam } from '../lib/stores/settings.svelte';
+  import { displayName } from '../lib/checkpoints';
+  import { copyText } from '../lib/clipboard';
 
   let {
     turn,
@@ -33,24 +35,22 @@
     const all = [...(turn.samples ?? []), turn];
     const name = (id: string) => {
       const s = all.find((t) => t.id === id)?.source;
-      return s ? `${s.checkpoint} step ${s.step.toLocaleString()}${s.engine === 'challenger' ? ' (challenger)' : ''}` : 'unknown';
+      return s ? `${displayName(s.checkpoint)} step ${s.step.toLocaleString()}${s.engine === 'challenger' ? ' (challenger)' : ''}` : 'unknown';
     };
     const label = c.vote === 'a' ? 'A' : c.vote === 'b' ? 'B' : c.vote === 'tie' ? 'a tie' : 'both bad';
     return { label, a: name(c.aId), b: name(c.bId) };
   });
 
-  let copied = $state(false);
+  // 'ok' | 'fail' | null: a copy that could not happen says so instead of pretending (LAN http has no
+  // clipboard API; the selection fallback can still be refused).
+  let copied = $state<'ok' | 'fail' | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
+  const copyLabel = $derived(copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed — select the text instead' : 'Copy');
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(turn.content || text);
-      copied = true;
-      if (copyTimer) clearTimeout(copyTimer);
-      copyTimer = setTimeout(() => (copied = false), 1600);
-    } catch {
-      /* clipboard blocked — the text is selectable either way */
-    }
+    copied = (await copyText(turn.content || text)) ? 'ok' : 'fail';
+    if (copyTimer) clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => (copied = null), copied === 'ok' ? 1600 : 3200);
   }
 
   // ------------------------------------------------------------------ editing
@@ -171,9 +171,9 @@
           class="quiet ico"
           aria-label="Copy"
           onclick={copy}
-          use:tip={copied ? 'Copied' : 'Copy'}
+          use:tip={copyLabel}
         >
-          <Icon name={copied ? 'check' : 'copy'} size={14} />
+          <Icon name={copied === 'ok' ? 'check' : copied === 'fail' ? 'alert' : 'copy'} size={14} />
         </button>
       </footer>
     {/if}
@@ -198,11 +198,13 @@
     {:else}
       <div class="body" class:awaiting={empty}>
         {#if trace && (streaming || ui.structure)}
+          <!-- ChunkedText draws the caret while streaming; a second "waiting" mark beside it showed
+               two cursors before the first byte (QA 2026-08-24) -->
           <ChunkedText {trace} structure={ui.structure} {streaming} />
         {:else}
           <span class="prose">{text}</span>
+          {#if empty}<span class="waiting" aria-hidden="true"></span>{/if}
         {/if}
-        {#if empty}<span class="waiting" aria-hidden="true"></span>{/if}
       </div>
     {/if}
 
@@ -275,9 +277,9 @@
             <button class="quiet" onclick={() => oninspect(turn.id)}>Bytes</button>
           {/if}
           {#if hasText}
-            <button class="quiet" onclick={copy}>
-              <Icon name={copied ? 'check' : 'copy'} size={14} />
-              {copied ? 'Copied' : 'Copy'}
+            <button class="quiet" onclick={copy} aria-label={copyLabel} use:tip={copied === 'fail' ? copyLabel : ''}>
+              <Icon name={copied === 'ok' ? 'check' : copied === 'fail' ? 'alert' : 'copy'} size={14} />
+              {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Not copied' : 'Copy'}
             </button>
           {/if}
           {#if isLast && hasText && !turn.error}
@@ -317,8 +319,10 @@
     color: var(--ink);
     font-size: 0.9375rem;
     line-height: 1.55;
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
+    /* break-spaces, not pre-wrap: pre-wrap lets a run of spaces hang past the edge, and an undertrained
+       checkpoint answered with 512 bytes of whitespace that pushed the page 1,600 px wide (QA 2026-08-24) */
+    white-space: break-spaces;
+    overflow-wrap: anywhere;
   }
 
   .asked {
@@ -414,8 +418,8 @@
   }
 
   .prose {
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
+    white-space: break-spaces;
+    overflow-wrap: anywhere;
   }
 
   /* Before the first byte lands: one mark, not a skeleton screen. */
@@ -511,6 +515,19 @@
       width: 44px;
       min-height: 44px;
       height: 44px;
+    }
+  }
+  /* At 360 px the action row (samples · Structure · Bytes · Copy · Compare) ran past the edge by a few
+     pixels (QA 2026-08-24): let it wrap, and give the sample arrows a real width. */
+  @media (max-width: 34rem) {
+    .actions {
+      flex: 1 1 100%;
+      flex-wrap: wrap;
+      justify-content: flex-start;
+    }
+    .samples .quiet {
+      min-width: 36px;
+      justify-content: center;
     }
   }
 </style>

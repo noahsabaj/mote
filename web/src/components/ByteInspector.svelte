@@ -5,6 +5,7 @@
   import type { Turn } from '../lib/stores/chat.svelte';
   import Sparkline from './Sparkline.svelte';
   import { byteGlyph, hex, num, pct } from '../lib/format';
+  import { copyText } from '../lib/clipboard';
 
   let { trace, turn }: { trace: ByteTrace; turn?: Turn } = $props();
 
@@ -50,17 +51,12 @@
     return () => ro.disconnect();
   });
 
-  let copied = $state(false);
+  let copied = $state<'ok' | 'fail' | null>(null);
   async function copyJson() {
-    try {
-      const rows = [];
-      for (let i = 0; i < total; i++) rows.push(trace.byteAt(i));
-      await navigator.clipboard.writeText(JSON.stringify({ bytes: total, chunks: trace.chunkCount, rows }, null, 0));
-      copied = true;
-      setTimeout(() => (copied = false), 1600);
-    } catch {
-      /* clipboard blocked */
-    }
+    const rows = [];
+    for (let i = 0; i < total; i++) rows.push(trace.byteAt(i));
+    copied = (await copyText(JSON.stringify({ bytes: total, chunks: trace.chunkCount, rows }, null, 0))) ? 'ok' : 'fail';
+    setTimeout(() => (copied = null), copied === 'ok' ? 1600 : 3200);
   }
 </script>
 
@@ -82,7 +78,7 @@
     {/if}
   </dl>
   <button class="quiet" onclick={copyJson} title="Copy every row of this trace as JSON, for sharing or a notebook">
-    {copied ? 'Copied' : 'Copy trace as JSON'}
+    {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed — clipboard unavailable here' : 'Copy trace as JSON'}
   </button>
 </section>
 

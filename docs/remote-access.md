@@ -2,49 +2,52 @@
 
 The studio has one access token and no other login, so the network layer does the real work.
 Recommended: **Tailscale**, a private WireGuard mesh between your own devices. Nothing becomes
-public, TLS is handled for you, and no router or firewall changes are needed.
+public, TLS is handled for you, and no router or firewall changes are needed. (Rewritten for the
+Fedora box on 2026-08-24; the Windows/WSL2 version of this page is in git history.)
 
-## One-time setup (needs you at the PC — installer requires admin)
+## One-time setup (done on `<your-node>`, kept here so it can be redone)
 
-1. Install Tailscale on the PC (https://tailscale.com/download/windows) and sign in.
-   Install the Tailscale app on the phone and sign in with the same account.
+1. Tailscale on the PC: `sudo dnf install tailscale && sudo systemctl enable --now tailscaled &&
+   sudo tailscale up`, then once `sudo tailscale set --operator=$USER` so `tailscale serve` works
+   without sudo. Install the Tailscale app on the phone and sign in with the same account.
 2. In the admin console (https://login.tailscale.com/admin/dns) make sure **MagicDNS** and
    **HTTPS certificates** are enabled (both are one click; MagicDNS is on by default).
-3. Install the studio as a login item and start it (PowerShell, repo root):
-   ```powershell
-   .\mote service install
+3. Install the studio as a user service (repo root):
+   ```bash
+   .venv/bin/python -m mote.cli service install    # writes ~/.config/systemd/user/mote.service, enables it
+   loginctl enable-linger $USER                     # keeps it running with nobody logged in
    ```
    This creates the access token (`.mote/token`), the config (`.mote/config.json`: checkpoint, device,
-   port 7861) and a Startup-folder entry; a supervisor keeps the server alive and `.\mote build` rebuilds,
-   tests and restarts it. The server listens on `127.0.0.1` only — Tailscale does the exposure.
-4. Publish the port to your tailnet (PowerShell, once; survives reboots):
-   ```powershell
-   & "C:\Program Files\Tailscale	ailscale.exe" serve --bg http://127.0.0.1:7861
+   port 7861) and the unit; a supervisor keeps the server alive. `systemctl --user restart mote`
+   stops the running training job at a step boundary (checkpoint kept, resumed in front of the queue)
+   and comes back with the current code and `web/dist`. The server listens on `127.0.0.1` only —
+   Tailscale does the exposure.
+4. Publish the port to your tailnet (once; survives reboots):
+   ```bash
+   tailscale serve --bg http://127.0.0.1:7861
    ```
-   (plain `tailscale` works in any terminal opened after the install). It prints the URL —
-   `https://<your-node>.<your-tailnet>.ts.net/` on this tailnet. This also reaches a server running
-   inside WSL2, because WSL2 forwards its ports to Windows `localhost`.
+   It prints the URL — `https://<your-node>.<your-tailnet>.ts.net/` on this tailnet.
 5. Pair the phone without typing the token: on the PC open **http://127.0.0.1:7861/pair** (served only
    to the machine itself). Scan its QR with the phone's camera — the link carries the token in the URL
    fragment, which browsers never send to a server — or type the six-digit code it shows into the
-   studio's unlock sheet (codes last 2 minutes, work once, 10 attempts per minute). The token is then
+   studio's unlock sheet (codes last 10 minutes, work once, 10 attempts per minute). The token is then
    stored in that browser; change the token on the server to revoke every device at once.
-6. Optional: Safari share sheet → **Add to Home Screen**. The studio ships a web-app manifest and
-   icons, so it opens full-screen like an app. There is deliberately no service worker — the app
-   needs its backend, and a cached shell is the one thing that could go stale after a rebuild. The
-   Home Screen app has its own storage, so it asks for the token once more.
+6. Optional: Safari share sheet → **Add to Home Screen** (Chrome: Install app). The studio ships a
+   web-app manifest and icons, so it opens full-screen like an app. There is deliberately no service
+   worker — the app needs its backend, and a cached shell is the one thing that could go stale after a
+   rebuild. The Home Screen app has its own storage, so it asks for the token once more.
 
 `tailscale serve --https=443 off` removes the publication. Never use `tailscale funnel` — that is the
 public internet, and the studio is not hardened for it.
 
-## Home Wi-Fi only (no install)
+## Home Wi-Fi only (no Tailscale)
 
-```powershell
-.\.venv\Scripts\python.exe -m mote.serve.app --checkpoint runs/pilot_sft/last.pt --device cpu --port 7861 --host 0.0.0.0 --token <token>
+```bash
+.venv/bin/python -m mote.serve.app --checkpoint runs/overnight_sft/last.pt --device cuda --port 7861 --host 0.0.0.0 --token "$(cat .mote/token)"
 ```
-then `http://192.168.1.135:7861` from any device on the LAN (Windows Firewall already allows
-Python inbound; the IP is the PC's current Ethernet address). WSL2 servers are NAT'd and are
-not reachable this way — run the Windows server, or publish via Tailscale as above.
+then `http://<the PC's LAN address>:7861` from any device on the LAN (`firewall-cmd --add-port=7861/tcp`
+if firewalld blocks it). Plain `http://` is not a secure context in the phone's browser, so **Copy**
+buttons fall back to a selection-based copy there; everything else works. Prefer the Tailscale URL.
 
 ## What the token does
 

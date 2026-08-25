@@ -3,15 +3,17 @@
     GROUP_LABELS,
     PARAM_SPECS,
     PRESETS,
+    editValue,
+    parseValue,
     settings,
     showParam,
-    showValue,
     type ParamGroup,
     type ParamSpec
   } from '../lib/stores/settings.svelte';
   import { chat } from '../lib/stores/chat.svelte';
   import { num, pct } from '../lib/format';
   import { tip } from '../lib/actions';
+  import Icon from './Icon.svelte';
   import type { SamplingParams } from '../lib/types';
 
   const id = Math.random().toString(36).slice(2, 8);
@@ -25,8 +27,73 @@
   // not twitch as the cursor crosses it. The panel grows upward, so the composer never moves.
   let activeKey = $state<keyof SamplingParams | null>(null);
 
-  function value(key: keyof SamplingParams): string {
-    return showValue(key, settings.params[key]);
+  // Each field holds text of its own while it is being edited, so a half-typed "10" on the way
+  // to "1024" is never clamped up to the minimum mid-keystroke. Committing waits for blur or
+  // Enter; Escape throws the draft away. Every field is bound rather than merely given a
+  // `value`, because Svelte writes that as an attribute and a typed-in input ignores it —
+  // the revert would then be real in the store and invisible on screen.
+  let editing = $state<keyof SamplingParams | null>(null);
+  let drafts = $state<Partial<Record<keyof SamplingParams, string>>>({});
+  // $state: Svelte 5 warns (at runtime) when bind:this targets a plain object's property
+  let fields = $state<Partial<Record<keyof SamplingParams, HTMLInputElement>>>({});
+
+  // Any field you are not editing follows the store, so dragging a slider moves its number.
+  $effect(() => {
+    for (const spec of PARAM_SPECS) {
+      if (editing !== spec.key) drafts[spec.key] = editValue(spec.key, settings.params[spec.key]);
+    }
+  });
+
+  function commit(key: keyof SamplingParams): void {
+    const v = parseValue(key, drafts[key] ?? '');
+    editing = null;
+    // Unparseable text is not a value: the field snaps back rather than inventing one. Written
+    // after `editing` clears so the effect above restores the text either way.
+    if (v !== null) settings.set(key, v);
+  }
+
+  function onFieldKey(e: KeyboardEvent, key: keyof SamplingParams): void {
+    if (e.key === 'Enter') {
+      // The composer sends on Enter; a number being typed into a panel above it must not.
+      e.preventDefault();
+      e.stopPropagation();
+      commit(key);
+      fields[key]?.blur();
+      return;
+    }
+    if (e.key === 'Escape') {
+      const dirty = drafts[key] !== editValue(key, settings.params[key]);
+      editing = null;
+      // Escape cancels the edit you are making. With no edit to cancel it belongs to the
+      // panel, so it is allowed through to close it.
+      if (dirty) e.stopPropagation();
+    }
+  }
+
+  /** Presets are one choice, so the group holds one tab stop and the arrows move within it. */
+  function onPresetKey(e: KeyboardEvent, i: number): void {
+    const keys = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'];
+    if (!keys.includes(e.key)) return;
+    e.preventDefault();
+    const last = PRESETS.length - 1;
+    const next =
+      e.key === 'Home'
+        ? 0
+        : e.key === 'End'
+          ? last
+          : e.key === 'ArrowRight' || e.key === 'ArrowDown'
+            ? (i + 1) % PRESETS.length
+            : (i - 1 + PRESETS.length) % PRESETS.length;
+    const target = PRESETS[next];
+    settings.apply(target.id);
+    document.getElementById(`${id}-preset-${target.id}`)?.focus();
+  }
+
+  /** Which segment carries the group's tab stop; the first one when no preset is active. */
+  function presetTabIndex(i: number): 0 | -1 {
+    const active = settings.activePreset;
+    const chosen = active ? PRESETS.findIndex((p) => p.id === active) : 0;
+    return i === chosen ? 0 : -1;
   }
 
   /** Top-p is read only on the sampling path; at temperature 0 the engine takes the argmax. */
@@ -76,13 +143,19 @@
 </script>
 
 <div class="controls">
-  <div class="presets" role="group" aria-label="Presets">
-    {#each PRESETS as preset (preset.id)}
+  <!-- One track, three segments: the shape says pick one, which three loose buttons never did.
+       Sliders dragged off every preset leave it empty, which is the truth — no preset is what
+       the model is being run at, and inventing a "Custom" segment would only hide that. -->
+  <div class="seg" role="radiogroup" aria-label="Presets">
+    {#each PRESETS as preset, i (preset.id)}
       <button
-        class="chip"
-        aria-pressed={settings.activePreset === preset.id}
+        id="{id}-preset-{preset.id}"
+        role="radio"
+        aria-checked={settings.activePreset === preset.id}
+        tabindex={presetTabIndex(i)}
         use:tip={preset.note}
         onclick={() => settings.apply(preset.id)}
+        onkeydown={(e) => onPresetKey(e, i)}
       >
         {preset.label}
       </button>
@@ -103,16 +176,38 @@
           }}
         >
           <label for="{id}-{spec.key}">{spec.label}</label>
-          <button
-            class="val tabular"
-            class:off={settings.overridden(spec.key)}
-            disabled={!settings.overridden(spec.key)}
-            use:tip={`Reset to ${settings.defaults[spec.key].toFixed(spec.digits)}`}
-            aria-label="{spec.label} {value(spec.key)}, reset to the checkpoint default"
-            onclick={() => settings.resetKey(spec.key)}
-          >
-            {value(spec.key)}
-          </button>
+          <!-- The revert sits to the left of the number so the number keeps its place on the
+               panel edge when one appears; a row that shifts as you drag is unreadable. -->
+          <div class="val-cell">
+            {#if settings.overridden(spec.key)}
+              <button
+                class="revert"
+                use:tip={`Back to ${editValue(spec.key, settings.defaults[spec.key])}`}
+                aria-label="Reset {spec.label} to the checkpoint default"
+                onclick={() => settings.resetKey(spec.key)}
+              >
+                <Icon name="undo" size={13} />
+              </button>
+            {/if}
+            <input
+              bind:this={fields[spec.key]}
+              class="val tabular"
+              class:off={settings.overridden(spec.key)}
+              type="text"
+              inputmode="decimal"
+              autocomplete="off"
+              spellcheck="false"
+              disabled={inert(spec.key)}
+              aria-label="{spec.label}, {spec.min} to {spec.max}"
+              bind:value={drafts[spec.key]}
+              onfocus={(e) => {
+                editing = spec.key;
+                e.currentTarget.select();
+              }}
+              onblur={() => commit(spec.key)}
+              onkeydown={(e) => onFieldKey(e, spec.key)}
+            />
+          </div>
 
           <div class="track" style="--frac: {frac(spec)}">
             <input
@@ -181,35 +276,6 @@
     gap: 0.85rem;
   }
 
-  /* -------------------------------------------------------------- presets */
-
-  .presets {
-    display: flex;
-    gap: 0.3rem;
-  }
-
-  .chip {
-    flex: 1;
-    min-height: 27px;
-    padding: 0 0.5em;
-    border: 1px solid var(--rule);
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 0.8125rem;
-    cursor: pointer;
-    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
-  }
-  .chip:hover {
-    background: var(--surface);
-    color: var(--ink);
-  }
-  .chip[aria-pressed='true'] {
-    border-color: var(--accent-line);
-    background: var(--accent-soft);
-    color: var(--accent-ink);
-  }
-
   /* ---------------------------------------------------------------- bands */
 
   section {
@@ -243,27 +309,66 @@
     color: var(--ink);
   }
 
-  /* The value is the per-knob reset: it is what you are looking at when you want the default
-     back, so it should be what you press. Dead while it already is the default. */
+  /* The number is typed as well as dragged: the slider steps in round units, the field reaches
+     everything between them. It stays a plain number until you touch it, so a panel of four
+     boxes does not read as a form waiting to be filled in. */
+  .val-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    justify-self: end;
+  }
+
   .val {
-    padding: 0 0.2em;
-    margin: 0 -0.2em;
-    border: 0;
+    /* Four tabular digits plus the padding and border the box adds around them: "4096" is the
+       widest thing any of the four knobs can show, and it must not clip. */
+    width: 5.6ch;
+    padding: 0.1em 0.25em;
+    border: 1px solid transparent;
     border-radius: 4px;
     background: transparent;
     color: var(--ink-3);
     font: inherit;
     font-size: 0.8125rem;
-    cursor: pointer;
+    text-align: right;
+    cursor: text;
   }
   .val.off {
     color: var(--accent-ink);
   }
   .val:hover:not(:disabled) {
+    border-color: var(--rule);
     background: var(--surface-2);
+  }
+  .val:focus {
+    border-color: var(--accent-line);
+    background: var(--surface-2);
+    color: var(--ink);
+    outline: none;
+  }
+  .val:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
   .val:disabled {
     cursor: default;
+  }
+
+  /* One knob home again without disturbing the other three. Present only when there is
+     something to undo, so it never sits there meaning nothing. */
+  .revert {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.15em;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+  .revert:hover {
+    background: var(--surface-2);
+    color: var(--accent-ink);
   }
 
   .track {
@@ -333,5 +438,20 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
+  }
+
+  /* On a phone the number fields were 24 px tall and the slider tracks 20 (QA 2026-08-24). */
+  @media (max-width: 34rem) {
+    .val {
+      min-height: 34px;
+    }
+    .track,
+    input[type='range'] {
+      height: 32px;
+    }
+    .foot {
+      flex-wrap: wrap;
+      gap: 0.25rem 0.5rem;
+    }
   }
 </style>

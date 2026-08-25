@@ -79,7 +79,7 @@
 
 <style>
   .compare {
-    border: 1px solid var(--line);
+    border: 1px solid var(--rule);
     border-radius: var(--radius);
     padding: 0.75rem 0.9rem 0.8rem;
     background: var(--surface);
@@ -114,7 +114,7 @@
     }
   }
   .side {
-    border: 1px solid var(--line);
+    border: 1px solid var(--rule);
     border-radius: calc(var(--radius) - 2px);
     padding: 0.55rem 0.7rem 0.65rem;
     background: var(--bg);
@@ -130,13 +130,13 @@
     letter-spacing: 0.06em;
     padding: 0.05rem 0.45rem;
     border-radius: 999px;
-    border: 1px solid var(--line);
+    border: 1px solid var(--rule);
     color: var(--ink-2);
   }
   .prose {
     margin: 0;
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
+    white-space: break-spaces;
+    overflow-wrap: anywhere;
     font-size: 0.9375rem;
     line-height: 1.55;
   }
@@ -157,7 +157,7 @@
     font: inherit;
     font-size: 0.875rem;
     padding: 0.4rem 0.55rem;
-    border: 1px solid var(--line);
+    border: 1px solid var(--rule);
     border-radius: calc(var(--radius) - 2px);
     background: var(--bg);
     color: var(--ink);

@@ -90,7 +90,9 @@
   const ticks = $derived.by(() => {
     if (!bounds) return [];
     const out: { y: number; label: string }[] = [];
-    const decimals = Math.max(0, Math.min(digits, -Math.floor(Math.log10(bounds.step))));
+    // Enough decimals to tell adjacent ticks apart: a flat curve inside a 0.1 band gets a 0.05 step,
+    // and rounding those to `digits` produced duplicate labels — which crashed the keyed block (QA 2026-08-24).
+    const decimals = Math.max(digits, Math.max(0, -Math.floor(Math.log10(bounds.step))));
     for (let v = bounds.y0; v <= bounds.y1 + bounds.step / 2; v += bounds.step) {
       out.push({ y: sy(v), label: v.toFixed(decimals) });
     }
@@ -112,7 +114,7 @@
 
   {#if bounds}
     <svg viewBox="0 0 {W} {height}" role="img" aria-label="{yLabel} against {xLabel}">
-      {#each ticks as t (t.label)}
+      {#each ticks as t, i (i)}
         <line x1={PAD_L} x2={W - PAD_R} y1={t.y} y2={t.y} class="grid" />
         <text x={PAD_L - 5} y={t.y + 3} class="tick" text-anchor="end">{t.label}</text>
       {/each}

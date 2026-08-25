@@ -13,7 +13,7 @@ and `/ws/generate` expects a first frame `{"type": "auth", "token": "<token>"}` 
 answered with `auth_ok` even when no token is configured, so clients that hold one can always wait for it.
 `/api/health`, `/api/pair` and the static frontend are always open. Pairing: `GET /pair` (loopback only)
 shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair {"code"}` returns
-`{"token"}` for a valid, unexpired, unused code (400 otherwise, 429 after 10 attempts/min). The UI reads
+`{"token"}` for a valid, unexpired, unused code (codes live 10 minutes; 400 otherwise, 429 after 10 attempts/min). The UI reads
 `#token=` from the URL fragment on load and scrubs it. See `docs/remote-access.md`.
 
 ## HTTP

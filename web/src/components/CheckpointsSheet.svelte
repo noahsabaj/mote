@@ -78,12 +78,12 @@
   </div>
 
   <div class="chips">
-    <button class="chip" class:on={view.evaluated} onclick={() => ckptView.toggleEvaluated()}>
+    <button class="chip" aria-pressed={view.evaluated} onclick={() => ckptView.toggleEvaluated()}>
       Evaluated
     </button>
     <button
       class="chip"
-      class:on={view.better && baseline !== null}
+      aria-pressed={view.better && baseline !== null}
       disabled={baseline === null}
       onclick={() => ckptView.toggleBetter()}
       title={baseline === null
@@ -93,7 +93,7 @@
       Beats loaded
     </button>
     {#each families as f (f)}
-      <button class="chip" class:on={view.families.includes(f)} onclick={() => ckptView.toggleFamily(f)}>
+      <button class="chip" aria-pressed={view.families.includes(f)} onclick={() => ckptView.toggleFamily(f)}>
         {f}
       </button>
     {/each}
@@ -271,30 +271,6 @@
     margin-bottom: 0.55rem;
   }
 
-  .chip {
-    min-height: 28px;
-    padding: 0 0.6em;
-    border: 1px solid var(--rule);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--ink-2);
-    font: inherit;
-    font-size: 0.75rem;
-    cursor: pointer;
-  }
-  .chip:hover:not(:disabled) {
-    background: var(--surface);
-  }
-  .chip.on {
-    border-color: var(--accent-line);
-    background: var(--accent-soft);
-    color: var(--accent-ink);
-  }
-  .chip:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
   /* A filter that persists across reloads can hide rows you have forgotten about, so the
      sheet says how many and offers one tap back. */
   .count {
@@ -411,8 +387,12 @@
       padding: 0;
       justify-content: center;
     }
-    .chip {
-      min-height: 34px;
+    .chips :global(.chip) {
+      min-height: 36px;
+    }
+    .dir,
+    select {
+      min-height: 40px;
     }
   }
 </style>

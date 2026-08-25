@@ -48,6 +48,13 @@ def test_resume_uses_the_saved_config_not_the_new_default(tmp_path):
     t2 = Trainer(_argv(tmp_path, new_cfg, out, 3, ("--resume",)))
     assert t2.step == 2 and t2.model.lm_head.weight.shape[0] == 264 and t2.cfg.pad_vocab_to == 264
     t2.close()
+    # ...even when a resume that failed under the new default has already rewritten the run's config.json
+    # (what happened twice on 2026-08-24): the checkpoint's own config is the authority
+    _cfg(272).save(out / "config.json")
+    t3 = Trainer(_argv(tmp_path, new_cfg, out, 3, ("--resume",)))
+    assert t3.step == 2 and t3.model.lm_head.weight.shape[0] == 264 and t3.cfg.pad_vocab_to == 264
+    assert json.loads((out / "config.json").read_text())["pad_vocab_to"] == 264  # and config.json is repaired
+    t3.close()
 
 
 def test_init_from_an_older_checkpoint_pads_the_vocab_rows(tmp_path):

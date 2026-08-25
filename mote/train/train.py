@@ -185,12 +185,25 @@ def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: fl
     return loss, n_safe, stats, out
 
 
-@torch.no_grad()
 def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len: int, max_batches: int, device, target_ratio: float,
              spread: bool = False):
     """`spread=False` reads the head of the val shard = its first source only (fineweb_edu on the mixes);
     `spread=True` spaces the windows over the whole shard. Off by default so every arm in a queue is
     measured like its control; the trunk and the branches run with --eval-spread."""
+    gen = evaluate_batches(model, shard, batch_size, seq_len, max_batches, device, target_ratio, spread)
+    while True:
+        try:
+            next(gen)
+        except StopIteration as done:
+            return done.value
+
+
+@torch.no_grad()
+def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len: int, max_batches: int, device,
+                     target_ratio: float, spread: bool = False):
+    """`evaluate` as a generator that yields after every window: the daemon runs each window as its own
+    slice under the GPU gate, so a chat waits for one window instead of the whole evaluation (a 16-window
+    EMA eval held the gate for minutes and a reply showed no first byte for as long, QA 2026-08-24)."""
     model.eval()
     tot_nll, tot_tok, tot_bytes, tot_chunks, mbp_correct, mbp_tot = 0.0, 0, 0, 0, 0, 0
     word_hits, boundary_count = 0, 0
@@ -228,6 +241,7 @@ def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len:
         for i, m in enumerate(moe_modules(model)):  # expert usage per layer over the eval windows
             moe_loads[i] = moe_loads.get(i, 0.0) + m.stats["load"].float().cpu()
             moe_batches += 1
+        yield None  # a slice boundary for the daemon
     model.train()
     res = {
         "val_bpb": tot_nll / max(tot_tok, 1) / LN2,
@@ -314,8 +328,10 @@ def pad_vocab_rows(sd: Dict, model) -> Dict:
     return out
 
 
-def load_checkpoint(path: Path, model, opt=None):
-    ck = torch.load(path, map_location="cpu", weights_only=False)
+def load_checkpoint(path: Path, model, opt=None, ck: Optional[Dict] = None):
+    """`ck`: the checkpoint if the caller already read it (a resume reads it first for its config)."""
+    if ck is None:
+        ck = torch.load(path, map_location="cpu", weights_only=False)
     model.load_state_dict(pad_vocab_rows(ck["model"], model))
     if opt is not None and "optimizer" in ck:
         opt.load_state_dict(ck["optimizer"])
@@ -397,10 +413,13 @@ class Trainer:
         self.out_dir = out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        if args.resume and ckpt_path_exists(out_dir) and (out_dir / "config.json").exists():
-            # a resume continues the run as it was built: its saved config beats today's preset defaults (the
-            # 264 -> 272 vocab padding of 2026-08-24 broke every resume of an older run through the preset path)
-            cfg = MoteConfig.load(out_dir / "config.json")
+        self._resume_ck = None
+        if args.resume and ckpt_path_exists(out_dir):
+            # A resume continues the run as it was built: the checkpoint's own config beats today's preset
+            # defaults AND the run's config.json — a resume that failed under a new default had already
+            # rewritten config.json with that default (2026-08-24: 264 -> 272 vocab rows, twice).
+            self._resume_ck = torch.load(out_dir / "last.pt", map_location="cpu", weights_only=False)
+            cfg = MoteConfig.from_dict(self._resume_ck["config"])
         else:
             cfg = MoteConfig.load(args.config) if args.config else getattr(MoteConfig, args.preset)()
         cfg.max_seq_len = max(cfg.max_seq_len, args.seq_len)
@@ -487,7 +506,8 @@ class Trainer:
         self.sched_total = None  # step horizon of the trunk/cooldown schedules: fixed at the first probe, survives resume
         self.ckpt_path = out_dir / "last.pt"
         if args.resume and self.ckpt_path.exists():
-            self.step, extra = load_checkpoint(self.ckpt_path, model, self.opt)
+            self.step, extra = load_checkpoint(self.ckpt_path, model, self.opt, ck=self._resume_ck)
+            self._resume_ck = None
             if args.schedule != "wsd":
                 self.sched_total = extra.get("sched_total") or extra.get("total_steps")
             if "generator_state" in extra:
@@ -568,13 +588,29 @@ class Trainer:
         for p, r in zip(self.model.parameters(), raw):
             p.copy_(r)
 
-    def _evaluate(self, target_ratio: float) -> Dict:
+    def _evaluate(self, target_ratio: float):
+        """A generator (`ev = yield from self._evaluate(...)`): every eval window yields a ("slice", None)
+        so the daemon can slot a reply between windows; the EMA pass swaps weights in and out around its
+        own windows and never leaves them swapped across a yield's caller boundary."""
         args, device = self.args, self.device
-        ev = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio, spread=args.eval_spread)
+
+        def windows():
+            return evaluate_batches(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device,
+                                    target_ratio, spread=args.eval_spread)
+
+        def drain(gen):
+            while True:
+                try:
+                    next(gen)
+                except StopIteration as done:
+                    return done.value
+                yield ("slice", None)
+
+        ev = yield from drain(windows())
         if self.ema is not None:
             raw = self._swap_in_ema()
             try:
-                ev["val_bpb_ema"] = evaluate(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device, target_ratio, spread=args.eval_spread)["val_bpb"]
+                ev["val_bpb_ema"] = (yield from drain(windows()))["val_bpb"]
             finally:
                 self._restore(raw)
         return ev
@@ -705,7 +741,7 @@ class Trainer:
                     rec["mfu"] = rec["tflops"] / self.peak_tflops
                 self.log(rec)
             if self.step % args.eval_every == 0:
-                ev = self._evaluate(target_ratio)
+                ev = yield from self._evaluate(target_ratio)
                 ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
                 self.log({"eval": ev})
             if (time.time() - last_ckpt) / 60 >= args.ckpt_minutes:
@@ -720,7 +756,7 @@ class Trainer:
             self.log({"stopped": self.stopped_reason or "requested"})
 
         if self.stopped_reason != "interrupted":  # an interrupted run resumes: checkpoint only, no final eval
-            ev = self._evaluate(cfg.dc.target_ratio_final)
+            ev = yield from self._evaluate(cfg.dc.target_ratio_final)
             ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
             self.log({"eval": ev, "final": True})
 

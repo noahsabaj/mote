@@ -41,7 +41,9 @@ def test_drained_run_counts_slices_steps_and_checkpoints(tmp_path):
     t = Trainer(_argv(cfg_path, prefix, tmp_path / "run1", ["--max-steps", "4"]))
     phases = [ph for ph, _ in t.run()]
     t.close()
-    assert phases.count("slice") == 4 * 2 and phases.count("step") == 4
+    # 4 steps × 2 micro-batches, plus one slice per evaluation window (--eval-batches 1: the final eval) — the
+    # daemon slots a reply between eval windows too (2026-08-24)
+    assert phases.count("slice") == 4 * 2 + 1 and phases.count("step") == 4
     assert (tmp_path / "run1" / "last.pt").exists()
     lines = [json.loads(l) for l in (tmp_path / "run1" / "log.jsonl").read_text().splitlines()]
     assert lines[-1]["done"] is True and lines[-1]["final_step"] == 4

@@ -81,6 +81,11 @@ export interface TrainingJob {
   ended_at: number | null;
   error: string | null;
   resumed: boolean;
+  /** OOM retries (mote/serve/jobs.py, 2026-08-24): a retry copy names its origin and what it waits for */
+  retries?: number;
+  retry_of?: string | null;
+  not_before?: number;
+  needs_bytes?: number;
 }
 
 export interface JobsStatus {

@@ -530,6 +530,15 @@
     nav :global(button) {
       padding: 0 0.32em;
     }
+    /* 23 and 27 px wide at 390 px was under the 24 px minimum (QA 2026-08-24); there is room. */
+    .surface,
+    .theme {
+      min-width: 40px;
+      justify-content: center;
+    }
+    .foot :global(button) {
+      min-height: 40px;
+    }
     /* Nothing may hide behind hover on touch, and both row controls need a real target. */
     .act {
       opacity: 1;

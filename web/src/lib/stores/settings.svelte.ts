@@ -117,11 +117,43 @@ export const PRESETS: Preset[] = [
   }
 ];
 
-/** One rendering of a value, so the panel, the composer trigger and the transcript agree. */
+function specFor(key: keyof SamplingParams): ParamSpec | undefined {
+  return PARAM_SPECS.find((s) => s.key === key);
+}
+
+/**
+ * Two renderings of one value, so nothing can drift between them.
+ *
+ * `showValue` is for reading: temperature 0 says "Greedy", which is the whole truth in one
+ * word, and the composer trigger and the transcript say it too. `editValue` is for the panel's
+ * fields, which are always numeric — a box you can type into should never hold a word you are
+ * not allowed to type.
+ */
+export function editValue(key: keyof SamplingParams, v: number): string {
+  const spec = specFor(key);
+  return v.toFixed(spec ? spec.digits : 2);
+}
+
 export function showValue(key: keyof SamplingParams, v: number): string {
   if (key === 'temperature' && v <= 0) return 'Greedy';
-  const spec = PARAM_SPECS.find((s) => s.key === key);
-  return v.toFixed(spec ? spec.digits : 2);
+  return editValue(key, v);
+}
+
+/**
+ * A typed value, clamped to the slider's range but *not* snapped to its step. The step is a
+ * dragging convenience — it lands you on round numbers — while the engine takes anything in
+ * range, so a typed 0.83 has to mean 0.83. Returns null for anything unparseable, which the
+ * caller reads as "leave the value alone".
+ */
+export function parseValue(key: keyof SamplingParams, text: string): number | null {
+  const spec = specFor(key);
+  const v = Number(text.trim());
+  if (!text.trim() || !Number.isFinite(v)) return null;
+  if (!spec) return v;
+  const clamped = Math.min(spec.max, Math.max(spec.min, v));
+  // Fractional bytes and fractional draft lengths do not exist, so a typed 1024.7 on those
+  // knobs is a typo rather than a preference.
+  return spec.digits === 0 ? Math.round(clamped) : clamped;
 }
 
 /** The same value with its short name — "T 1.35", or just "Greedy", which names itself. */

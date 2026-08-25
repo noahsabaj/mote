@@ -268,6 +268,11 @@
   .browse :global(svg) {
     color: var(--ink-3);
   }
+  @media (max-width: 34rem) {
+    .browse {
+      min-height: 44px;
+    }
+  }
 
   .inline {
     min-height: 0;

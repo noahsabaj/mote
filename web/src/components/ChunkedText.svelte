@@ -61,8 +61,9 @@
 
 <style>
   .prose {
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
+    /* break-spaces: a whitespace-only reply must wrap instead of hanging off the page (QA 2026-08-24) */
+    white-space: break-spaces;
+    overflow-wrap: anywhere;
   }
 
   /* Alternating tints: a chunk is a span of shading, not a rule through the text, so the

@@ -65,6 +65,12 @@
   }
 
   const argline = (j: TrainingJob) => j.argv.join(' ');
+  // The run is what a line is about; a dozen queued arms that all began `--preset flagship --data …` were
+  // indistinguishable once truncated (QA 2026-08-24). The full argv stays in the tooltip.
+  const runOf = (j: TrainingJob) => {
+    const i = j.argv.indexOf('--out');
+    return i >= 0 && j.argv[i + 1] ? j.argv[i + 1].replace(/^runs\//, '') : argline(j);
+  };
   let runsError = $state<string | null>(null);
   let selected = $state<string[]>([]);
   let logs = $state<Record<string, LogRecord[]>>({});
@@ -225,19 +231,26 @@
   </div>
   {#if jobError}<p class="fail"><Icon name="alert" size={13} />{jobError}</p>{/if}
   {#if jobs?.current}
-    <p class="jobline"><span class="live">running</span> <span class="mono">{argline(jobs.current)}</span></p>
+    <p class="jobline" title={argline(jobs.current)}>
+      <span class="live">running</span> <span class="mono">{runOf(jobs.current)}</span>
+      <span class="meta args">{argline(jobs.current)}</span>
+    </p>
   {:else}
     <p class="meta">Nothing running. The queue is sequential; a chat makes a run yield for the length of the reply.</p>
   {/if}
-  {#each jobs?.queued ?? [] as j (j.id)}
-    <p class="jobline">
-      <span class="meta">queued{j.resumed ? ' (resume)' : ''}</span>
-      <span class="mono">{argline(j)}</span>
-      <button class="quiet" disabled={jobBusy} onclick={() => stopJob(j.id)}>Cancel</button>
+  {#each jobs?.queued ?? [] as j, i (j.id)}
+    <p class="jobline" title={argline(j)}>
+      <span class="meta">{i + 1} · queued{j.resumed ? ' (resume)' : ''}{j.retry_of ? ` · retry ${j.retries ?? ''}`.trimEnd() : ''}{j.needs_bytes ? ` · waits for ${(j.needs_bytes / 2 ** 30).toFixed(1)} GB free` : ''}</span>
+      <span class="mono">{runOf(j)}</span>
+      <span class="meta args">{argline(j)}</span>
+      <button class="quiet" disabled={jobBusy} onclick={() => stopJob(j.id)} aria-label="Cancel {runOf(j)}">Cancel</button>
     </p>
   {/each}
   {#each (jobs?.recent ?? []).slice(0, 3) as j (j.id)}
-    <p class="jobline meta"><span class="state {j.state}">{j.state}</span> <span class="mono">{argline(j)}</span></p>
+    <p class="jobline meta" title={argline(j)}>
+      <span class="state {j.state}">{j.state}</span> <span class="mono">{runOf(j)}</span>
+      <span class="meta args">{argline(j)}</span>
+    </p>
   {/each}
   <form
     class="jobrow"
@@ -378,7 +391,7 @@
   .jobs {
     margin: 0 0 1.1rem;
     padding: 0 0 0.9rem;
-    border-bottom: 1px solid var(--line);
+    border-bottom: 1px solid var(--rule);
   }
   .jobrow {
     display: flex;
@@ -393,7 +406,7 @@
     flex: 1;
     font-size: 0.8rem;
     padding: 0.4rem 0.55rem;
-    border: 1px solid var(--line);
+    border: 1px solid var(--rule);
     border-radius: calc(var(--radius) - 2px);
     background: var(--bg);
     color: var(--ink);
@@ -410,10 +423,21 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    flex: none;
+    max-width: 55%;
+  }
+  /* the argv trails the name in the muted colour and takes whatever width is left */
+  .jobline .args {
     flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
   }
   .mono {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 0.78rem;
   }
   .state.failed { color: var(--danger, #b4413c); }
