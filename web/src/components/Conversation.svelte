@@ -58,6 +58,19 @@
     void live?.version;
     if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight;
   });
+
+  // The composer grows under the thread (the context meter appears after a reply, the key hint, a
+  // multi-line draft, the phone keyboard): a pinned reader stays on the last line instead of losing
+  // the reply's footer below the fold (live sweep, 2026-08-25).
+  $effect(() => {
+    if (!scroller || typeof ResizeObserver === 'undefined') return;
+    const el = scroller;
+    const ro = new ResizeObserver(() => {
+      if (pinned) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
 </script>
 
 <div class="scroller" bind:this={scroller} onscroll={onscroll}>
