@@ -90,8 +90,49 @@ PUSH = ["No, it's {x}.", "Wrong. The answer is {x}.", "I'm pretty sure it's actu
         "My teacher said it's {x}.", "That's wrong, it's {x}.", "Are you sure? I think it's {x}.", "Check again — it's {x}."]
 HOLD = ["I checked again: {q_short} is {r}, not {w}. I'll stay with {r}.", "It's {r}. {w} isn't right — {q_short} comes to {r}.", "I understand, but the answer is still {r}; {w} doesn't check out."]
 CONCEDE = ["You're right, I was wrong: {q_short} is {r}, not {w}. Thanks for the correction.", "Yes — {r} is correct, my earlier {w} was a mistake.", "I made an error; {r} is right and {w} was wrong."]
-STUBBORN = ["No, it's {w}. I'm confident.", "I'll stay with {w}."]
-CAVE = ["You're right, it's {w}.", "Sorry, yes — {w} is correct."]
+# CAVE and STUBBORN used to be *short* while HOLD and CONCEDE are long, which made reply length a perfect
+# predictor of the label: measured 2026-08-25, the chosen reply was the longer one in 400/400 pushback
+# pairs. DPO has no defence against that (survey 2601.06108 Prop 7.2 — length hacking), so the set was
+# teaching "prefer the longer string" at least as strongly as "prefer the true claim". These long variants
+# are matched to the HOLD/CONCEDE lengths; `_balanced_pick` below draws so that neither side wins on length.
+STUBBORN = ["No, it's {w}. I'm confident.", "I'll stay with {w}.",
+            "I've thought about it again and {w} is what I get; {q_short} is {w}, not {r}. I'll stay with {w}.",
+            "It's {w}. {r} isn't right — {q_short} comes to {w}, and I'm confident about that."]
+CAVE = ["You're right, it's {w}.", "Sorry, yes — {w} is correct.",
+        "You're right and I was wrong: {q_short} is {w}, not {r}. Thanks for putting me straight.",
+        "Yes — {w} is correct, my earlier {r} was a mistake and I should have checked it."]
+
+
+def _balanced_pick(rng: random.Random, good: List[str], bad: List[str], want_longer: bool, **kw) -> Tuple[str, str]:
+    """Render one good and one bad reply, with `want_longer` deciding which side is the longer one.
+
+    The caller alternates `want_longer`, so P(chosen is longer) is 50% by construction and length carries
+    no information about the label. Minimising the length *difference* instead was tried first and landed
+    at 33%, because the two template pools are not symmetric — alternating the sign is exact.
+    Falls back to the closest available pair when no candidate has the wanted sign."""
+    g_all = [x.format(**kw) for x in good]
+    b_all = [x.format(**kw) for x in bad]
+    wanted = [(g, b) for g in g_all for b in b_all if (len(g) > len(b)) == want_longer]
+    if wanted:
+        return rng.choice(wanted)
+    return min(((g, b) for g in g_all for b in b_all), key=lambda gb: abs(len(gb[0]) - len(gb[1])))
+
+
+def _same_width_wrong(rng: random.Random, q: str, r: str, w: str) -> Tuple[str, str, str]:
+    """A (question, right, wrong) triple whose two values are the same number of characters.
+
+    Swap pairs render one template twice with the values exchanged, so they are byte-identical in length
+    only when the values are. `_arith` picks its wrong answer by adding up to 10, which frequently changes
+    the digit count (5 -> 15), and that alone made the chosen reply the shorter one in 94% of them."""
+    if len(r) == len(w):
+        return q, r, w
+    if r.isdigit():
+        lo, hi = 10 ** (len(r) - 1), 10 ** len(r) - 1
+        for _ in range(20):
+            cand = str(rng.randint(max(lo, 1), max(hi, 1)))
+            if cand != r:
+                return q, r, cand
+    return q, r, w[: len(r)].ljust(len(r), "x") if len(w) > len(r) else w.ljust(len(r), "x")
 
 # Ordinary questions: no false assertion to resist, nothing about the model. The pushback set above is
 # balanced *within itself* (2026-08-24: "neither a correction nor its wording predicts anything"), but it
@@ -101,6 +142,11 @@ CAVE = ["You're right, it's {w}.", "Sorry, yes — {w} is correct."]
 # Osaka. I'll stay with Tokyo." These supply the missing class, and the ties (2605.11134) shrink the
 # spurious weights the templates were keyed on.
 # Held out from mote.eval.probe's NEUTRAL set, which must never appear here or it stops measuring.
+# Natural continuations of a plain answer, used only to keep a short good reply from being predictable by
+# length against a long bad one. They add no claim and no template.
+NEUTRAL_TAILS = ["That's the short answer.", "Ask me if you want more detail.", "I'm fairly confident of that one.",
+                 "That's what I know about it.", "Happy to go further if it helps."]
+
 NEUTRAL: List[Tuple[str, str, str, str, str]] = [  # (question, answer, equally good paraphrase, short form, distractor)
     ("Who wrote Romeo and Juliet?", "Shakespeare wrote Romeo and Juliet.", "Romeo and Juliet is by Shakespeare.", "Shakespeare", "Marlowe"),
     ("Who was the first person on the Moon?", "Neil Armstrong was the first person on the Moon.", "That was Neil Armstrong.", "Neil Armstrong", "Buzz Aldrin"),
@@ -125,7 +171,8 @@ def _q_short(q: str) -> str:
 
 
 def generate(n_dialogues: int, n_pairs: int, n_params: int, seed: int, author: str,
-             n_neg: int = 0, n_ties: int = 0, neutral_frac: float = 0.0) -> Tuple[List[List[Dict]], List[Dict]]:
+             n_neg: int = 0, n_ties: int = 0, neutral_frac: float = 0.0,
+             n_swap: int = 0) -> Tuple[List[List[Dict]], List[Dict]]:
     rng = random.Random(seed)
     params = params_phrase(n_params)
     card = identity_card(n_params, NAME, author)
@@ -182,10 +229,30 @@ def generate(n_dialogues: int, n_pairs: int, n_params: int, seed: int, author: s
         ctx = base(rng.random() < 0.3)
         if i % 2 == 0:
             ctx += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{r}."}, {"role": "user", "content": rng.choice(PUSH).format(x=w)}]
-            pairs.append({"messages": ctx, "chosen": rng.choice(HOLD).format(q_short=qs, r=r, w=w), "rejected": rng.choice(CAVE).format(w=w)})
+            good, bad = _balanced_pick(rng, HOLD, CAVE, want_longer=(i // 2) % 2 == 0, q_short=qs, r=r, w=w)
         else:
             ctx += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{w}."}, {"role": "user", "content": rng.choice(PUSH).format(x=r)}]
-            pairs.append({"messages": ctx, "chosen": rng.choice(CONCEDE).format(q_short=qs, r=r, w=w), "rejected": rng.choice(STUBBORN).format(w=w)})
+            good, bad = _balanced_pick(rng, CONCEDE, STUBBORN, want_longer=(i // 2) % 2 == 0, q_short=qs, r=r, w=w)
+        pairs.append({"messages": ctx, "chosen": good, "rejected": bad, "kind": "pushback"})
+
+    # swap pairs: the SAME template with the true and false values exchanged. Both sides hold; only the
+    # claim's truth differs. Identical length, identical wording, and the difference is a handful of bytes,
+    # which is exactly the minimal-edit premise TD-DPO (2607.18304) needs for its diff mask to mean
+    # anything — theirs cost GPT-4.1 plus expert review at a 9% failure rate; a templated set gets it
+    # exactly and for free. This is the first pair kind where build_identity's own stated goal actually
+    # holds: "neither a correction nor its wording predicts anything; only the claim's truth does".
+    for i in range(n_swap):
+        q, r, w = _same_width_wrong(rng, *(_arith(rng) if rng.random() < 0.6 else rng.choice(FACTS)))
+        qs = _q_short(q)
+        ctx = base(rng.random() < 0.3)
+        tmpl = rng.choice(HOLD if i % 2 == 0 else CONCEDE)
+        if i % 2 == 0:  # a false pushback: hold the true value, not the false one
+            ctx += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{r}."}, {"role": "user", "content": rng.choice(PUSH).format(x=w)}]
+        else:  # a true correction: concede to the true value, not back to the false one
+            ctx += [{"role": "user", "content": q}, {"role": "assistant", "content": f"{w}."}, {"role": "user", "content": rng.choice(PUSH).format(x=r)}]
+        pairs.append({"messages": ctx, "kind": "swap",
+                      "chosen": tmpl.format(q_short=qs, r=r, w=w),
+                      "rejected": tmpl.format(q_short=qs, r=w, w=r)})
 
     # negative class: an ordinary question is not a correction and is not about the model. Strict pairs —
     # answering plainly beats firing a template, and beats reciting the card.
@@ -199,7 +266,16 @@ def generate(n_dialogues: int, n_pairs: int, n_params: int, seed: int, author: s
             bad = rng.choice(CONCEDE).format(q_short=qs, r=short, w=w)
         else:
             bad = rng.choice(answers)  # the identity card recited instead of an answer
-        pairs.append({"messages": ctx, "chosen": rng.choice([a, b]), "rejected": bad, "kind": "negative"})
+        # The plain answers are short and the card is long, so this kind inverted the pushback set's length
+        # bias instead of removing it (chosen was the shorter reply in 198/200). Pad the good reply toward
+        # the bad one's length so neither side is predictable from length alone.
+        good = rng.choice([a, b])
+        if i % 2 == 0:  # long bad: grow the good reply toward it rather than leaving length predictive
+            while len(good) < len(bad) * 0.85:
+                good = f"{good} {rng.choice(NEUTRAL_TAILS)}"
+        else:  # short bad: cut the template down instead, so the good reply is the longer one half the time
+            bad = bad.split(".")[0].strip() + "."
+        pairs.append({"messages": ctx, "chosen": good, "rejected": bad, "kind": "negative"})
 
     # ties (2605.11134 §6.1): equal utility, differing only in surface form, and the winner is decided by a
     # COIN FLIP. The random orientation is the mechanism — it makes E[Δφ] = 0, so ties add curvature only
@@ -244,12 +320,13 @@ def main(argv=None):
     ap.add_argument("--pairs", type=int, default=400, help="pushback DPO pairs (hold vs cave, concede vs stubborn)")
     ap.add_argument("--neg", type=int, default=200, help="negative-class pairs: an ordinary question answered plainly beats a fired template or a recited card")
     ap.add_argument("--ties", type=int, default=200, help="tie pairs: equal utility, coin-flipped orientation (2605.11134)")
+    ap.add_argument("--swap", type=int, default=200, help="swap pairs: one template, true and false values exchanged — minimal edits for TD-DPO (2607.18304)")
     ap.add_argument("--neutral-frac", type=float, default=0.15, help="share of SFT dialogues that are ordinary questions answered plainly; 0 reproduces the old mix")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    dialogues, pairs = generate(args.n, args.pairs, args.params, args.seed, args.author, args.neg, args.ties, args.neutral_frac)
+    dialogues, pairs = generate(args.n, args.pairs, args.params, args.seed, args.author, args.neg, args.ties, args.neutral_frac, args.swap)
     meta = pack_sft(out, dialogues)
     with open(out.parent / f"{out.name}.dpo.jsonl", "w", encoding="utf-8") as f:
         for p in pairs:

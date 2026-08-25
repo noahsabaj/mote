@@ -19,7 +19,7 @@ import os
 import random
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -29,9 +29,20 @@ from ..model.hnet import HNetForCausalLM
 from ..tokenizer import ByteTokenizer, ChatMessage
 
 
+def pair_messages(pair: Dict) -> List[Dict]:
+    """The conversation context, from either schema.
+
+    build_identity writes {"messages": [...]}; mote.sim.generate writes {"prompt": "..."} — a single user
+    turn. dpo.py only ever read "messages", so the sim's 20k verifiable pairs could not be loaded at all
+    (found 2026-08-25, before the stage they are for had ever run)."""
+    if "messages" in pair:
+        return list(pair["messages"])
+    return [{"role": "user", "content": pair["prompt"]}]
+
+
 def render_pair(tok: ByteTokenizer, pair: Dict, max_len: int):
-    """-> ids_chosen, mask_chosen, ids_rejected, mask_rejected (masks = 1 on the final reply's bytes + EOS)."""
-    ctx = [ChatMessage(m["role"], m["content"]) for m in pair["messages"]]
+    """-> (ids, mask) for chosen and rejected (masks = 1 on the final reply's bytes + EOS)."""
+    ctx = [ChatMessage(m["role"], m["content"]) for m in pair_messages(pair)]
     out = []
     for reply in (pair["chosen"], pair["rejected"]):
         ids, mask = tok.format_chat_with_loss_mask(ctx + [ChatMessage("assistant", reply)])
@@ -45,12 +56,40 @@ def render_pair(tok: ByteTokenizer, pair: Dict, max_len: int):
     return out
 
 
-def seq_logprob(model, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def diff_weights(chosen: str, rejected: str, n_reply: int, a_diff: float, a_shared: float) -> List[float]:
+    """Per-byte weights over the REJECTED reply: `a_diff` on the bytes that differ from the chosen reply,
+    `a_shared` on the ones both share (TD-DPO 2607.18304 Eq. 8; their optimum is 2.0 / 0.5).
+
+    The point is that a preference can turn on a short span inside an otherwise fine reply, and summing
+    the log-probs uniformly spreads the gradient over the shared background too. Weighting only the
+    rejected side is their default and beats the symmetric and chosen-only variants (their Table 8);
+    driving `a_shared` to 0 *hurts*, because the shared bytes are the contextual anchor.
+
+    Only meaningful when the pair really is a near-edit — on the swap pairs the differing span is a couple
+    of bytes out of fifty. On a pair that shares little, nearly everything is marked different and this
+    degenerates into a constant scale, which is why it is off by default."""
+    import difflib
+
+    keep = [a_shared] * len(rejected)
+    sm = difflib.SequenceMatcher(None, chosen, rejected, autojunk=False)
+    for tag, _i1, _i2, j1, j2 in sm.get_opcodes():
+        if tag != "equal":
+            for j in range(j1, min(j2, len(rejected))):
+                keep[j] = a_diff
+    # the reply sits at the END of the masked span; pad/trim to the masked byte count
+    if len(keep) >= n_reply:
+        return keep[-n_reply:]
+    return keep + [a_shared] * (n_reply - len(keep))
+
+
+def seq_logprob(model, ids: torch.Tensor, mask: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Sum of next-byte log-probs over masked target positions. ids [B,L], mask [B,L] (target positions)."""
     inputs, targets = ids[:, :-1], ids[:, 1:]
     tmask = mask[:, 1:].float()
     logits = model(inputs).logits.float()
     lp = -F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1), reduction="none").view(targets.shape)
+    if weights is not None:
+        tmask = tmask * weights[:, 1:]
     return (lp * tmask).sum(-1)
 
 
@@ -81,6 +120,15 @@ def main(argv=None):
                          "length-normalised odds-ratio contrast, so --init-from is the pretrained base, not an SFT "
                          "checkpoint, and no reference model is loaded.")
     ap.add_argument("--orpo-lambda", type=float, default=1.0, help="weight of the odds-ratio term in --objective orpo")
+    ap.add_argument("--length-norm", action="store_true",
+                    help="divide each side's log-prob by its byte count before the margin (what SimPO and ORPO do). "
+                         "Length predicted the label in 400/400 pushback pairs before 2026-08-25; the data is fixed "
+                         "now, but this makes the objective itself immune to any skew that comes back")
+    ap.add_argument("--td-diff", type=float, default=0.0,
+                    help="TD-DPO (2607.18304): weight on the REJECTED reply's bytes that differ from the chosen one. "
+                         "0 disables the weighting entirely; their optimum is 2.0. Only meaningful on near-edit pairs "
+                         "(the `swap` kind) — on pairs that share little it degenerates to a constant scale")
+    ap.add_argument("--td-shared", type=float, default=0.5, help="TD-DPO weight on the shared bytes; 0 hurts (their §5.4)")
     ap.add_argument("--sft-weight", type=float, default=0.0, help="add this much of the chosen replies' mean NLL per byte to the DPO loss (the first attempt, 3 epochs at 2e-6 without it, reached margin 8.9 and degraded the text)")
     ap.add_argument("--max-len", type=int, default=1024)
     ap.add_argument("--seed", type=int, default=0)
@@ -105,26 +153,45 @@ def main(argv=None):
             p.requires_grad_(False)
     tok = ByteTokenizer()
     pairs = [json.loads(l) for l in open(args.pairs, encoding="utf-8") if l.strip()]
-    rendered = [render_pair(tok, p, args.max_len) for p in pairs]
+    # (chosen, rejected, per-byte weights over the rejected reply or None) — kept as one tuple so the
+    # weights survive the shuffle with their pair.
+    rendered = []
+    for pr in pairs:
+        ch, rj = render_pair(tok, pr, args.max_len)
+        w = diff_weights(pr["chosen"], pr["rejected"], sum(rj[1]), args.td_diff, args.td_shared) if args.td_diff > 0 else None
+        rendered.append((ch, rj, w))
+    if args.td_diff > 0:
+        share = sum(sum(1 for x in w if x == args.td_diff) / max(len(w), 1) for _c, _r, w in rendered) / len(rendered)
+        print(json.dumps({"td_dpo": {"diff": args.td_diff, "shared": args.td_shared,
+                                     "mean_diff_share": round(share, 3),
+                                     "note": "a diff share near 1.0 means the pairs are not near-edits and the weighting is a constant scale"}}), flush=True)
     opt = torch.optim.AdamW([p for p in policy.parameters() if p.requires_grad], lr=args.lr, betas=(0.9, 0.95), weight_decay=0.0)
     log_f = open(out / "log.jsonl", "a", encoding="utf-8")
     step, t0 = 0, time.time()
     pad_id = tok.pad_id if hasattr(tok, "pad_id") else 258
 
-    def batch_logps(model, items):
+    def batch_logps(model, items, weights=None):
         ids, mask = pad_batch(items, pad_id, device)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-            return seq_logprob(model, ids, mask)
+            return seq_logprob(model, ids, mask, weights)
 
     for epoch in range(args.epochs):
         random.shuffle(rendered)
         for i in range(0, len(rendered), args.batch_size):
             chunk = rendered[i : i + args.batch_size]
-            chosen = [c for c, _ in chunk]
-            rejected = [r for _, r in chunk]
+            chosen = [c for c, _r, _w in chunk]
+            rejected = [r for _c, r, _w in chunk]
+            rej_w = None
+            if args.td_diff > 0:
+                L = max(len(ids) for ids, _ in rejected)
+                rej_w = torch.ones((len(chunk), L), dtype=torch.float32, device=device)
+                for bi, (_c, (ids, mask), w) in enumerate(chunk):
+                    on = [j for j, m in enumerate(mask) if m]
+                    for j, wt in zip(on, w):
+                        rej_w[bi, j] = wt
             policy.train()
             lp_c = batch_logps(policy, chosen)
-            lp_r = batch_logps(policy, rejected)
+            lp_r = batch_logps(policy, rejected, rej_w)  # TD-DPO weights the REJECTED side only
             n_c = torch.tensor([float(sum(m)) for _, m in chosen], device=device).clamp_min(1)
             n_r = torch.tensor([float(sum(m)) for _, m in rejected], device=device).clamp_min(1)
             if args.objective == "orpo":
@@ -137,8 +204,11 @@ def main(argv=None):
             else:
                 with torch.no_grad():
                     rlp_c = batch_logps(ref, chosen)
-                    rlp_r = batch_logps(ref, rejected)
-                margin = args.beta * ((lp_c - rlp_c) - (lp_r - rlp_r))
+                    rlp_r = batch_logps(ref, rejected, rej_w)
+                if args.length_norm:  # SimPO/ORPO's defence against length hacking, opt-in for DPO and IPO
+                    margin = args.beta * (((lp_c - rlp_c) / n_c) - ((lp_r - rlp_r) / n_r))
+                else:
+                    margin = args.beta * ((lp_c - rlp_c) - (lp_r - rlp_r))
                 # Both are Psi-PO with the same margin; only Psi differs (2601.06108 Thm 3.2).
                 loss = ((margin - 1.0) ** 2).mean() if args.objective == "ipo" else -F.logsigmoid(margin).mean()
                 if args.sft_weight > 0:

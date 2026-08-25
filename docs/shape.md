@@ -126,13 +126,31 @@ the no-regression guards from detectors into a mechanism.
    EM after a small QA SFT) passes on the flagship base. lr: T2 {1e-4, 3e-4} (overnight_sft2 used AdamW
    3e-4). After it: identity ≥ 5/6, chat val, reading, sim-QA, needle, and pass@1 / pass@64 on the sim
    tasks — the RL headroom numbers.
-2. **Correctness DPO**: the sim's 20k verifiable pairs; gate pass@1 > 0 on held-out sim QA; 1 epoch,
-   lr 5e-7, β 0.1, SFT term on; guards identity/hold/concede + **false_fire_rate** + chat val (no regression).
-   *Objective decided by the Round A/B bake-off (below), not assumed to be DPO.*
-3. **Prefs DPO**: gate re-derived from whichever objective prefs runs (pairs vs KTO's binary marks); the old
-   ≥ 1000 rated / ≥ 150 Noah's was written for batch DPO on pairs and does not carry over unchanged
-   (docs/prefs.md). Skipped while unmet.
-4. **RLVR-1, multi-turn actions in the sim** (household, inventory, schedule — kinship has no agent
+2. **Preference stage** (the correctness and prefs DPO rounds **merged 2026-08-25**): one run over every
+   preference pair that exists at the time — the sim's 20k verifiable pairs today, plus the prefs store's
+   pairs and marks whenever votes arrive. Objective decided by the Round A/B bake-off, not assumed to be DPO.
+
+   **Always re-run from SFT-1; never stack.** A later run *replaces* the preference checkpoint rather than
+   training on top of it, so there is never a sequence for a later objective to undo — which is the failure
+   [2606.19744] found is unpredictable in sign (degradation, redistribution, or positive transfer, depending
+   on objective relationship, signal strength and order). The price is explicit: re-running invalidates
+   RLVR-1, which is redone from the new reference. Accepted.
+
+   **Mix**: prefs pairs are upweighted to a fixed share of the gradient (start 20–30 %) rather than left at
+   their proportional ~5 %, or a taste signal is simply drowned by 20k verifiable pairs that all point the
+   same way. Per-kind losses and margins are logged separately so domination is visible. The share is a
+   starting guess with no measurement behind it.
+
+   **Gate**: `0 < pass@1 < 0.5` on held-out sim QA — one window, not two gates. Off the floor, because the
+   stage must teach something; under 0.5, because RLVR-1's start gate needs headroom (`pass@1 < 0.5` and
+   `pass@64 − pass@1 ≥ 0.2`), and a stage that saturates sim QA passes its own check while quietly making
+   the next stage impossible. 1 epoch, lr 5e-7, β 0.1, SFT term on. Guards: identity/hold/concede,
+   **false_fire_rate**, chat val — no regression.
+
+   The old prefs gate (≥ 1000 rated / ≥ 150 Noah's) is **suspended** pending the objective: it was written
+   for batch DPO on pairs, and a click and a comparison are not the same unit (docs/prefs.md). Noah's ≥ 150
+   own judgements stand regardless.
+3. **RLVR-1, multi-turn actions in the sim** (household, inventory, schedule — kinship has no agent
    actions). Tasks State2State-style (2608.04934): k scripted actions from a seeded world → goal =
    predicates over the reached state (holdings, locations, bookings) rendered in the locale; reward 1 iff
    all hold at the end (fraction logged), step budget k+2, an illegal action renders as "nothing
