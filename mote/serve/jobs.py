@@ -11,6 +11,12 @@ the engine loads the run's final checkpoint.
 The queue is sequential and persists to `.mote/jobs.json`: on boot, a job that was `running` when the
 process died is marked `interrupted` and re-enqueued in front with `--resume` — a cancelled job stays
 cancelled. That is what "resident" means: the flagship run survives crashes and reboots unattended.
+
+A CUDA out-of-memory failure is retried (2026-08-24: the desktop took 1.8 GB of the 8 GB card and eight
+flagship arms died in a row): the failed record stays `failed`, a `--resume` copy goes to the front of the
+queue with a growing delay, and it only starts once free + cached GPU memory covers the failed run's
+tracked peak plus a margin — a structurally too-big job waits visibly instead of burning attempts, while
+the rest of the queue keeps flowing around it. Three retries per lineage.
 """
 
 from __future__ import annotations
@@ -50,6 +56,32 @@ def make_trainer(argv: List[str]):
     return Trainer(argv)
 
 STATES = ("queued", "running", "done", "failed", "cancelled", "interrupted")
+OOM_RETRIES = 3                          # retries per job lineage after CUDA out-of-memory
+OOM_RETRY_DELAYS = (120.0, 600.0, 1800.0)  # seconds before the 1st/2nd/3rd retry may start
+OOM_MARGIN = 384 << 20                   # headroom over the failed run's tracked peak before a retry starts
+
+
+def is_oom(exc: BaseException) -> bool:
+    oom_type = getattr(torch, "OutOfMemoryError", None)
+    if oom_type is not None and isinstance(exc, oom_type):
+        return True
+    s = str(exc).lower()
+    return "out of memory" in s or "alloc failed" in s
+
+
+def gpu_peak_bytes() -> int:
+    """Peak allocation tracked by the caching allocator since the last reset (the job's peak plus the serving residue)."""
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
+        return int(torch.cuda.max_memory_allocated())
+    return 0
+
+
+def gpu_usable_bytes() -> float:
+    """What a new job could get: free device memory plus our cached-but-unused reservation."""
+    if not (torch.cuda.is_available() and torch.cuda.is_initialized()):
+        return float("inf")
+    free, _total = torch.cuda.mem_get_info()
+    return float(free + torch.cuda.memory_reserved() - torch.cuda.memory_allocated())
 
 
 @dataclass
@@ -62,6 +94,10 @@ class JobRecord:
     ended_at: Optional[float] = None
     error: Optional[str] = None
     resumed: bool = False  # re-enqueued after an interruption: Trainer gets --resume
+    retries: int = 0  # OOM retries already spent by this lineage (a retry copy carries retries + 1)
+    retry_of: Optional[str] = None
+    not_before: float = 0.0  # a retry waits at least until then...
+    needs_bytes: int = 0  # ...and until `gpu_usable_bytes()` covers the failed run's peak + margin
 
     @property
     def out_dir(self) -> Optional[str]:
@@ -125,13 +161,10 @@ class JobQueue:
             except Exception:
                 self.jobs = []
         # a job that was running when the process died resumes in front of the queue
-        for r in self.jobs:
+        for r in list(self.jobs):
             if r.state == "running":
                 r.state = "interrupted"
-                nxt = JobRecord(id=secrets.token_hex(4), argv=list(r.argv), resumed=True)
-                if "--resume" not in nxt.argv:
-                    nxt.argv.append("--resume")
-                self.jobs.append(nxt)
+                self._insert_front(self._resume_copy(r))
         self._save()
 
     def _save(self) -> None:
@@ -142,18 +175,35 @@ class JobQueue:
         tmp.replace(self.state_file)
         self.jobs = recent
 
+    @staticmethod
+    def _resume_copy(rec: JobRecord, **fields) -> JobRecord:
+        fields = {"resumed": True, "retries": rec.retries, **fields}
+        nxt = JobRecord(id=secrets.token_hex(4), argv=list(rec.argv), **fields)
+        if "--resume" not in nxt.argv:
+            nxt.argv.append("--resume")
+        return nxt
+
+    def _insert_front(self, rec: JobRecord) -> None:
+        """Ahead of every queued record, behind the running and finished ones (caller holds the lock)."""
+        i = next((k for k, r in enumerate(self.jobs) if r.state == "queued"), len(self.jobs))
+        self.jobs.insert(i, rec)
+        self._save()
+
     # ---- public --------------------------------------------------------------------------
     def start(self) -> None:
         if self._thread is None:
             self._thread = threading.Thread(target=self._worker, name="mote-jobs", daemon=True)
             self._thread.start()
 
-    def submit(self, argv: List[str]) -> JobRecord:
+    def submit(self, argv: List[str], front: bool = False) -> JobRecord:
         _argparser_for(argv).parse_args(_job_args(argv))  # reject malformed args at submit time, not hours later
         rec = JobRecord(id=secrets.token_hex(4), argv=list(argv))
         with self._lock:
-            self.jobs.append(rec)
-            self._save()
+            if front:
+                self._insert_front(rec)
+            else:
+                self.jobs.append(rec)
+                self._save()
         self._wake.set()
         return rec
 
@@ -190,15 +240,30 @@ class JobQueue:
         self._wake.set()
 
     # ---- the worker ----------------------------------------------------------------------
-    def _next_queued(self) -> Optional[JobRecord]:
+    def _next_queued(self) -> tuple:
+        """(next runnable record or None, seconds until a deferred retry may become runnable)."""
+        now = time.time()
         with self._lock:
-            return next((r for r in self.jobs if r.state == "queued"), None)
+            queued = [r for r in self.jobs if r.state == "queued"]
+        usable = None
+        wait = 5.0
+        for r in queued:
+            if r.not_before > now:
+                wait = min(wait, r.not_before - now)
+                continue
+            if r.needs_bytes:
+                if usable is None:
+                    usable = gpu_usable_bytes()
+                if usable < r.needs_bytes:
+                    continue  # waits for the GPU, the queue flows around it
+            return r, 0.0
+        return None, max(wait, 0.05)
 
     def _worker(self) -> None:
         while not self._shutdown:
-            rec = self._next_queued()
+            rec, wait = self._next_queued()
             if rec is None:
-                self._wake.wait(timeout=5.0)
+                self._wake.wait(timeout=wait)
                 self._wake.clear()
                 continue
             with self._lock:
@@ -212,18 +277,20 @@ class JobQueue:
                     if rec.state == "running":
                         if reason == "cancelled":
                             rec.state = "cancelled"
-                        elif reason == "interrupted":  # graceful shutdown: come back with --resume
+                        elif reason == "interrupted":  # graceful shutdown: come back with --resume, first in line
                             rec.state = "interrupted"
-                            nxt = JobRecord(id=secrets.token_hex(4), argv=list(rec.argv), resumed=True)
-                            if "--resume" not in nxt.argv:
-                                nxt.argv.append("--resume")
-                            self.jobs.append(nxt)
+                            self._insert_front(self._resume_copy(rec))
                         else:
                             rec.state = "done"
-            except Exception:
+            except Exception as exc:
                 with self._lock:
                     rec.state = "failed"
                     rec.error = traceback.format_exc(limit=8)
+                    if is_oom(exc) and rec.retries < OOM_RETRIES:
+                        delay = OOM_RETRY_DELAYS[min(rec.retries, len(OOM_RETRY_DELAYS) - 1)]
+                        self._insert_front(self._resume_copy(
+                            rec, retries=rec.retries + 1, retry_of=rec.id, not_before=time.time() + delay,
+                            needs_bytes=gpu_peak_bytes() + OOM_MARGIN))
             finally:
                 with self._lock:
                     rec.ended_at = time.time()
@@ -243,6 +310,8 @@ class JobQueue:
                         pass
 
     def _run_job(self, rec: JobRecord) -> None:
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            torch.cuda.reset_peak_memory_stats()  # the job's peak (over the serving residue) sizes an OOM retry
         with self.gate:  # model + optimizer construction also touches the GPU
             self._trainer = t = make_trainer(list(rec.argv))
             ema = Ema(t.model, self.ema_decay)

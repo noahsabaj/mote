@@ -275,6 +275,22 @@ def ckpt_path_exists(out_dir: Path) -> bool:
     return (out_dir / "last.pt").exists()
 
 
+def last_logged_elapsed_sec(log_path: Path) -> float:
+    """The last `elapsed_min` a run logged, in seconds (0 without a log) — the clock of a pre-2026-08-24 checkpoint."""
+    if not log_path.exists():
+        return 0.0
+    last = 0.0
+    with open(log_path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if "elapsed_min" in rec:
+                last = float(rec["elapsed_min"]) * 60.0
+    return last
+
+
 def load_checkpoint(path: Path, model, opt=None):
     ck = torch.load(path, map_location="cpu", weights_only=False)
     model.load_state_dict(ck["model"])
@@ -452,7 +468,13 @@ class Trainer:
                 self.jepa.load_state_dict(extra["jepa"])
                 self.jepa_opt.load_state_dict(extra["jepa_opt"])
             self._ema_state = extra.get("ema")
-            print(f"resumed from step {self.step}", flush=True)
+            # the wall clock survives a resume too (max-minutes, the wsd progress and elapsed_min continue
+            # instead of restarting); checkpoints from before 2026-08-24 carry no clock — read the log's last
+            elapsed = extra.get("elapsed_sec")
+            if elapsed is None:
+                elapsed = last_logged_elapsed_sec(out_dir / "log.jsonl")
+            self.t_start = time.time() - float(elapsed or 0.0)
+            print(f"resumed from step {self.step} at {(elapsed or 0.0) / 60:.1f} min", flush=True)
 
         self.ema_decay = float(getattr(args, "eval_ema", 0.0) or 0.0)
         self.ema = [p.detach().clone() for p in model.parameters()] if self.ema_decay > 0 else None
@@ -486,7 +508,8 @@ class Trainer:
     def save(self):
         extra = {"generator_state": self.gen.get_state().tolist(), "total_steps": self.total_steps,
                  "sched_total": self.sched_total, "schedule": self.args.schedule,
-                 "n_params": self.n_params, "bytes_seen": self.step * self.tokens_per_step}
+                 "n_params": self.n_params, "bytes_seen": self.step * self.tokens_per_step,
+                 "elapsed_sec": time.time() - self.t_start}
         if self.jepa is not None:
             extra["jepa"] = self.jepa.state_dict()
             extra["jepa_opt"] = self.jepa_opt.state_dict()

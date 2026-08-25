@@ -229,6 +229,7 @@ def load_checkpoint(body: LoadBody):
 
 class TrainStartBody(BaseModel):
     args: list
+    front: bool = False  # ahead of everything queued
 
 
 class TrainStopBody(BaseModel):
@@ -242,7 +243,7 @@ def training_start(body: TrainStartBody):
     if jobs is None:
         raise HTTPException(503, "job queue not running")
     try:
-        rec = jobs.submit([str(a) for a in body.args])
+        rec = jobs.submit([str(a) for a in body.args], front=body.front)
     except SystemExit:
         raise HTTPException(400, "bad training args (see `python -m mote.train.train --help`)")
     return {"submitted": rec.id, **jobs.status()}

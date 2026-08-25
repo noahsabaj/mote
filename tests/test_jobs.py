@@ -5,6 +5,7 @@ training while it is held, the EMA follows the weights, and the serving engine h
 import json
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -107,6 +108,155 @@ def test_gate_pauses_training_between_slices(tmp_path):
     q.cancel()
     assert _wait(lambda: q.status()["current"] is None)
     q.shutdown()
+
+
+def test_resume_keeps_the_clock(tmp_path):
+    """A resumed run continues its wall clock (max-minutes, wsd progress, elapsed_min) instead of restarting it."""
+    tmp = _fixture(tmp_path)
+    from mote.train.train import Trainer
+    argv = _argv(tmp, tmp / "runE", steps=3)
+    t = Trainer(argv)
+    for _ in t.run():
+        pass
+    t.close()
+    extra = torch.load(tmp / "runE" / "last.pt", map_location="cpu", weights_only=False)["extra"]
+    assert extra["elapsed_sec"] > 0
+    t2 = Trainer(argv + ["--resume"])
+    assert t2.step == 3
+    time.sleep(0.2)
+    assert time.time() - t2.t_start >= extra["elapsed_sec"] + 0.2  # the clock carried over and keeps running
+    t2.close()
+    # a checkpoint from before the clock was saved falls back to the log's last elapsed_min
+    from mote.train.train import last_logged_elapsed_sec
+    assert abs(last_logged_elapsed_sec(tmp / "runE" / "log.jsonl") - extra["elapsed_sec"]) < 5.0
+    assert last_logged_elapsed_sec(tmp / "nope.jsonl") == 0.0
+
+
+# ---- OOM retries and the front of the queue --------------------------------------------------
+class _FakeTrainer:
+    """Stands in for Trainer: `plans[out_dir]` lists what each attempt does ("oom" | "ok" | "slow")."""
+    attempts: dict = {}
+    plans: dict = {}
+
+    def __init__(self, argv):
+        self.argv = list(argv)
+        self.out_dir = Path(argv[argv.index("--out") + 1])
+        self.model = torch.nn.Linear(2, 2)
+        self.cfg = _cfg()
+        self.step = 0
+        self.stopped_reason = None
+        key = str(self.out_dir)
+        n = _FakeTrainer.attempts.get(key, 0)
+        _FakeTrainer.attempts[key] = n + 1
+        plan = _FakeTrainer.plans.get(key, ["ok"])
+        self.behaviour = plan[min(n, len(plan) - 1)]
+
+    def run(self):
+        if self.behaviour == "oom":
+            raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 72.00 MiB.")
+        for _ in range(3):
+            if self.behaviour == "slow":
+                time.sleep(0.4)
+            self.step += 1
+            yield ("step", None)
+
+    def request_stop(self, reason="requested"):
+        self.stopped_reason = reason
+
+    def close(self):
+        pass
+
+
+def _fake_queue(tmp_path, monkeypatch, delays=(0.3, 0.3, 0.3), retries=3):
+    import mote.serve.jobs as J
+    monkeypatch.setattr(J, "make_trainer", _FakeTrainer)
+    monkeypatch.setattr(J, "OOM_RETRY_DELAYS", delays)
+    monkeypatch.setattr(J, "OOM_RETRIES", retries)
+    _FakeTrainer.attempts.clear()
+    _FakeTrainer.plans.clear()
+    return JobQueue(tmp_path / "jobs.json", threading.Lock())
+
+
+def _by_id(q):
+    return {r.id: r for r in q.jobs}
+
+
+def test_oom_retry_goes_to_the_front_after_its_delay(tmp_path, monkeypatch):
+    q = _fake_queue(tmp_path, monkeypatch)
+    a, b = tmp_path / "runA", tmp_path / "runB"
+    _FakeTrainer.plans[str(a)] = ["oom", "ok"]  # one transient OOM, then fine
+    _FakeTrainer.plans[str(b)] = ["slow"]
+    q.start()
+    ra = q.submit(_argv(tmp_path, a))
+    rb = q.submit(_argv(tmp_path, b))
+    assert _wait(lambda: sum(r.state == "done" for r in q.jobs) == 2)
+    recs = _by_id(q)
+    assert recs[ra.id].state == "failed" and "out of memory" in recs[ra.id].error.lower()
+    retry = next(r for r in q.jobs if r.retry_of == ra.id)
+    assert retry.state == "done" and retry.retries == 1 and "--resume" in retry.argv and retry.resumed
+    ids = [r.id for r in q.jobs]
+    assert ids.index(retry.id) < ids.index(rb.id)  # inserted ahead of B in the queue...
+    assert retry.started_at >= recs[ra.id].ended_at + 0.3  # ...but only after its delay
+    assert retry.started_at >= recs[rb.id].ended_at  # B (already runnable) flowed around the deferred retry
+    assert _FakeTrainer.attempts[str(a)] == 2
+    q.shutdown()
+
+
+def test_oom_gives_up_after_the_retry_budget(tmp_path, monkeypatch):
+    q = _fake_queue(tmp_path, monkeypatch, delays=(0.1,), retries=2)
+    a, b = tmp_path / "runA", tmp_path / "runB"
+    _FakeTrainer.plans[str(a)] = ["oom"]  # structural: every attempt dies
+    q.start()
+    ra = q.submit(_argv(tmp_path, a))
+    rb = q.submit(_argv(tmp_path, b))
+    assert _wait(lambda: _by_id(q)[rb.id].state == "done" and sum(r.state == "failed" for r in q.jobs) == 3)
+    time.sleep(0.5)
+    assert sum(r.state == "failed" for r in q.jobs) == 3 and not any(r.state == "queued" for r in q.jobs)
+    lineage = [r for r in q.jobs if r.id == ra.id or r.retry_of is not None]
+    assert [r.retries for r in lineage] == [0, 1, 2]
+    assert _FakeTrainer.attempts[str(a)] == 3
+    q.shutdown()
+
+
+def test_oom_retry_waits_for_gpu_memory(tmp_path, monkeypatch):
+    import mote.serve.jobs as J
+    q = _fake_queue(tmp_path, monkeypatch, delays=(0.1,))
+    monkeypatch.setattr(J, "gpu_peak_bytes", lambda: 6 << 30)  # the failed run peaked at 6 GB
+    usable = {"v": 5 << 30}
+    monkeypatch.setattr(J, "gpu_usable_bytes", lambda: float(usable["v"]))
+    a, b = tmp_path / "runA", tmp_path / "runB"
+    _FakeTrainer.plans[str(a)] = ["oom", "ok"]
+    q.start()
+    ra = q.submit(_argv(tmp_path, a))
+    rb = q.submit(_argv(tmp_path, b))
+    assert _wait(lambda: _by_id(q)[rb.id].state == "done")
+    time.sleep(0.6)
+    retry = next(r for r in q.jobs if r.retry_of == ra.id)
+    assert retry.state == "queued" and retry.needs_bytes == (6 << 30) + J.OOM_MARGIN  # waiting: 5 GB usable < 6.4 needed
+    usable["v"] = 8 << 30  # the desktop gave the memory back
+    q._wake.set()
+    assert _wait(lambda: _by_id(q)[retry.id].state == "done")
+    q.shutdown()
+
+
+def test_interrupted_job_resumes_in_front_of_the_queue(tmp_path):
+    state = tmp_path / "jobs.json"
+    argv_dead, argv_other = _argv(tmp_path, tmp_path / "runC"), _argv(tmp_path, tmp_path / "runD")
+    state.write_text(json.dumps({"jobs": [{"id": "dead0000", "argv": argv_dead, "state": "running"},
+                                          {"id": "othr0000", "argv": argv_other, "state": "queued"}]}))
+    q = JobQueue(state, threading.Lock())  # boot-time load only
+    queued = q.status()["queued"]
+    assert [r["id"] for r in queued][1] == "othr0000" and queued[0]["resumed"] and "--resume" in queued[0]["argv"]
+
+
+def test_submit_front_jumps_the_queue(tmp_path):
+    q = JobQueue(tmp_path / "jobs.json", threading.Lock())  # never started: pure ordering
+    first = q.submit(_argv(tmp_path, tmp_path / "run1"))
+    second = q.submit(_argv(tmp_path, tmp_path / "run2"), front=True)
+    third = q.submit(_argv(tmp_path, tmp_path / "run3"))
+    assert [r["id"] for r in q.status()["queued"]] == [second.id, first.id, third.id]
+    q.cancel(first.id)
+    assert [r["id"] for r in q.status()["queued"]] == [second.id, third.id]
 
 
 def test_ema_math_and_engine_hot_swap(tmp_path):

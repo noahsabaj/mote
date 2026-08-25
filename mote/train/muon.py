@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import torch
 
+MAX_STACK_BYTES = 32 << 20  # per stacked Newton-Schulz group (in the update's dtype); see Muon.step
+
 
 @torch.no_grad()
 def newton_schulz(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
@@ -61,17 +63,24 @@ class Muon(torch.optim.Optimizer):
                 m, n = p.shape[-2], p.shape[-1]
                 by_shape.setdefault((m, n), []).append((p, upd.reshape(-1, m, n)))
             for (m, n), items in by_shape.items():
-                stacked = torch.cat([u for _, u in items], dim=0) if len(items) > 1 else items[0][1]
-                orth = newton_schulz(stacked, steps=group["ns_steps"])
                 scale = group["rms_scale"] * max(m, n) ** 0.5
                 decay = (lr * lr / group["lr_max"] if group["sw_decay"] else lr) * wd if wd else 0.0
-                i = 0
-                for p, u in items:
-                    o = orth[i:i + u.shape[0]].reshape(p.shape)
-                    i += u.shape[0]
-                    if decay:
-                        p.mul_(1.0 - decay)
-                    p.add_(o.to(p.dtype) * scale, alpha=-lr)
+                # a stacked group is capped at MAX_STACK_BYTES per tensor: the concatenated update, its fp32/bf16
+                # copies and the iteration temporaries are all group-sized, so an uncapped 12 × [768, 4096] fp32
+                # group costs ~0.4 GB at the step's peak (the flagship's Muon step OOM'd on it, 2026-08-24)
+                per_matrix = m * n * items[0][1].element_size()
+                per_chunk = max(1, MAX_STACK_BYTES // max(per_matrix, 1))
+                for k in range(0, len(items), per_chunk):
+                    part = items[k:k + per_chunk]
+                    stacked = torch.cat([u for _, u in part], dim=0) if len(part) > 1 else part[0][1]
+                    orth = newton_schulz(stacked, steps=group["ns_steps"])
+                    i = 0
+                    for p, u in part:
+                        o = orth[i:i + u.shape[0]].reshape(p.shape)
+                        i += u.shape[0]
+                        if decay:
+                            p.mul_(1.0 - decay)
+                        p.add_(o.to(p.dtype) * scale, alpha=-lr)
         return loss
 
 

@@ -38,7 +38,15 @@ def _ref_step(params, grads, bufs, lr, mom, wd, nesterov, rms_scale, sw_decay, l
         p.add_(upd, alpha=-lr)
 
 
-def test_batched_step_matches_reference():
+import pytest
+
+import mote.train.muon as muon_mod
+
+
+@pytest.mark.parametrize("stack_cap", [None, 64 * 48 * 4 * 2, 1])  # unbounded / two matrices per group / one
+def test_batched_step_matches_reference(stack_cap, monkeypatch):
+    if stack_cap is not None:
+        monkeypatch.setattr(muon_mod, "MAX_STACK_BYTES", stack_cap)
     torch.manual_seed(0)
     shapes = [(64, 48), (64, 48), (64, 48), (32, 96), (40, 40), (32, 96)]
     params = [torch.nn.Parameter(torch.randn(*s) * 0.1) for s in shapes]

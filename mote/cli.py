@@ -372,7 +372,7 @@ def train_cmd(args) -> int:
         if not args.train_args:
             print("usage: mote train start -- --preset local --data data/local_mix --out runs/x ...")
             return 2
-        out = _api("POST", "/api/training/start", {"args": args.train_args})
+        out = _api("POST", "/api/training/start", {"args": args.train_args, "front": bool(args.front)})
         print(json.dumps(out, indent=1))
     elif args.action == "stop":
         print(json.dumps(_api("POST", "/api/training/stop", {"id": args.id}), indent=1))
@@ -408,10 +408,23 @@ def main(argv=None) -> int:
     tr = sub.add_parser("train", help="training jobs on the resident studio: start -- <train args> | stop [--id] | queue")
     tr.add_argument("action", choices=["start", "stop", "queue"])
     tr.add_argument("--id", default=None, help="job id for `stop` (default: the running one)")
+    tr.add_argument("--front", action="store_true", help="start: put the job ahead of everything queued")
     tr.add_argument("train_args", nargs=argparse.REMAINDER, help="after `--`: args for python -m mote.train.train")
     args = ap.parse_args(argv)
-    if getattr(args, "cmd", None) == "train" and args.train_args and args.train_args[0] == "--":
-        args.train_args = args.train_args[1:]
+    if getattr(args, "cmd", None) == "train":
+        # options typed after the action land in the REMAINDER (`train stop --id X` once cancelled the RUNNING
+        # job, 2026-08-24): parse them out of everything before the `--`
+        lead, rest = args.train_args, []
+        if "--" in lead:
+            k = lead.index("--")
+            lead, rest = lead[:k], lead[k + 1:]
+        opts = argparse.ArgumentParser(add_help=False)
+        opts.add_argument("--id", default=None)
+        opts.add_argument("--front", action="store_true")
+        ns, unknown = opts.parse_known_args(lead)
+        args.id = args.id or ns.id
+        args.front = args.front or ns.front
+        args.train_args = unknown + rest
 
     if args.cmd == "service":
         return {"install": service_install, "uninstall": service_uninstall, "start": lambda: service_start(args.force),
