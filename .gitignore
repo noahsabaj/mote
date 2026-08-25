@@ -8,9 +8,28 @@ runs/
 checkpoints/
 web/node_modules/
 web/dist/
-.env
 
+# secrets — never commit (a profiler capture of the shell env leaked live API keys on 2026-08-25)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.netrc
+.npmrc
+credentials.json
+service-account*.json
 # studio service state (token, pids, log)
 .mote/
-docs/results/**/*.sqlite
-docs/results/**/*.nsys-rep
+
+# profiler / snapshot artifacts: large, re-derivable, and they capture the process environment
+*.nsys-rep
+*.qdrep
+*.qdstrm
+*.ncu-rep
+*.sqlite
+*.pickle
+*.pkl

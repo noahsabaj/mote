@@ -1,0 +1,21 @@
+#!/bin/bash
+# Block the two ways this repo has leaked: a profiler/snapshot binary that captured the shell
+# environment, and a raw credential pasted into a tracked file. Bypass with --no-verify if you
+# are certain. Installed by: git config core.hooksPath .githooks
+set -u
+fail=0
+big=$(git diff --cached --name-only --diff-filter=AM | while read -r f; do
+  [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 5242880 ] && echo "$f ($(( $(stat -c%s "$f") / 1048576 )) MB)"
+done)
+if [ -n "$big" ]; then echo "pre-commit: files over 5 MB staged:"; echo "$big" | sed 's/^/  /'; fail=1; fi
+
+case "$(git diff --cached --name-only --diff-filter=AM)" in
+  *.nsys-rep*|*.qdrep*|*.ncu-rep*|*.sqlite*|*.pickle*|*.pkl*|*.pem*|*.env*)
+    echo "pre-commit: a profiler/snapshot/secret-shaped file is staged (these capture the shell env)"; fail=1 ;;
+esac
+
+pat='AIza[0-9A-Za-z_-]{35}|sk-ant-[0-9A-Za-z_-]{20,}|sk-[A-Za-z0-9]{32,}|ghp_[A-Za-z0-9]{36}|github_pat_[0-9A-Za-z_]{50,}|hf_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|nvapi-[0-9A-Za-z_-]{40,}|cfut_[0-9A-Za-z_-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(API_KEY|API_TOKEN|SECRET|PASSWORD)=[A-Za-z0-9_./+-]{16,}'
+hits=$(git diff --cached -U0 --diff-filter=AM | grep -E '^\+' | grep -EIn "$pat" | head -5)
+if [ -n "$hits" ]; then echo "pre-commit: credential-shaped strings in the staged diff:"; echo "$hits" | cut -c1-120 | sed 's/^/  /'; fail=1; fi
+
+[ "$fail" -eq 0 ] || { echo "pre-commit: refusing the commit (use --no-verify to override)"; exit 1; }
