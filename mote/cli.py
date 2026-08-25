@@ -122,6 +122,24 @@ def service_run() -> None:
     STOP_FLAG.unlink(missing_ok=True)
     SUP_PID.write_text(str(os.getpid()))
     backoff = 3
+    child: dict = {"proc": None}
+
+    def _on_stop(signum, _frame):
+        # systemd stops the whole cgroup: without this the supervisor died on its SIGTERM at once and systemd
+        # SIGKILLed the server before its shutdown hook could checkpoint the running job (2026-08-24 night).
+        # Now: mark the stop, pass the signal on (a repeated SIGTERM is a no-op for uvicorn) and keep waiting
+        # for the server to leave on its own — the unit's TimeoutStopSec bounds it.
+        STOP_FLAG.touch()
+        p = child["proc"]
+        if p is not None and p.poll() is None:
+            try:
+                p.send_signal(signal.SIGTERM)
+            except Exception:
+                pass
+
+    if os.name != "nt":
+        signal.signal(signal.SIGTERM, _on_stop)
+        signal.signal(signal.SIGINT, _on_stop)
     while True:
         cfg = load_config()
         token = ensure_token()
@@ -134,9 +152,13 @@ def service_run() -> None:
             log.flush()
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             proc = subprocess.Popen(args, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
+            child["proc"] = proc
             SRV_PID.write_text(str(proc.pid))
             t0 = time.time()
+            if STOP_FLAG.exists():  # a stop arrived between the launch and here
+                _on_stop(None, None)
             rc = proc.wait()
+            child["proc"] = None
             log.write(f"=== {time.strftime('%Y-%m-%d %H:%M:%S')} server exited with {rc}\n")
         SRV_PID.unlink(missing_ok=True)
         if STOP_FLAG.exists():
