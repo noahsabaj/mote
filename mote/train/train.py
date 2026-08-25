@@ -291,9 +291,29 @@ def last_logged_elapsed_sec(log_path: Path) -> float:
     return last
 
 
+VOCAB_SIZED = ("embeddings.weight", "lm_head.weight", "mbp_head.transition.weight")
+
+
+def pad_vocab_rows(sd: Dict, model) -> Dict:
+    """A checkpoint with fewer embedding rows than the model (264 before 2026-08-24, 272 after) loads with its rows
+    copied and the model's fresh init kept for the spare ones — `--init-from` an older run. Rows are never dropped."""
+    cur = model.state_dict()
+    out = dict(sd)
+    for key in VOCAB_SIZED:
+        if key not in sd or key not in cur or tuple(sd[key].shape) == tuple(cur[key].shape):
+            continue
+        old, new = sd[key], cur[key]
+        if old.ndim != new.ndim or any(o > n for o, n in zip(old.shape, new.shape)):
+            continue  # a real mismatch: let load_state_dict report it
+        padded = new.detach().clone()
+        padded[tuple(slice(0, o) for o in old.shape)] = old.to(padded.dtype)
+        out[key] = padded
+    return out
+
+
 def load_checkpoint(path: Path, model, opt=None):
     ck = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(ck["model"])
+    model.load_state_dict(pad_vocab_rows(ck["model"], model))
     if opt is not None and "optimizer" in ck:
         opt.load_state_dict(ck["optimizer"])
     return ck["step"], ck.get("extra", {})
@@ -374,7 +394,12 @@ class Trainer:
         self.out_dir = out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        cfg = MoteConfig.load(args.config) if args.config else getattr(MoteConfig, args.preset)()
+        if args.resume and ckpt_path_exists(out_dir) and (out_dir / "config.json").exists():
+            # a resume continues the run as it was built: its saved config beats today's preset defaults (the
+            # 264 -> 272 vocab padding of 2026-08-24 broke every resume of an older run through the preset path)
+            cfg = MoteConfig.load(out_dir / "config.json")
+        else:
+            cfg = MoteConfig.load(args.config) if args.config else getattr(MoteConfig, args.preset)()
         cfg.max_seq_len = max(cfg.max_seq_len, args.seq_len)
         if args.ratio_weight is not None:
             cfg.dc.ratio_loss_weight = args.ratio_weight
