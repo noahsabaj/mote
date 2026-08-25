@@ -603,6 +603,14 @@ def main(argv=None):
     eng.gpu_gate = gate
     jobs.start()
     print(json.dumps(eng.info(), indent=1), flush=True)
+    # uvicorn captures SIGTERM/SIGINT for its graceful shutdown, then restores the handlers it found and
+    # re-raises the signal — with the default handlers that killed the process (exit -15) before the hook
+    # below ever ran (2026-08-24 night, three restarts from step 0). Swallow the re-raised signal instead:
+    # uvicorn's own handler still drives the shutdown, and `run()` returns here afterwards.
+    import signal
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda signum, frame: None)
     uvicorn.run(app, host=args.host, port=args.port)
     # SIGTERM (systemd stop/restart) returns here once the server is down: the running job reaches a step
     # boundary, checkpoints and re-enqueues itself in front (the unit's TimeoutStopSec bounds this wait; a
