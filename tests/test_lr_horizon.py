@@ -71,6 +71,21 @@ def _synthetic(tmp_path, lrs, beta=-0.25, eta0=1e-3, D0=1e6):
     return runs
 
 
+def test_read_run_keeps_only_the_last_fresh_start(tmp_path):
+    """A fresh start appended to an old run's log (a daemon restart without a checkpoint, 2026-08-24) logs its
+    throughput probe at step 0; the evals before it belong to the dead run and are dropped. A resume (probe at
+    the resumed step) keeps everything."""
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "run.json").write_text(json.dumps({"lr": 1e-3, "batch_size": 1, "seq_len": 10, "grad_accum": 1}))
+    old = [{"probe_sec_per_step": 1.0, "step": 0}, {"eval": {"val_bpb": 9.0}, "step": 2}, {"eval": {"val_bpb": 8.0}, "step": 4}]
+    new = [{"probe_sec_per_step": 1.0, "step": 0}, {"eval": {"val_bpb": 3.0}, "step": 2}]
+    resumed = [{"probe_sec_per_step": 1.0, "step": 2}, {"eval": {"val_bpb": 2.5}, "step": 4}]
+    (run / "log.jsonl").write_text("\n".join(json.dumps(r) for r in old + new + resumed))
+    lr, pts = read_run(run)
+    assert lr == 1e-3 and pts == [(20.0, 3.0), (40.0, 2.5)]
+
+
 def test_fit_recovers_planted_slope(tmp_path):
     runs = _synthetic(tmp_path, [4e-4, 8e-4, 1.6e-3])
     res = fit([read_run(r) for r in runs])

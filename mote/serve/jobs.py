@@ -234,10 +234,19 @@ class JobQueue:
             }
 
     def shutdown(self) -> None:
+        """Stop taking jobs; the running one ends at its next step boundary with a checkpoint and comes back
+        in front of the queue with --resume (`join` waits for that)."""
         self._shutdown = True
         if self._trainer is not None:
             self._trainer.request_stop("interrupted")
         self._wake.set()
+
+    def join(self, timeout: Optional[float] = None) -> bool:
+        """Wait for the worker to finish (after `shutdown`); True if it did."""
+        if self._thread is None:
+            return True
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
 
     # ---- the worker ----------------------------------------------------------------------
     def _next_queued(self) -> tuple:
@@ -318,6 +327,8 @@ class JobQueue:
         steps_since_sync = 0
         g = t.run()
         while True:
+            if self._shutdown and t.stopped_reason is None:  # shutdown arrived while the job was being built
+                t.request_stop("interrupted")
             with self.gate:  # one accumulation slice per acquisition: replies slot in between
                 item = next(g, None)
             if item is None:

@@ -239,6 +239,23 @@ def test_oom_retry_waits_for_gpu_memory(tmp_path, monkeypatch):
     q.shutdown()
 
 
+def test_shutdown_interrupts_the_running_job_and_requeues_it_in_front(tmp_path, monkeypatch):
+    q = _fake_queue(tmp_path, monkeypatch)
+    a, b = tmp_path / "runA", tmp_path / "runB"
+    _FakeTrainer.plans[str(a)] = ["slow"]
+    q.start()
+    ra = q.submit(_argv(tmp_path, a))
+    rb = q.submit(_argv(tmp_path, b))
+    assert _wait(lambda: _by_id(q)[ra.id].state == "running")
+    q.shutdown()
+    assert q.join(timeout=30.0)
+    recs = _by_id(q)
+    assert recs[ra.id].state == "interrupted" and recs[rb.id].state == "queued"
+    copy = next(r for r in q.jobs if r.resumed and r.argv[r.argv.index("--out") + 1] == str(a))
+    ids = [r.id for r in q.jobs]
+    assert "--resume" in copy.argv and ids.index(copy.id) < ids.index(rb.id)
+
+
 def test_interrupted_job_resumes_in_front_of_the_queue(tmp_path):
     state = tmp_path / "jobs.json"
     argv_dead, argv_other = _argv(tmp_path, tmp_path / "runC"), _argv(tmp_path, tmp_path / "runD")

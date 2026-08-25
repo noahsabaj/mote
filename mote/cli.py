@@ -243,7 +243,9 @@ def service_install() -> int:
     else:
         entry.write_text(
             "[Unit]\nDescription=Mote Studio\nAfter=network-online.target\n\n[Service]\n"
-            f"WorkingDirectory={ROOT}\nExecStart={PY} -m mote.cli service run\nRestart=always\n\n[Install]\nWantedBy=default.target\n",
+            f"WorkingDirectory={ROOT}\nExecStart={PY} -m mote.cli service run\nRestart=always\n"
+            "TimeoutStopSec=180\n"  # a stop lets the running job checkpoint at its next step boundary first
+            "\n[Install]\nWantedBy=default.target\n",
             encoding="utf-8")
         subprocess.run(["systemctl", "--user", "daemon-reload"])
         subprocess.run(["systemctl", "--user", "enable", "mote.service"])

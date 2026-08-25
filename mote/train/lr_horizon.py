@@ -30,11 +30,18 @@ def read_run(run: Path) -> Tuple[float, List[Tuple[float, float]]]:
     lr = float(rj["lr"])
     tokens_per_step = int(rj["batch_size"]) * int(rj["seq_len"]) * int(rj["grad_accum"])
     pts = []
+    recs = []
     for line in (run / "log.jsonl").read_text(encoding="utf-8").splitlines():
         try:
-            rec = json.loads(line)
+            recs.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    # a fresh start into an existing directory appends after the old run's lines (a resume continues the step
+    # count; a fresh start logs its throughput probe at step 0): keep the last fresh start's segment only
+    starts = [i for i, r in enumerate(recs) if r.get("step") == 0 and "probe_sec_per_step" in r]
+    if starts:
+        recs = recs[starts[-1]:]
+    for rec in recs:
         ev = rec.get("eval")
         if not ev:
             continue

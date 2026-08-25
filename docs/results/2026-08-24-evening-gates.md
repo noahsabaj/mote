@@ -91,6 +91,46 @@ FlashRelation v2 12.7 % (`_bwd_kernel` 8.1, `_fwd_kernel` 4.6), `CatArrayBatched
 `angle_dt_bwd` 2.5 %. The fusion/launch bucket (elementwise + copies + cat ≈ 35 %) is the compile
 workstream's target; the norm backward is the one custom kernel with real headroom (8× off its bandwidth floor).
 
+## 20:20–21:30 — the desktop's share of the card, and what the queue does about it now
+
+`nsweep_4` died at its Muon step at 20:2x: "Tried to allocate 72 MiB … 115 MiB free"; the daemon held 5.41 GB
+(4.42 allocated + 0.44 in the serving pools + 0.26 reserved-unallocated + ~0.3 CUDA context). The rest of the
+8188 MiB card was the desktop: plasmashell 276 MB, plasma-keyboard 261, kwin 195, Discord's GPU process 300, and
+the lock screen (`kscreenlocker_greet`) 431 MB while the screen is locked — 1.46 GB plus ~0.4 GB of driver
+overhead. **The daemon gets ≈ 6.2 GB while the screen is locked, ≈ 6.6 GB unlocked**, not the 7.2 GB the
+serving gate assumed. Every flagship-preset arm queued behind it then OOM'd within a minute (20:37–20:40):
+`compile_twin_eager`, `t2_ctl_30m_v2`, `t2_tf32_30m` and the six MoE T2 arms; `compile_twin_compile` failed on
+the known Dynamo assertion instead (the whole-model `--compile` flag is dead until the custom-op work). The
+35M arms (4.9 GB) fit; the flagship recipe at 16384 needs ≈ 5.2–5.5 GB in the daemon (4.31 standalone + the
+serving residue + context) — a ~1 GB margin at 6.2; the E4 MoE flagship (+0.68 GB) is marginal and the E8
+(+2.0 GB, 7.4 GB) does not fit on this card beside the desktop at all: its flagship-preset numbers need an L4 or
+a lighter desktop. Discord's hardware acceleration is the one avoidable 300 MB; the lock screen's 431 MB is
+transient.
+
+Muon's batched Newton–Schulz (da14e1e) also raised the flagship step's peak by ~0.4 GB: the 12 × [768, 4096]
+fp32 SwiGLU group is concatenated, converted and iterated as one 151 MB tensor with group-sized temporaries.
+Capped at 32 MiB per stacked tensor (the 48 Relation projections stay batched in 4 launches).
+
+An operator error on top: `mote train stop --id X` put `--id` into the CLI's REMAINDER and cancelled the
+*running* arm (`ab3_jepa_sig`, 10 min in, checkpoint kept) — five times. Options after the action are parsed now;
+`mote train --id X stop` always worked. `nsweep_10` finished before all this: 1.691 vs the control's 1.693
+(−0.002, inside noise → no re-target of the frozen 5→6.5); `nsweep_8` 1.706; `nsweep_4` still owed.
+
+What the daemon does now (d9692a0 and the follow-up commit): a CUDA OOM leaves the record `failed` and queues
+a `--resume` copy **in front** with a 2/10/30-min delay that only starts once free + cached GPU memory covers
+the failed run's tracked peak + 384 MiB — a structurally too-big job waits visibly while the queue flows around
+it (three retries per lineage); `mote train start --front` jumps the queue; a resumed run continues its wall
+clock (`elapsed_sec` in the checkpoint; older checkpoints read the log's last `elapsed_min`) so `--max-minutes`
+and the WSD progress no longer restart; a fresh start into a used directory rotates the old log aside and
+`lr_horizon.read_run` reads only the last fresh start. The restart at 20:52 that made this live exposed the last
+gap: systemd's SIGTERM ended the process in under a second — no shutdown hook, so the running T3 arm
+(13 min in, no checkpoint yet) restarted from step 0. `app.main` now calls `jobs.shutdown()` + `join` after
+uvicorn returns (the job checkpoints at its next step boundary, skips the final eval, re-enqueues in front),
+the unit carries `TimeoutStopSec=180`, and the second restart waits for the arm's next checkpoint.
+
+Queue after the fixes: `t3l_dense_4e-4` (running since 20:52) → `ab3_jepa_sig` (resume) → `nsweep_4` → the
+other four T3 arms → the nine flagship arms re-queued (they retry-wait for memory if the desktop is still heavy).
+
 ## Other findings
 
 - Dynamo cannot trace the Triton kernels inside the custom ops (`triton_kernel_wrap`: "`_semantic` argument

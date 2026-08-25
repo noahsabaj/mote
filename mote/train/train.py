@@ -484,7 +484,14 @@ class Trainer:
         self.fwd = torch.compile(model) if args.compile else model
         if getattr(args, "tf32", False):
             torch.set_float32_matmul_precision("high")  # TF32 for fp32 GEMMs; off (="highest") is the frozen default
-        self.log_f = open(out_dir / "log.jsonl", "a", encoding="utf-8")
+        log_path = out_dir / "log.jsonl"
+        if not (args.resume and self.step > 0) and log_path.exists() and log_path.stat().st_size > 0:
+            # a fresh start into a used directory keeps the old run's log aside instead of appending to it
+            n = 1
+            while (out_dir / f"log.{n}.jsonl").exists():
+                n += 1
+            log_path.rename(out_dir / f"log.{n}.jsonl")
+        self.log_f = open(log_path, "a", encoding="utf-8")
         self.tokens_per_step = args.batch_size * args.seq_len * args.grad_accum
         self.total_steps = args.max_steps
         self.time_driven = args.max_steps == 0  # schedules follow wall-clock progress; step count is only an estimate
@@ -682,12 +689,13 @@ class Trainer:
         if self._stop:
             self.log({"stopped": self.stopped_reason or "requested"})
 
-        ev = self._evaluate(cfg.dc.target_ratio_final)
-        ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
-        self.log({"eval": ev, "final": True})
+        if self.stopped_reason != "interrupted":  # an interrupted run resumes: checkpoint only, no final eval
+            ev = self._evaluate(cfg.dc.target_ratio_final)
+            ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
+            self.log({"eval": ev, "final": True})
 
         self.save()
-        self.log({"done": True, "final_step": self.step})
+        self.log({"done": True, "final_step": self.step, "interrupted": self.stopped_reason == "interrupted"})
 
     def close(self):
         self.log_f.close()

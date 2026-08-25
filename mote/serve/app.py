@@ -578,6 +578,12 @@ def main(argv=None):
     jobs.start()
     print(json.dumps(eng.info(), indent=1), flush=True)
     uvicorn.run(app, host=args.host, port=args.port)
+    # SIGTERM (systemd stop/restart) returns here once the server is down: the running job reaches a step
+    # boundary, checkpoints and re-enqueues itself in front (the unit's TimeoutStopSec bounds this wait; a
+    # kill instead costs up to --ckpt-minutes of the run — what happened on 2026-08-24 before this hook)
+    jobs.shutdown()
+    print("stopping the running job at its next step boundary ...", flush=True)
+    print("job queue stopped" if jobs.join(timeout=150.0) else "job queue still busy at exit", flush=True)
 
 
 if __name__ == "__main__":
