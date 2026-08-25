@@ -379,6 +379,7 @@ def prefs_cmd(args) -> int:
 
 
 def _api(method: str, path: str, body=None):
+    import urllib.error
     import urllib.request
 
     cfg = load_config()
@@ -386,20 +387,41 @@ def _api(method: str, path: str, body=None):
     req = urllib.request.Request(f"http://127.0.0.1:{cfg['port']}{path}", method=method,
                                  headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"},
                                  data=json.dumps(body).encode() if body is not None else None)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:  # the daemon's own message (400 malformed args, 404 no such job), not a traceback
+        try:
+            detail = json.loads(e.read()).get("detail", "")
+        except Exception:
+            detail = ""
+        print(f"studio refused {method} {path}: {e.code} {detail or e.reason}", file=sys.stderr)
+        raise SystemExit(1)
+    except urllib.error.URLError as e:
+        print(f"no studio on port {cfg['port']} ({e.reason}); `mote status`", file=sys.stderr)
+        raise SystemExit(1)
+
+
+TRAIN_START_USAGE = """usage: mote train start [--front] [--serve] -- <args for python -m mote.train.train>
+  --front   ahead of everything queued
+  --serve   on the air: its EMA answers chats while it runs and its final checkpoint becomes the pin
+            (the trunk and the branches; never a screening arm)
+  e.g. mote train start --serve -- --preset flagship --data data/mix_a --out runs/trunk --schedule trunk
+  trainer flags: python -m mote.train.train --help"""
 
 
 def train_cmd(args) -> int:
-    """Training jobs on the resident studio (docs/shape.md): start | stop | queue."""
+    """Training jobs on the resident studio (docs/shape.md): start | stop | serve | queue."""
     if args.action == "start":
-        if not args.train_args:
-            print("usage: mote train start -- --preset local --data data/local_mix --out runs/x ...")
+        if not args.train_args or any(a in ("-h", "--help") for a in args.train_args):
+            print(TRAIN_START_USAGE)
             return 2
         out = _api("POST", "/api/training/start", {"args": args.train_args, "front": bool(args.front), "serve": bool(args.serve)})
         print(json.dumps(out, indent=1))
     elif args.action == "stop":
         print(json.dumps(_api("POST", "/api/training/stop", {"id": args.id}), indent=1))
+    elif args.action == "serve":  # put the running (or a queued) job on the air, or take it off with --off
+        print(json.dumps(_api("POST", "/api/training/serve", {"id": args.id, "on": not args.off}), indent=1))
     elif args.action == "queue":
         print(json.dumps(_api("GET", "/api/training/queue"), indent=1))
     return 0
@@ -429,12 +451,13 @@ def main(argv=None) -> int:
     pr.add_argument("file", nargs="?", help="verdicts JSONL for `import`")
     pr.add_argument("--out", default="data/prefs/to_rate.jsonl")
     pr.add_argument("--limit", type=int, default=None)
-    tr = sub.add_parser("train", help="training jobs on the resident studio: start -- <train args> | stop [--id] | queue")
-    tr.add_argument("action", choices=["start", "stop", "queue"])
-    tr.add_argument("--id", default=None, help="job id for `stop` (default: the running one)")
+    tr = sub.add_parser("train", help="training jobs on the resident studio: start [--front] [--serve] -- <train args> | stop [--id] | serve [--id] [--off] | queue")
+    tr.add_argument("action", choices=["start", "stop", "serve", "queue"])
+    tr.add_argument("--id", default=None, help="job id for `stop` / `serve` (default: the running one)")
     tr.add_argument("--front", action="store_true", help="start: put the job ahead of everything queued")
     tr.add_argument("--serve", action="store_true",
                     help="start: put the job on the air — its EMA answers chats while it runs and its final checkpoint becomes the pin (the trunk and the branches; never an arm)")
+    tr.add_argument("--off", action="store_true", help="serve: take the job off the air instead")
     tr.add_argument("train_args", nargs=argparse.REMAINDER, help="after `--`: args for python -m mote.train.train")
     args = ap.parse_args(argv)
     if getattr(args, "cmd", None) == "train":
@@ -448,10 +471,12 @@ def main(argv=None) -> int:
         opts.add_argument("--id", default=None)
         opts.add_argument("--front", action="store_true")
         opts.add_argument("--serve", action="store_true")
+        opts.add_argument("--off", action="store_true")
         ns, unknown = opts.parse_known_args(lead)
         args.id = args.id or ns.id
         args.front = args.front or ns.front
         args.serve = args.serve or ns.serve
+        args.off = args.off or ns.off
         args.train_args = unknown + rest
 
     if args.cmd == "service":
