@@ -69,6 +69,28 @@ the `grouped_mm` bf16 path; loads 0.24–0.26 per expert, MaxVio 0.04–0.05 (lo
 Consequence for the five 12-h verdict arms: on L4s, 12 h ≈ 9 local hours (D/N ≈ 15, predicted MoE signal
 ≈ −0.010 bpb, above the ±0.005 gate) for ≈ $29; D/N ≈ 20 needs 16 h ≈ $38. Noah decides.
 
+## H100 tile session (20:06–20:13, interruptible, ≈ $0.45; the consented Hopper session)
+
+Tests 38/38 on the H100. Tile sweep at the flagship shape (B, 8 heads, 2730 chunks, d 96):
+
+| kernel | Hopper fallback (64,64,4,2) | best | gain |
+|---|---|---|---|
+| fwd, B=1 | 0.143 ms | **(64,128,4,2) 0.132 ms** | −8 % |
+| fwd, B=4 | 0.434 ms | (64,128,4,2) 0.378 ms | −13 % |
+| bwd, B=1 | 0.358 ms | **(128,64,8,2) 0.352 ms** | −2 % (128-wide N tiles run out of shared memory) |
+
+`_TILES` now carries these Hopper entries. v2 vs v1 on the H100 with the fallback tiles: fwd+bwd 1.17–1.60× but
+**fwd 0.45–0.81×** at four of five shapes — a structural effect (the 64+32 head split costs Hopper's wide tensor
+cores two dots instead of one padded 128), not a tile effect; irrelevant for the local card, where v2's fwd is
+1.4–2.6× v1, and a note for any future Hopper training (v1-style padding or a Gluon/wgmma port there).
+
+**The per-kernel table the probe lost** (profile b4, 16384, `--trace`; 579 KB/s, MFU 11.8 %, 80 % busy, 5322
+launches/step): elementwise/copy **31.2 %**, Mamba-3 21.1 % (`mamba3_siso_fwd` 9.3 + `_bwd_dqkv` 8.7),
+"other" 18.7 %, GEMM 14.0 %, layernorm 12.3 % (`_layer_norm_bwd_kernel` alone 10.2 %, 90 calls),
+FlashRelation v2 12.7 % (`_bwd_kernel` 8.1, `_fwd_kernel` 4.6), `CatArrayBatchedCopy` 4.2 % (122 calls),
+`angle_dt_bwd` 2.5 %. The fusion/launch bucket (elementwise + copies + cat ≈ 35 %) is the compile
+workstream's target; the norm backward is the one custom kernel with real headroom (8× off its bandwidth floor).
+
 ## Other findings
 
 - Dynamo cannot trace the Triton kernels inside the custom ops (`triton_kernel_wrap`: "`_semantic` argument

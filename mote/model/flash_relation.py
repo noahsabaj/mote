@@ -468,8 +468,10 @@ _TILES = {
     ("ada", "fwd"): (64, 64, 4, 2),
     ("ada", "bwd"): (64, 64, 4, 2),
     ("ada", "rows"): (64, 64, 4, 2),
-    ("hopper", "fwd"): (64, 64, 4, 2),
-    ("hopper", "bwd"): (64, 64, 4, 2),
+    # H100 80GB HBM3, tile session 2026-08-24 (tile_sweep.py, flagship shape (1|4, 8, 2730, 96)):
+    # fwd (64,128,4,2) 0.13 ms b1 / 0.38 ms b4, bwd (128,64,8,2) 0.35 ms b1; rows not swept
+    ("hopper", "fwd"): (64, 128, 4, 2),
+    ("hopper", "bwd"): (128, 64, 8, 2),
     ("hopper", "rows"): (64, 64, 4, 2),
 }
 _ARCH_CACHE: dict = {}
