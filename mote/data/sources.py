@@ -65,7 +65,7 @@ PRETRAIN: List[PretrainSource] = [
 
 
 def _permissive_code(r: dict) -> bool:
-    lic = (r.get("license") or "").lower()
+    lic = str(r.get("license") or "").lower()
     return any(k in lic for k in ("mit", "apache", "bsd", "isc", "unlicense"))
 
 
@@ -88,9 +88,9 @@ FLAGSHIP: List[PretrainSource] = [
     PretrainSource("finewiki_simple", "HuggingFaceFW/finewiki", 0.01, name="simple", note="CC-BY-SA"),
     # reasoning
     PretrainSource("finemath", "HuggingFaceTB/finemath", 0.10, name="finemath-3plus", note="math/step-by-step-dense web"),
-    # code
-    PretrainSource("code", "codeparrot/github-code-clean", 0.07, name="all-all", text=lambda r: r.get("code"), keep=_permissive_code, note="permissive licenses"),
-    PretrainSource("code_long", "codeparrot/github-code-clean", 0.01, name="all-all", text=lambda r: r.get("code"), keep=_permissive_code, min_bytes=8192, max_bytes=65536, note="long files"),
+    # code (codeparrot-clean: inline content + license; github-code-clean and stack-edu ship scripts/blob-ids only)
+    PretrainSource("code", "codeparrot/codeparrot-clean", 0.07, text=lambda r: r.get("content"), keep=_permissive_code, note="Python, permissive licenses"),
+    PretrainSource("code_long", "codeparrot/codeparrot-clean", 0.01, text=lambda r: r.get("content"), keep=_permissive_code, min_bytes=8192, max_bytes=65536, chunk=True, note="long files, chunked"),
     # multilingual (two extra scripts on purpose: byte-level UTF-8 is home turf)
     _fw2("spa_Latn", 0.015), _fw2("fra_Latn", 0.015), _fw2("deu_Latn", 0.015),
     _fw2("por_Latn", 0.015), _fw2("rus_Cyrl", 0.015), _fw2("jpn_Jpan", 0.015),
