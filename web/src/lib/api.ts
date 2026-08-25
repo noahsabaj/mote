@@ -1,5 +1,5 @@
 // HTTP client. Same origin in production (the FastAPI app serves web/dist at `/`);
-// in `npm run dev` the same paths are answered by the dev-only mock plugin.
+// in `bun run dev` the same paths are answered by the dev-only mock plugin.
 
 import type {
   ChatRole,

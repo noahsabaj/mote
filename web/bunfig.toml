@@ -1,0 +1,6 @@
+# `bun run dev|build|check` execute under Bun's runtime rather than Node: Bun prepends $PATH with a
+# `node` symlink pointing at itself, so the `#!/usr/bin/env node` shebang on node_modules/.bin/vite
+# resolves to Bun. Equivalent to passing --bun on every invocation. Delete this file to put Node back
+# under Vite without changing anything else.
+[run]
+bun = true

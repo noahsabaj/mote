@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -298,8 +299,13 @@ def _tailscale_url():
 
 
 def build(skip_tests: bool = False) -> int:
-    npm = "npm.cmd" if os.name == "nt" else "npm"
-    steps = [("web: check", [npm, "run", "check"], ROOT / "web"), ("web: build", [npm, "run", "build"], ROOT / "web")]
+    # bun is what web/ is developed and locked against (web/bun.lock, web/bunfig.toml). npm still runs
+    # the same scripts, so a clone without bun builds rather than stopping — it just uses Node under Vite.
+    pm = shutil.which("bun")
+    if pm is None:
+        pm = "npm.cmd" if os.name == "nt" else "npm"
+        print("bun not found; falling back to npm (install: https://bun.com/install)")
+    steps = [("web: check", [pm, "run", "check"], ROOT / "web"), ("web: build", [pm, "run", "build"], ROOT / "web")]
     if not skip_tests:
         steps.append(("tests", [str(PY), "-m", "pytest", "-q", "tests/"], ROOT))
     for name, cmd, cwd in steps:

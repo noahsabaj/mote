@@ -659,7 +659,7 @@ else:
 
     @app.get("/")
     def no_frontend():
-        return JSONResponse({"message": "frontend not built: run `npm run build` in web/", "api": "/api/model"})
+        return JSONResponse({"message": "frontend not built: run `bun run build` in web/", "api": "/api/model"})
 
 
 def main(argv=None):

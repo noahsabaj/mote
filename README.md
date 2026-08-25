@@ -160,8 +160,9 @@ non-loopback `--host` without one. `docs/remote-access.md` is the runbook for re
 
 ## Frontend
 
-`web/` is a Vite + Svelte 5 + TypeScript app (see `web/README.md`): `npm install`, `npm run dev` (standalone against a
-clearly-labelled dev mock), `npm run build` (→ `web/dist`, served by the backend at `/`), `npm run check`. One page: the
+`web/` is a Vite + Svelte 5 + TypeScript app built with Bun (see `web/README.md`): `bun install`, `bun run dev`
+(standalone against a clearly-labelled dev mock), `bun run build` (→ `web/dist`, served by the backend at `/`),
+`bun run check`. One page: the
 conversation, a one-line honesty strip, and Structure/Bytes toggles under each reply; Model, Diagnostics and Training
 open as sheets. Everything it shows comes from the API above. It is installable (web-app manifest + icons,
 `web/icons/make_icons.py` renders them; no service worker) — see `docs/remote-access.md`.

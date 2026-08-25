@@ -6,15 +6,21 @@ you want it, looking inside the stream it produces.
 ## Commands
 
 ```
-npm install     # once (Node 24, npm 11)
-npm run dev     # http://localhost:5173 — standalone, backed by the dev mock
-npm run build   # → web/dist, which the Python backend serves at /
-npm run check   # svelte-check, TypeScript strict; must report 0 errors
-npm run preview # serve the built bundle (no mock — needs the real backend)
+bun install     # once (Bun 1.4; https://bun.com/install)
+bun run dev     # http://localhost:5173 — standalone, backed by the dev mock
+bun run build   # → web/dist, which the Python backend serves at /
+bun run check   # svelte-check, TypeScript strict; must report 0 errors
+bun run preview # serve the built bundle (no mock — needs the real backend)
 ```
 
-`npm install` may report that `esbuild` has an unapproved install script. Run
-`npm install-scripts approve esbuild` once; Vite needs its platform binary.
+`bunfig.toml` sets `[run] bun = true`, so these run on Bun's runtime rather than Node — Bun puts a
+`node` symlink to itself at the head of `$PATH`, which the `#!/usr/bin/env node` shebang on
+`node_modules/.bin/vite` then resolves to. Deleting `bunfig.toml` puts Node back under Vite and
+changes nothing else. `bun.lock` is the lockfile and is committed; there is no `package-lock.json`.
+
+npm still works if you don't have Bun — the scripts are plain `vite` / `svelte-check` — and
+`mote build` falls back to it, printing that it did. It resolves versions itself, though, so the
+tree you get is not the locked one.
 
 ## How it talks to the backend
 
@@ -22,7 +28,7 @@ Same origin, always. In production the FastAPI app (`mote.serve.app`, port 7860)
 `web/dist` at `/` and answers `/api`, `/v1` and `/ws/generate` itself, so no proxy or base URL
 is configured anywhere.
 
-In `npm run dev` there is no Python process, so `mock/` registers a Vite plugin that answers
+In `bun run dev` there is no Python process, so `mock/` registers a Vite plugin that answers
 exactly the same paths from the dev server. It is `apply: 'serve'` only — nothing under `mock/`
 is imported by `src/`, and nothing from it can reach a production build.
 
@@ -46,6 +52,7 @@ run whose log has no eval record yet, so the "not measured" rendering is visible
 ```
 index.html                  # single entry; inline SVG favicon, no external requests
 vite.config.ts              # svelte plugin + dev-only mock plugin
+bunfig.toml                 # run the scripts on Bun's runtime instead of Node
 src/
   main.ts                   # mount
   app.css                   # design tokens (light + dark), base type, shared controls

@@ -1,6 +1,6 @@
 // Dev-only fixtures. Everything here is invented and is labelled as such in the payloads
 // themselves (see `status_note`, the device name, the run and checkpoint ids), so a screenshot
-// taken against `npm run dev` can never be mistaken for a real measurement.
+// taken against `bun run dev` can never be mistaken for a real measurement.
 
 import type {
   CheckpointListItem,

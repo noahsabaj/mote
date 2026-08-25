@@ -1,4 +1,4 @@
-// Dev-only Vite plugin that answers the docs/api.md contract so `npm run dev` runs
+// Dev-only Vite plugin that answers the docs/api.md contract so `bun run dev` runs
 // standalone. `apply: 'serve'` means none of this is reachable from a production build;
 // in production the same paths are served by the Python backend on the same origin.
 
