@@ -5,6 +5,7 @@ fires the release / idle hooks around jobs; padding rows of the vocabulary are n
 import threading
 
 import torch
+import torch.nn.functional as F
 
 from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
@@ -202,6 +203,11 @@ def test_padding_rows_are_masked_and_never_sampled():
     lg = out.logits[0, -1]
     seen = {_sample(lg, 4.0, 1.0)[0] for _ in range(300)}
     assert max(seen) < VOCAB_SIZE
+    # The mask is only safe because every real consumer reaches the logits through a softmax or a
+    # cross-entropy, which turn -inf into probability zero. Raw arithmetic on them does not survive:
+    # `logits.pow(2).mean()` is inf, which is how three tests came to assert on nan (fixed 2026-08-25).
+    assert torch.isfinite(F.cross_entropy(out.logits[:, :-1].float().flatten(0, 1), ids[:, 1:].reshape(-1)))
+    assert torch.softmax(out.logits.float(), -1)[..., VOCAB_SIZE:].eq(0).all()
     # the decode path masks too, and the tokenizer names the new ids
     state = model.allocate_inference_state("cpu")
     model.prefill(ids[:1], state)

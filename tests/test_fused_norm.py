@@ -97,8 +97,12 @@ def test_model_forward_backward_matches_with_and_without_fusion():
         try:
             model.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                out = model(ids)
-            loss = out.logits.float().pow(2).mean()
+                out = model(ids[:, :-1])
+            # Next-byte cross-entropy, not logits.pow(2): the head masks the padding columns to -inf
+            # (vocab_size -> pad_vocab_to, config.py), so squaring them gave inf, then nan gradients, then
+            # a nan cosine similarity here. allclose on the logits still passed, because it counts equal
+            # infinities as close — which is how this hid.
+            loss = torch.nn.functional.cross_entropy(out.logits.float().flatten(0, 1), ids[:, 1:].reshape(-1))
             loss.backward()
             g = torch.cat([p.grad.flatten().float() for p in model.parameters() if p.grad is not None])
             return out.logits.detach().float(), out.routing.boundary_mask.detach(), g

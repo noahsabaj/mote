@@ -3,6 +3,7 @@ bf16 residual stream. The window must change nothing when it covers the whole se
 when it does not, and both levers must train."""
 
 import torch
+import torch.nn.functional as F
 
 from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
@@ -51,8 +52,12 @@ def test_both_levers_build_and_train_a_step():
         torch.manual_seed(0)
         model = HNetForCausalLM(cfg)
         ids = torch.randint(0, 256, (2, 96))
-        out = model(ids)
-        loss = out.logits.float().pow(2).mean()
+        out = model(ids[:, :-1])
+        # Next-byte cross-entropy, the loss the model is actually trained with (train.py `_masked_ce_sum`).
+        # NOT logits.pow(2): the head masks the padding columns to -inf (vocab_size 266 -> pad_vocab_to 272,
+        # config.py) so a byte that does not exist can never be sampled, and (-inf)^2 is inf. cross_entropy's
+        # log_softmax gives those columns probability zero, which is the whole point of the mask.
+        loss = F.cross_entropy(out.logits.float().flatten(0, 1), ids[:, 1:].reshape(-1))
         loss.backward()
         g = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None])
         assert torch.isfinite(loss) and torch.isfinite(g).all()
