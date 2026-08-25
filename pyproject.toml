@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Byte-level H-Net language model (Mamba-3 encoder/decoder, Relation main network, multi-byte prediction head) and the studio that serves it."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
-license-files = ["LICENSE", "LICENSE-MIT", "LICENSE-APACHE"]
+license-files = ["COPYRIGHT", "LICENSE-MIT", "LICENSE-APACHE"]
 requires-python = ">=3.11"
 dependencies = [
     "torch>=2.6.0",
