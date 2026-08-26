@@ -27,7 +27,17 @@ RESULT_ID = 263
 # Never produced by a pretrained model; the embedding is padded to 272 rows so ids up to 271 need no surgery.
 THINK_ID = 264
 END_THINK_ID = 265
-VOCAB_SIZE = 266  # 256 bytes + 10 specials; MoteConfig.pad_vocab_to (272) rounds the embedding up
+# Fill-in-the-middle over the tool protocol, signed 2026-08-26 (docs/research/midtraining-2026-08-26.md).
+# 2607.12463: an agent's action -> observation -> continuation loop is structurally a function call site —
+# a caller binds arguments, a callee returns a value computed elsewhere, downstream text consumes it — and
+# left-to-right training only ever exposes the forward direction. Predicting a <|call|> from the text on
+# BOTH sides of it is the same objective they mid-trained on, and they found the inductive bias survives
+# post-training while agentic post-training alone erodes non-agent ability. `mote.data.loader` cuts at
+# CALL_ID/RESULT_ID, so the masked span is a real call and not a random offset.
+FIM_PREFIX_ID = 266
+FIM_SUFFIX_ID = 267
+FIM_MIDDLE_ID = 268
+VOCAB_SIZE = 269  # 256 bytes + 13 specials; MoteConfig.pad_vocab_to (272) rounds the embedding up
 
 SPECIAL_NAMES = {
     BOS_ID: "<|bos|>",
@@ -40,6 +50,9 @@ SPECIAL_NAMES = {
     RESULT_ID: "<|result|>",
     THINK_ID: "<|think|>",
     END_THINK_ID: "<|end_think|>",
+    FIM_PREFIX_ID: "<|fim_prefix|>",
+    FIM_SUFFIX_ID: "<|fim_suffix|>",
+    FIM_MIDDLE_ID: "<|fim_middle|>",
 }
 
 

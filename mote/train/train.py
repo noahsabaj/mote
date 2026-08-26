@@ -112,31 +112,57 @@ def wsd_lr(step: int, total: int, base: float, warmup_frac: float = 0.1, decay_f
     return base * max(min_ratio, 1.0 - (1.0 - min_ratio) * math.sqrt(t))
 
 
+BRANCH_SCHEDULES = ("branch", "cooldown", "constant")
+BRANCH_DECAY_FRAC = 0.2  # the 2x2's fork point: constant to here, then decay (docs/shape.md § mid)
+
+
 def schedule_lr(kind: str, step: int, total: int, base: float, min_ratio: float = 0.1) -> float:
-    """The three schedules of the pipeline (docs/shape.md, signed 2026-08-24).
+    """The schedules of the pipeline (docs/shape.md § mid, re-signed 2026-08-26).
 
     `wsd`      warmup-stable-decay over the budget — the lab arms.
-    `trunk`    warmup (10 %) then constant, never decays — the flagship trunk; cooldowns branch off it.
-    `cooldown` decay only: base -> min_ratio over the whole run, no warmup — a branch started with
-               `--init-from` a trunk snapshot.
+    `trunk`    warmup (10 %) then constant, never decays — the flagship trunk; branches fork off it.
+               This is Warmup-Stable-Only, which 2603.16127 measured as the best pre-training schedule
+               *for post-SFT quality* at 1B and 8B, beating every decay variant it lost to on val loss.
+    `branch`   constant for the first 80 %, then decay to `min_ratio` over the last 20 % — the mid-training
+               branches. `constant` is the same run without the decay, which is the other arm of the 2x2.
+
+    The old `cooldown` (base -> 0.1x over the whole branch, as 1-sqrt(t)) is retired. Two 2026 results
+    killed it. Index-1.9B (2607.09885 §6.4-6.5) found the schedule alone is worth almost nothing at 0.1B,
+    and that what pays is decay *combined with* a data-quality raise — but that combination only worked
+    under WSD: cosine plus curated data scored *below* plain cosine, because "the cosine tail leaves too
+    little learning rate" to adapt to the distribution shift. 2605.25698 names the same conflict formally
+    (the model meets its best data exactly when its learning intensity is weakest) and measures +3.27 on a
+    600M dense model for fixing it. 1-sqrt(t) is the worst shape for this: it is concave, so it was down
+    to 55 % of peak by the first quarter of the branch — precisely when mix C's shift arrives.
     """
     if kind == "trunk":
         warm = max(int(total * 0.1), 1)
         return base * (step + 1) / warm if step < warm else base
-    if kind == "cooldown":
+    if kind == "constant":
+        return base
+    if kind in ("branch", "cooldown"):  # `cooldown` accepted so a saved config still parses; it now gets
+        #                                  the `branch` curve, which is safe because no cooldown branch has
+        #                                  ever been run — the mid stage has not executed yet.
         t = min(step / max(total, 1), 1.0)
-        return base * max(min_ratio, 1.0 - (1.0 - min_ratio) * math.sqrt(t))
+        if t < 1.0 - BRANCH_DECAY_FRAC:
+            return base
+        u = (t - (1.0 - BRANCH_DECAY_FRAC)) / BRANCH_DECAY_FRAC
+        return base * max(min_ratio, 1.0 - (1.0 - min_ratio) * u)  # linear, straight to min_ratio
     return wsd_lr(step, total, base, min_ratio=min_ratio)
 
 
 def parse_mix_spec(spec: str):
-    """`PREFIX:SHARE[:plain]` -> (prefix, share, plain). `plain` reads an SFT shard's bytes without its
-    loss mask (chat/identity bytes as ordinary LM data in a cooldown mix)."""
+    """`PREFIX:SHARE[:plain][:fim]` -> (prefix, share, plain, fim).
+
+    `plain` reads an SFT shard's bytes without its loss mask (chat/identity bytes as ordinary LM data in a
+    mid-training mix). `fim` additionally permutes each training window around one of its tool calls
+    (mote.data.loader.fim_window, 2607.12463) — the tool-trace shard is the only one it is used on, since
+    a window with no `<|call|>` in it passes through unchanged."""
     parts = spec.split(":")
-    plain = parts[-1] == "plain"
-    if plain:
-        parts = parts[:-1]
-    return ":".join(parts[:-1]), float(parts[-1]), plain
+    fim = "fim" in parts[2:]
+    plain = "plain" in parts[2:] or fim  # a FIM shard is read without its mask by construction
+    parts = [q for q in parts if q not in ("plain", "fim")]
+    return ":".join(parts[:-1]), float(parts[-1]), plain, fim
 
 
 def set_lr(opt, lr: float):
@@ -388,8 +414,10 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--jepa-weight", type=float, default=0.05, help="weight of the JEPA aux loss")
     ap.add_argument("--no-flash", action="store_true", help="A/B: materialized Relation instead of the Triton kernel")
     ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
-    ap.add_argument("--schedule", default="wsd", choices=["wsd", "trunk", "cooldown"], help="wsd: warmup-stable-decay over the budget (lab arms); trunk: warmup then constant, no decay (the flagship trunk); cooldown: decay only, lr -> 0.1x over the run (a branch started with --init-from a trunk snapshot). docs/shape.md pipeline")
-    ap.add_argument("--snapshot-steps", type=int, default=0, help="also keep a weights-only snap_<step>.pt every N steps (the branch points for cooldowns)")
+    ap.add_argument("--schedule", default="wsd", choices=["wsd", "trunk", "branch", "constant", "cooldown"], help="wsd: warmup-stable-decay over the budget (lab arms); trunk: warmup then constant, never decays (the flagship trunk); branch: constant for 80%% then decay to --min-lr-ratio (a mid-training branch off a trunk snapshot); constant: the same branch without the decay, the other arm of the 2x2. `cooldown` is a deprecated alias for `branch`. docs/shape.md § mid")
+    ap.add_argument("--min-lr-ratio", type=float, default=None, help="where a decay lands, as a fraction of --lr. Default depends on the schedule: 0 for a branch (straight to zero — Bergsma 2502.15938, and 2602.06797's optimal schedules also terminate at 0), 0.1 for wsd, which every lab arm to date was run with and must stay comparable to.")
+    ap.add_argument("--snapshot-steps", type=int, default=0, help="also keep a weights-only snap_<step>.pt every N steps (the branch points for the mid-training branches)")
+    ap.add_argument("--snapshot-at", type=float, default=None, metavar="FRAC", help="also snapshot the first time the run crosses this fraction of its horizon. The 2x2 forks here: the decayed arm keeps going under --schedule branch, and the no-decay arm resumes from this snapshot under --schedule constant for the remaining bytes, so the two are token-matched (docs/shape.md § mid)")
     ap.add_argument("--eval-spread", action="store_true", help="evaluate on windows spread over the whole val shard instead of its head (= first source only); use for the trunk and branches, never mid-queue")
     ap.add_argument("--eval-ema", type=float, default=0.0, help="also evaluate an EMA of the weights (per-step decay; 0 = off): the decayed-quality stand-in for constant-LR runs that the LR-vs-horizon fit reads (2608.20061 §2.2.1; mote/train/lr_horizon.py); logs val_bpb_ema")
     return ap
@@ -491,8 +519,9 @@ class Trainer:
         if args.mix:
             extras = []
             for spec in args.mix:
-                prefix, share, plain = parse_mix_spec(spec)
-                extras.append((ByteShard(prefix, "train", sft=args.sft or plain, plain=plain), share))
+                prefix, share, plain, fim = parse_mix_spec(spec)
+                extras.append((ByteShard(prefix, "train", sft=args.sft or plain, plain=plain, fim=fim,
+                                         seed=args.seed + len(extras) + 1), share))
             main_w = max(1.0 - sum(w for _, w in extras), 0.0)
             train_shard = MixedShard([train_shard] + [s for s, _ in extras], [main_w] + [w for _, w in extras])
             print("training mix:", {args.data: main_w, **{spec: parse_mix_spec(spec)[1] for spec in args.mix}}, flush=True)
@@ -500,6 +529,11 @@ class Trainer:
         if args.init_from and not (args.resume and ckpt_path_exists(out_dir)):
             _step, _ = load_checkpoint(Path(args.init_from), model, None)
             print(f"initialized weights from {args.init_from} (step {_step})", flush=True)
+        # A per-schedule default, not a global one: `wsd` has always decayed to 0.1x and every lab arm on
+        # record was run that way, so changing its floor would silently make new arms incomparable to their
+        # own controls. Only the branches go to zero.
+        self.min_lr_ratio = args.min_lr_ratio if args.min_lr_ratio is not None else (
+            0.0 if args.schedule in BRANCH_SCHEDULES else 0.1)
         self.gen = torch.Generator().manual_seed(args.seed)
 
         self.step, self.t_start = 0, time.time()
@@ -688,7 +722,7 @@ class Trainer:
         return min(self.step / max(self.total_steps, 1), 1.0)
 
     def _running(self) -> bool:
-        if self.args.schedule == "cooldown":  # a branch ends where its decay ends, by step, resume-proof
+        if self.args.schedule in BRANCH_SCHEDULES:  # a branch ends on its step horizon, resume-proof
             return self.step < self.sched_total
         return (self._progress() < 1.0) if self.time_driven else (self.step < self.total_steps)
 
@@ -726,6 +760,7 @@ class Trainer:
         last_ckpt = time.time()
         t_log = time.time()
         snap_idx = self.step // args.snapshot_steps if args.snapshot_steps else 0
+        snapped_at = args.snapshot_at is not None and (self.sched_total or 0) and self.step >= args.snapshot_at * self.sched_total
 
         while self._running() and not self._stop:
             # wsd follows wall-clock progress (arms compare at equal wall-clock); trunk/cooldown follow
@@ -734,17 +769,21 @@ class Trainer:
             pr = self._progress() if args.schedule == "wsd" else min(self.step / max(self.sched_total, 1), 1.0)
             horizon = 1000
             sched_step = int(pr * horizon)
-            # a cooldown branch starts from a trunk that finished its ATDC ramp: hold the final target
-            if args.schedule == "cooldown":
+            # a branch starts from a trunk that finished its ATDC ramp: hold the final target
+            if args.schedule in BRANCH_SCHEDULES:
                 target_ratio = cfg.dc.target_ratio_final
             else:
                 target_ratio = atdc_target_ratio(sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final, cfg.dc.schedule_warmup_frac)
-            lr = schedule_lr(args.schedule, sched_step, horizon, args.lr)
+            lr = schedule_lr(args.schedule, sched_step, horizon, args.lr, min_ratio=self.min_lr_ratio)
             set_lr(self.opt, lr)
             stats = yield from self._train_step(target_ratio)
             self.step += 1
             if args.snapshot_steps and self.step // args.snapshot_steps > snap_idx:
                 snap_idx = self.step // args.snapshot_steps
+                self.snapshot()
+            if args.snapshot_at is not None and not snapped_at and pr >= args.snapshot_at:
+                snapped_at = True
+                print(f"fork snapshot at {pr:.3f} of the horizon (step {self.step})", flush=True)
                 self.snapshot()
             if self.step % args.log_every == 0:
                 dt = time.time() - t_log

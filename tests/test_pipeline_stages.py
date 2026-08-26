@@ -1,6 +1,10 @@
-"""The pipeline's stage mechanics (docs/shape.md § pre/mid/post, signed 2026-08-24): the three schedules,
-plain-LM mixes of SFT shards, fresh-document skipping for mixes B/C, local-JSONL shards, and a trunk ->
-snapshot -> cooldown branch whose step horizon survives a stop + resume."""
+"""The pipeline's stage mechanics (docs/shape.md § pre/mid/post): the schedules, plain-LM and FIM mixes of
+SFT shards, fresh-document skipping for mixes B/C, local-JSONL shards, and a trunk -> snapshot -> branch
+whose step horizon survives a stop + resume.
+
+Re-signed 2026-08-26 for the mid-training rework: `cooldown` (1-sqrt(t) to 0.1x over the whole branch)
+became `branch` (constant to 80 %, then linear to zero), `constant` joined it as the other arm of the
+2x2, and the ANNEAL long-document share is asserted rather than assumed."""
 
 import json
 
@@ -24,14 +28,27 @@ def test_three_schedules():
     assert schedule_lr("trunk", 0, 1000, base) == pytest.approx(base / 100)  # warmup ramp
     assert schedule_lr("trunk", 99, 1000, base) == pytest.approx(base)
     assert all(schedule_lr("trunk", s, 1000, base) == base for s in (100, 500, 999, 5000))  # never decays
-    cool = [schedule_lr("cooldown", s, 1000, base) for s in range(0, 1001, 25)]
-    assert cool[0] == base and cool[1] > 0.8 * base  # no warmup
-    assert all(a >= b for a, b in zip(cool, cool[1:])) and cool[-1] == pytest.approx(0.1 * base)
+    # `branch` (re-signed 2026-08-26): constant for 80 %, then straight down. The old `cooldown` decayed
+    # over the whole branch as 1-sqrt(t), which was at 55 % of peak by the first quarter — the shape
+    # Index-1.9B (2607.09885 §6.5) measured as *worse than not curating at all*, because the model meets
+    # the new data mixture with too little learning rate left to adapt to it.
+    br = [schedule_lr("branch", s, 1000, base, min_ratio=0.0) for s in range(0, 1001, 25)]
+    assert br[0] == base and all(x == base for x in br[:32])  # flat while mix C is being absorbed
+    assert all(a >= b for a, b in zip(br, br[1:])) and br[-1] == pytest.approx(0.0)
+    assert schedule_lr("branch", 900, 1000, base, min_ratio=0.0) == pytest.approx(0.5 * base)  # linear
+    assert schedule_lr("cooldown", 900, 1000, base, min_ratio=0.0) == pytest.approx(0.5 * base)  # alias
+    # `constant`: the no-decay arm of the 2x2 — same data, same length, no decay at all.
+    assert all(schedule_lr("constant", s, 1000, base) == base for s in (0, 500, 999, 1000))
+    # wsd is untouched: every lab arm on record decayed to 0.1x, and --min-lr-ratio defaults per-schedule
+    # rather than globally so a new arm stays comparable to its own control.
+    assert schedule_lr("wsd", 1000, 1000, base) == pytest.approx(0.1 * base)
 
 
 def test_parse_mix_spec():
-    assert parse_mix_spec("data/sft_identity:0.05") == ("data/sft_identity", 0.05, False)
-    assert parse_mix_spec("data/sft_local:0.03:plain") == ("data/sft_local", 0.03, True)
+    assert parse_mix_spec("data/sft_identity:0.05") == ("data/sft_identity", 0.05, False, False)
+    assert parse_mix_spec("data/sft_local:0.03:plain") == ("data/sft_local", 0.03, True, False)
+    # `fim` implies `plain`: the permutation replaces the loss mask's job, so a masked read would be wrong
+    assert parse_mix_spec("data/tool_traces:0.03:fim") == ("data/tool_traces", 0.03, True, True)
 
 
 def _sft_shard(tmp_path, name="chat", n=4000):
@@ -80,6 +97,12 @@ def test_anneal_registry_is_the_flagship_sources_reweighted():
     flag = {s.key: s.share for s in FLAGSHIP}
     assert share["finemath"] > flag["finemath"] and share["synth"] > flag["synth"] and share["fineweb_edu"] < flag["fineweb_edu"]
     assert all(share[k] > 0 for k in flag) and flag["fineweb_edu"] == 0.25  # FLAGSHIP itself untouched
+    # The reweighting must not quietly spend the long documents on math. As first written it cut them from
+    # 10.0 % to 8.6 %, which is the direction PRISM (2603.17074 §8.1) measured collapsing RULER@128k from
+    # 59.09 to 6.46 at larger amplitude — and `needle_auto` was not a gate decider, so it could have
+    # shipped. It is a guard now, and this keeps the mixture on the right side of the same line.
+    LONG = ("finewiki_long", "gutenberg", "fineweb_long", "code_long")
+    assert sum(share[k] for k in LONG) >= sum(flag[k] for k in LONG)
 
 
 def test_build_local_plain_and_sft(tmp_path):
@@ -131,7 +154,7 @@ def _log(out):
     return [json.loads(l) for l in (out / "log.jsonl").read_text().splitlines()]
 
 
-def test_trunk_snapshots_then_a_cooldown_branch_keeps_its_horizon_across_resume(tmp_path):
+def test_trunk_snapshots_then_a_branch_keeps_its_horizon_across_resume(tmp_path):
     cfg_path, prefix = _fixture(tmp_path)
     trunk = tmp_path / "trunk"
     t = Trainer(_argv(cfg_path, prefix, trunk, ["--max-steps", "4", "--schedule", "trunk", "--snapshot-steps", "2"]))
@@ -146,26 +169,30 @@ def test_trunk_snapshots_then_a_cooldown_branch_keeps_its_horizon_across_resume(
     assert ck["step"] == 2 and "optimizer" not in ck and ck["extra"]["schedule"] == "trunk"
 
     branch = tmp_path / "branch"
-    argv = _argv(cfg_path, prefix, branch, ["--max-steps", "6", "--schedule", "cooldown", "--init-from", str(snap), "--mix", f"{prefix}:0.1"])
+    argv = _argv(cfg_path, prefix, branch, ["--max-steps", "20", "--schedule", "branch", "--init-from", str(snap), "--mix", f"{prefix}:0.1"])
     t = Trainer(argv)
     steps = 0
     for ph, _ in t.run():
         if ph == "step":
             steps += 1
-            if steps == 2:
+            if steps == 6:
                 t.request_stop("test")
     t.close()
-    assert t.step == 2 and json.loads((branch / "log.jsonl").read_text().splitlines()[-1]).get("done") is True
+    assert t.step == 6 and json.loads((branch / "log.jsonl").read_text().splitlines()[-1]).get("done") is True
     t = Trainer(argv + ["--resume"])
-    assert t.step == 2 and t.sched_total == 6  # the horizon came back from the checkpoint
+    assert t.step == 6 and t.sched_total == 20  # the horizon came back from the checkpoint
     for _ in t.run():
         pass
     t.close()
-    assert t.step == 6
+    assert t.step == 20
     recs = [l for l in _log(branch) if "lr" in l]
     lrs = [l["lr"] for l in recs]
-    assert len(lrs) == 6 and all(a > b for a, b in zip(lrs, lrs[1:]))  # one monotone decay across the resume
-    expect = [schedule_lr("cooldown", int(min(s / 6, 1.0) * 1000), 1000, 1e-3) for s in range(6)]
+    # One schedule across the stop and resume: flat for the first 80 % of the horizon, then straight down
+    # to --min-lr-ratio (0 by default). The stop lands at step 6, inside the constant phase, so this also
+    # checks that a resume does not restart the decay clock.
+    assert len(lrs) == 20 and all(a >= b for a, b in zip(lrs, lrs[1:]))
+    expect = [schedule_lr("branch", int(min(s / 20, 1.0) * 1000), 1000, 1e-3, min_ratio=0.0) for s in range(20)]
     assert lrs == [pytest.approx(e) for e in expect]
+    assert lrs[0] == pytest.approx(1e-3) and lrs[-1] < lrs[0]  # no warmup on a branch, and it does decay
     cfg = MoteConfig.load(cfg_path)
     assert all(l["target_ratio"] == cfg.dc.target_ratio_final for l in recs)  # the ramp is over on a branch

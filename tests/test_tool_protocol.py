@@ -14,7 +14,10 @@ from mote.tokenizer import ASSISTANT_ID, BOS_ID, CALL_ID, EOS_ID, RESULT_ID, USE
 
 
 def test_parse_call_and_vocab():
-    assert VOCAB_SIZE == 266 and CALL_ID == 262 and RESULT_ID == 263
+    # 266 until 2026-08-26, when the three FIM sentinels for the mid-training tool traces took 266-268
+    # (2607.12463). The ids below are frozen: they are baked into every existing checkpoint and every
+    # built shard, so a renumbering silently reinterprets stored bytes.
+    assert VOCAB_SIZE == 269 and CALL_ID == 262 and RESULT_ID == 263
     assert parse_call("search: byte-level tokenizers") == ("search", "byte-level tokenizers")
     assert parse_call(" Sim : take candle ") == ("sim", "take candle") and parse_call("nothing") == ("nothing", "")
 

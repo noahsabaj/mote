@@ -95,18 +95,54 @@ Data: mix A = the frozen 10 GB; **mix B** = fresh 10 GB of the same composition 
 flagship --skip-after data/flagship_mix.meta.json`: the HF streams are file-ordered and unshuffled, so
 skipping A's recorded per-source bytes replays past exactly A's documents).
 
-**Mid — two cooldown branches, ~1.4 GPU-days each.** `--init-from <trunk snapshot> --schedule cooldown`:
-lr 8e-4 → 0.1× (inverse-sqrt) over the whole branch, no warmup, chunk target held at its final value, the
-step horizon fixed at the first probe so a resume continues the decay. **Control** = mix B. **Anneal** =
-**mix C** (8 GB fresh, the ANNEAL table in `mote/data/sources.py`: fineweb_edu 18 / dclm 8 / Ultra-FineWeb
-rewrites 4 / fact-seeking 2 / simple-wiki 1 · SYNTH Q&A 10 / finephrase 7 / Cosmopedia 7 · finemath 15 ·
-code 7 + 1 long · multilingual 6 · long documents 7, of the branch's ~93 %) plus plain-LM extras via
-`--mix …:plain`: sim narrative+QA 4 % (`build_local`), chat (`sft_local`, no mask) 3 %, identity 0.2 %.
-Gate: both branches get the identical 60-min SFT, then reading EM/F1, sim-QA EM (new probe),
-identity/hold/concede, needle and chat val decide; guard = overall val bpb ≤ control + 0.005, per-domain
-vals recorded. Anneal ships if it wins ≥ 2 of {reading, sim-QA, chat val} with no guard tripped, else
-control. The winner's final checkpoint is the **flagship base**; the pair is the flagship's own
-mid-training A/B (docs/results).
+**Mid — a 2x2 over mixture and decay, ~3.6 GPU-days** (re-signed 2026-08-26,
+docs/research/midtraining-2026-08-26.md; the 2026 reading is tabulated there and the numbers below come
+from it). Two branches fork off a trunk snapshot, each running `--init-from <snap>` at constant lr 8e-4 to
+80 % of its horizon, snapshotting there (`--snapshot-at 0.8`), and then splitting:
+
+```
+                         +-- --schedule branch,   decay 80->100 %  -> *_decayed
+  constant 8e-4 to 80 % -+
+                         +-- --schedule constant, 80->100 %        -> *_constant  (token-matched)
+```
+
+**Control** = mix B. **Anneal** = mix C (the ANNEAL table in `mote/data/sources.py`). **The extras are
+identical in both** — that is the point. Until 2026-08-26 only the anneal carried sim/chat/identity, and
+all three of the gate's deciders were then won by data inclusion rather than by the mixture, so the
+experiment could not fail. The A/B now varies the web half alone. Extras, 15 % of each branch:
+`data/spec_plain:0.03:plain` (identity as documents), `data/sim_traces:0.03:fim` (the tool protocol,
+fill-in-the-middle around its own `<|call|>`/`<|result|>` boundaries), `data/sim_long_plain:0.04:plain`,
+`data/sft_local:0.05:plain`. The old identity Q&A slot is gone from the mix: the card recited as an answer
+is what produced `identity_recite_rate` 0.70 before DPO ever ran.
+
+*Why the schedule changed.* The old `cooldown` decayed to 0.1x over the whole branch as `1-sqrt(t)` — a
+concave curve at 55 % of peak by the first quarter, exactly when mix C's distribution shift arrives.
+Index-1.9B (2607.09885 §6.4-6.5) measured that configuration as *worse than not curating at all*: the
+schedule alone is worth nothing at 0.1B, what pays is decay combined with a data-quality raise, and the
+combination only worked under WSD because "the cosine tail leaves too little learning rate" to adapt.
+2605.25698 names the same conflict formally and measures +3.27 on a 600M dense model for fixing it. The
+decay now sits in the last 20 % and goes to **zero** (`--min-lr-ratio 0`).
+
+*Why the decay is an axis and not an assumption.* 2603.16127 finds decay at **any** stage costs post-SFT
+quality at 1B and 8B, while 2607.12360 finds a normalised optimizer like Muon cannot self-anneal and needs
+it for loss. Both can hold — decay lowers loss by entering a sharper minimum, and the sharpness is what
+costs the SFT — and until now nothing in the pipeline could tell them apart, because both branches were
+cooldowns. Mote's own EMA already buys 0.075-0.098 bpb over the raw weights at constant lr, which is most
+of what a cooldown is for. The 2x2 asks the question. A fifth arm, the trunk snapshot's EMA through the
+same SFT, is a **floor**: it carries none of the extras, so its capability numbers are a lower bound and
+not a contestant.
+
+**Gate: one decider, the rest guards.** Decider: `proxy_agree` from `mote.eval.proxy` — inverse-frequency
+weighted top-1 byte agreement with held-out expert trajectories (2605.18607: cross-entropy ranks candidates
+at Spearman 0.36, trajectory proxies at 0.81, and "a model which cannot solve a problem can still track
+the CoT written by an expert"). Guards, all of which must hold: shared val bpb <= control + 0.005 **within
+the same decay condition**, `needle_auto` no-regression, `false_fire_rate` no-regression. Reading EM,
+sim-QA EM, chat val bpb, identity/hold/concede and the per-domain vals are reported and do not vote — at
+this scale exact match sits on its noise floor (docs/search.md records a flat 0 on reading at 35M), and a
+metric that cannot discriminate should not cast a ballot. Missing numbers fail closed. `needle` was
+measured and then ignored by the old verdict while the same reweighting cut the long-document share
+10.0 % -> 8.6 %; that share is back to 10.5 % and the guard is real. Driver: `scripts/mid_2x2.sh`. The
+winner's final checkpoint is the **flagship base**.
 
 **Post — SFT → DPO stages → RLVR last.**
 
@@ -121,8 +157,13 @@ the SFT half is measured too. **Round B** runs the winner and runner-up on the 2
 gate. SFT-1 additionally gets difficulty selection (`mote.data.select_sft`, ~4 GPU-min on the 4060 Ti — not free,
 the earlier "CPU only" estimate was wrong) and On-Policy Replay between stages (`mote.data.replay`), which turns
 the no-regression guards from detectors into a mechanism.
-1. **SFT-1** (format): init = the flagship base; `sft_local` + identity 5 % + sim QA ~10 % + tool-protocol
-   traces if built (else SFT-2 adds them); search data only once the reading gate (docs/search.md, ≥ 50 %
+1. **SFT-1** (format): init = the flagship base; `sft_local` + identity 5 % + sim QA ~10 %. The
+   tool-protocol traces moved to mid-training on 2026-08-26 (2608.20314; 2607.12463 found the
+   fill-in-the-middle bias survives post-training while agentic post-training alone erodes non-agent
+   ability), so SFT-1 elicits the protocol rather than teaching it. Identity likewise: the base now
+   arrives having read documents *about* Mote, and the 5 % of Q&A is elicitation on top of that prior —
+   2605.02087's finding is that demonstrations underspecify the generalisation, which is precisely the
+   0.70 recitation rate measured on 2026-08-25. Search data only once the reading gate (docs/search.md, ≥ 50 %
    EM after a small QA SFT) passes on the flagship base. lr: T2 {1e-4, 3e-4} (overnight_sft2 used AdamW
    3e-4). After it: identity ≥ 5/6, chat val, reading, sim-QA, needle, and pass@1 / pass@64 on the sim
    tasks — the RL headroom numbers.

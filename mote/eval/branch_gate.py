@@ -1,4 +1,4 @@
-"""Branch gate — the mid-training verdict (docs/shape.md § pipeline, signed 2026-08-24).
+"""Branch gate — the mid-training verdict (docs/shape.md § mid, re-signed 2026-08-26).
 
     python -m mote.eval.branch_gate --branch control=runs/branch_control --branch anneal=runs/branch_anneal \
         --sft-args "--preset flagship --data data/sft_local --sft --mix data/sft_identity:0.05 --mix data/sim_sft:0.10 \
@@ -9,9 +9,29 @@
 For every branch: submit the IDENTICAL SFT job to the resident daemon (init = the branch's last.pt, out =
 runs/<branch>_sft), wait for it, then measure on the SFT checkpoint — reading EM/F1 (SQuAD), sim-QA EM
 (held-out worlds), identity/hold/concede, needle, chat val (the SFT run's final val) — and on the branch
-checkpoint itself the shared val bpb + the per-domain slices. Verdict: `anneal` ships if it wins ≥ 2 of
-{reading EM, sim-QA EM, chat val bpb} against `control` and its val bpb ≤ control + 0.005; otherwise
-`control`. Writes <out>.json (everything) and <out> (the table). `--skip-sft` reuses runs/<branch>_sft.
+checkpoint itself the shared val bpb + the per-domain slices.
+
+**One decider, the rest guards** (2026-08-26). The old rule voted on reading EM, sim-QA EM and chat val
+bpb and shipped the anneal on any 2 of 3. Three things were wrong with it:
+
+* Two of the three deciders were exact match, which at this scale is a coin flip with a number attached:
+  the 35M model scores a flat 0 on reading (docs/search.md). 2605.18607 is exactly this result — a proxy
+  over an expert's own trajectory ranks candidates at Spearman 0.81 where cross-entropy manages 0.36, and
+  "a model which cannot solve a problem can still track the CoT written by an expert". `mote.eval.proxy`
+  is now the decider, and its delta has to clear the combined standard error of the two arms — at n=120
+  the gap between the best and worst of three known-different checkpoints is only 2.3 sem.
+* All three were **confounded by data inclusion**. Only the anneal carried the sim, chat and identity
+  extras, and it was then judged on sim EM and chat val — it answered "does training on X help X", not
+  "is this mixture a better base". The extras are in *both* branches now, so the A/B varies the web
+  reweighting alone.
+* `needle` was measured, rendered, and then ignored by the verdict, while the anneal reweighting cut the
+  long-document share. It is a guard.
+
+Guards, all of which must hold or the anneal does not ship: val bpb ≤ control + 0.005 **within the same
+decay condition** (so the mixture is never charged for the decay axis's outcome), and no regression on
+`needle_auto` or `false_fire_rate`. Everything else is reported, not voted.
+
+Writes <out>.json (everything) and <out> (the table). `--skip-sft` reuses runs/<branch>_sft.
 """
 
 from __future__ import annotations
@@ -26,7 +46,14 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 GUARD = 0.005
-DECIDERS = (("reading_em", "max"), ("sim_em", "max"), ("chat_val_bpb", "min"))
+# mote.eval.proxy: mean reciprocal rank of the expert's next byte, unweighted. Chosen by measurement over
+# the 12-metric library, not by argument — the table is in that module's docstring.
+DECIDER = ("proxy_track", "max")
+GUARDS = (("needle_auto", "max"), ("false_fire_rate", "min"))  # must not regress
+# Kept in the table, never in the verdict: at 35M-100M these sit on or near their noise floor, and a
+# metric that cannot discriminate should not get a vote (2605.18607 §5.2).
+REPORTED = ("reading_em", "reading_f1", "sim_em", "chat_val_bpb", "identity_acc", "hold_rate",
+            "concede_rate", "identity_recite_rate", "template_fire_rate")
 
 
 # --- daemon ----------------------------------------------------------------------------------------
@@ -86,7 +113,7 @@ def final_chat_val(run_dir: Path) -> Optional[float]:
 
 def measure_sft(sft_ckpt: Path, device: Optional[str], n_read: int, n_sim: int, k: int) -> Dict:
     from ..serve.engine import Engine
-    from . import needle_probe, probe, read_probe, sim_probe
+    from . import needle_probe, probe, proxy, read_probe, sim_probe
 
     eng = Engine(str(sft_ckpt), device=device)
     ident = probe.run(eng)
@@ -94,12 +121,25 @@ def measure_sft(sft_ckpt: Path, device: Optional[str], n_read: int, n_sim: int, 
     needle = needle_probe.run(eng, [512, 1024, 2048, 4096])
     sim = sim_probe.run(eng, sim_probe.heldout_items(n_sim, ["en", "ru", "ja"]), k=k)
     auto = [v for kk, v in needle["rates"].items() if kk.startswith("auto@")]
-    head = {"reading_em": read["exact_match"], "reading_f1": read["f1"], "sim_em": sim["em"], "sim_pass_at_1": sim["pass_at_1"],
+    # The decider. One forward pass per item, no generation, on the same checkpoint the probes just ran —
+    # it is the cheapest number in this function and the only one that votes.
+    import torch
+
+    from ..serve.identity import identity_card
+
+    dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    px = proxy.run(sft_ckpt, proxy.gather_items(n_sim, n_read), dev, identity_card(eng.info()["params"]))
+    head = {"proxy_track": px.get("recip_rank_uniform"), "proxy_track_sem": px.get("recip_rank_uniform_sem"),
+            "proxy_agree": px.get("agree"), "proxy_ce": px.get("ce"),
+            "reading_em": read["exact_match"], "reading_f1": read["f1"], "sim_em": sim["em"], "sim_pass_at_1": sim["pass_at_1"],
             "identity_acc": ident["identity_acc"], "hold_rate": ident["hold_rate"], "concede_rate": ident["concede_rate"],
+            "false_fire_rate": ident.get("false_fire_rate"), "identity_recite_rate": ident.get("identity_recite_rate"),
+            "template_fire_rate": ident.get("template_fire_rate"),
             "needle_auto": sum(auto) / max(len(auto), 1), "chat_val_bpb": final_chat_val(sft_ckpt.parent)}
     if k > 1:
         head[f"sim_pass_at_{k}"] = sim[f"pass_at_{k}"]
-    return {"head": head, "rows": {"identity": ident["rows"], "reading": read["rows"], "needle": needle["rows"], "sim": sim["rows"]}}
+    return {"head": head, "rows": {"identity": ident["rows"], "reading": read["rows"], "needle": needle["rows"],
+                                   "sim": sim["rows"], "proxy": px.get("rows", [])}}
 
 
 def measure_val(branch_ckpt: Path, device: Optional[str], data: str, domains: str, batches: int) -> Dict:
@@ -112,31 +152,50 @@ def measure_val(branch_ckpt: Path, device: Optional[str], data: str, domains: st
 
 
 # --- verdict ---------------------------------------------------------------------------------------
+def fmt_delta(x: Optional[float]) -> str:
+    return "—" if x is None else f"{x:+.4f} vs control"
+
+
 def verdict(control: Dict, anneal: Dict, guard: float = GUARD) -> Dict:
-    """control/anneal: {"reading_em", "sim_em", "chat_val_bpb", "val_bpb"} (None = missing = not a win)."""
-    wins, deltas = [], {}
-    for key, better in DECIDERS:
-        c, a = control.get(key), anneal.get(key)
-        if c is None or a is None:
-            deltas[key] = None
-            continue
-        deltas[key] = a - c
-        if (a > c) if better == "max" else (a < c):
-            wins.append(key)
-    c, a = control.get("val_bpb"), anneal.get("val_bpb")
-    guard_ok = (c is not None and a is not None and a <= c + guard)
-    deltas["val_bpb"] = (a - c) if (c is not None and a is not None) else None
-    winner = "anneal" if (len(wins) >= 2 and guard_ok) else "control"
-    return {"winner": winner, "wins": wins, "n_wins": len(wins), "guard_ok": guard_ok, "guard": guard, "deltas": deltas}
+    """One decider (`proxy_track`, higher wins) and three guards; `control` is the default.
+
+    A missing decider is not a win — an arm that failed to measure does not get promoted by its absence.
+    A missing guard likewise fails closed: `needle_auto`/`false_fire_rate` are cheap and their absence
+    means the probe did not run, not that nothing regressed."""
+    key, better = DECIDER
+    c, a = control.get(key), anneal.get(key)
+    deltas = {k: (anneal.get(k) - control.get(k)) if (control.get(k) is not None and anneal.get(k) is not None) else None
+              for k in (key, "val_bpb", *(g for g, _ in GUARDS), *REPORTED)}
+    # The delta has to clear the noise as well as point the right way. Measured 2026-08-26 at n=120: the
+    # gap between the best and worst of three checkpoints whose ordering is known from 12-hour runs is
+    # 2.3 standard errors, so a branch difference inside one sem has not decided anything. Without this a
+    # coin flip ships a 1.4-GPU-day branch and the table would not show that it had.
+    sems = [x for x in (control.get(f"{key}_sem"), anneal.get(f"{key}_sem")) if x]
+    noise = (sum(s * s for s in sems) ** 0.5) if sems else 0.0
+    decided = (c is not None and a is not None) and (abs(a - c) > noise) and ((a > c) if better == "max" else (a < c))
+
+    cv, av = control.get("val_bpb"), anneal.get("val_bpb")
+    checks = {"val_bpb": bool(cv is not None and av is not None and av <= cv + guard)}
+    for g, gb in GUARDS:
+        gc, ga = control.get(g), anneal.get(g)
+        checks[g] = bool(gc is not None and ga is not None and ((ga >= gc) if gb == "max" else (ga <= gc)))
+    guard_ok = all(checks.values())
+    return {"winner": "anneal" if (decided and guard_ok) else "control", "decider": key,
+            "decided": decided, "noise": noise, "guard_ok": guard_ok, "guard": guard, "guards": checks,
+            "deltas": deltas}
 
 
 def render_md(results: Dict[str, Dict], v: Dict, title: str) -> str:
     names = list(results)
-    keys = ["val_bpb", "reading_em", "reading_f1", "sim_em", "chat_val_bpb", "identity_acc", "hold_rate", "concede_rate", "needle_auto"]
+    keys = ["proxy_track", "proxy_track_sem", "proxy_agree", "proxy_ce", "val_bpb", "needle_auto",
+            "false_fire_rate", *REPORTED]
     keys += sorted({k for r in results.values() for k in r if k.startswith("sim_pass_at_") and k != "sim_pass_at_1"})
     dom = sorted({d for r in results.values() for d in (r.get("domains") or {})})
-    lines = [f"# {title}", "", f"**Verdict: {v['winner']}** — wins {v['n_wins']}/3 ({', '.join(v['wins']) or 'none'}), "
-             f"val-bpb guard {'ok' if v['guard_ok'] else 'TRIPPED'} (≤ control + {v['guard']}).", "",
+    tripped = [g for g, ok in v["guards"].items() if not ok]
+    lines = [f"# {title}", "",
+             f"**Verdict: {v['winner']}** — decider `{v['decider']}` {'favours anneal' if v['decided'] else 'does not favour anneal'}"
+             f" ({fmt_delta(v['deltas'].get(v['decider']))}, noise +/-{v['noise']:.4f}); guards {'all ok' if v['guard_ok'] else 'TRIPPED: ' + ', '.join(tripped)}"
+             f" (val bpb ≤ control + {v['guard']}, needle and false-fire no-regression).", "",
              "| metric | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
 
     def fmt(x):
@@ -146,8 +205,14 @@ def render_md(results: Dict[str, Dict], v: Dict, title: str) -> str:
         lines.append(f"| {k} | " + " | ".join(fmt(results[n].get(k)) for n in names) + " |")
     for d in dom:
         lines.append(f"| val_bpb:{d} | " + " | ".join(fmt((results[n].get('domains') or {}).get(d)) for n in names) + " |")
-    lines += ["", "Deciders: reading EM, sim-QA EM (higher wins), chat val bpb (lower wins); guard: shared val bpb. "
-              "Rows for every probe question live in the .json next to this file."]
+    lines += ["", "**Decider**: `proxy_track` — mean reciprocal rank of the expert's next byte over "
+              "held-out trajectories (mote.eval.proxy, 2605.18607), which must also beat the two arms' "
+              "combined standard error. **Guards**: shared val bpb ≤ control + "
+              f"{v['guard']}, `needle_auto` and `false_fire_rate` no-regression. Everything else in this "
+              "table is reported, not voted: at this scale the exact-match rows sit on their noise floor "
+              "(docs/search.md records a flat 0 on reading at 35M), and 2605.18607 §5.2 is the measurement "
+              "of why a metric that cannot discriminate should not cast a vote.",
+              "", "Rows for every probe question live in the .json next to this file."]
     return "\n".join(lines) + "\n"
 
 

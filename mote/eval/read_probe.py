@@ -70,11 +70,16 @@ def _reply(eng: Engine, content: str) -> str:
     return text.strip().split("\n")[0]
 
 
+def prompt_for(item: Dict) -> str:
+    """The passage-grounded prompt. Named so `mote.eval.proxy` scores the same prompt this probe asks."""
+    return f"Read this and answer in a few words.\n\n{item['passage']}\n\nQuestion: {item['question']}"
+
+
 def run(eng: Engine, items: List[Dict]) -> Dict:
     rows = []
     tot = {"em": 0.0, "f1": 0.0, "em_base": 0.0, "f1_base": 0.0}
     for it in items:
-        with_p = _reply(eng, f"Read this and answer in a few words.\n\n{it['passage']}\n\nQuestion: {it['question']}")
+        with_p = _reply(eng, prompt_for(it))
         without = _reply(eng, f"Answer in a few words. {it['question']}")
         em, f = best(with_p, it["answers"])
         emb, fb = best(without, it["answers"])

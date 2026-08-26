@@ -16,7 +16,8 @@
 # Run from the repo root with the venv active, after the training queue drains:
 #     bash scripts/round_a.sh 2>&1 | tee docs/results/$(date +%F)-round-a.log
 set -u
-BASE=runs/t3l_dense_8e-4/last.pt          # 31.6M, val_bpb 1.1265 — the best-trained current-arch checkpoint
+BASE=runs/t3l_dense_4e-4/last.pt          # 31.6M, val_bpb_ema 1.0276 — the best of the three 12-h LR arms
+                                          # (8e-4 1.0370, 16e-4 1.0774; swapped 2026-08-26 when the sweep finished)
 OUT=runs/roundA
 PARAMS=31643528
 mkdir -p "$OUT" docs/results

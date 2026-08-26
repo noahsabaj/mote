@@ -112,7 +112,14 @@ _ANNEAL_WEIGHTS: Dict[str, float] = {
     "finemath": 15,
     "code": 7, "code_long": 1,
     "fw2_spa": 1, "fw2_fra": 1, "fw2_deu": 1, "fw2_por": 1, "fw2_rus": 1, "fw2_jpn": 1,
-    "finewiki_long": 3, "gutenberg": 2, "fineweb_long": 2,
+    # Long documents, raised 2026-08-26 from 3/2/2 (docs/research/midtraining-2026-08-26.md). As first
+    # written the reweighting cut the long-document share from FLAGSHIP's 10.0 % to 8.6 % — a 14 % relative
+    # cut, in the same direction as the failure PRISM (2603.17074 §8.1) measured at larger amplitude, where
+    # short-context mid-training took RULER@128k from 59.09 to 6.46. OctoLong (2608.05141) argues the
+    # opposite move: replacing part of a context-extension mixture with dependency-dense material improved
+    # long-range retrieval and state tracking. So the natural long sources go back above FLAGSHIP's share,
+    # and `data/sim_long` supplies the dependency-dense part from the extras side of the mix.
+    "finewiki_long": 4, "gutenberg": 3, "fineweb_long": 2,
 }
 assert set(_ANNEAL_WEIGHTS) == {s.key for s in FLAGSHIP}, set(_ANNEAL_WEIGHTS) ^ {s.key for s in FLAGSHIP}
 ANNEAL: List[PretrainSource] = [replace(s, share=_ANNEAL_WEIGHTS[s.key] / sum(_ANNEAL_WEIGHTS.values())) for s in FLAGSHIP]

@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams, _sample
-from mote.tokenizer import END_THINK_ID, THINK_ID, VOCAB_SIZE, ByteTokenizer
+from mote.tokenizer import END_THINK_ID, FIM_MIDDLE_ID, FIM_PREFIX_ID, THINK_ID, VOCAB_SIZE, ByteTokenizer
 
 
 def _cfg(**kw):
@@ -193,7 +193,9 @@ def test_queue_hooks_fire_around_jobs(tmp_path, monkeypatch):
 
 def test_padding_rows_are_masked_and_never_sampled():
     cfg = _cfg(pad_vocab_to=272)
-    assert cfg.vocab_size == VOCAB_SIZE == 266 and THINK_ID == 264 and END_THINK_ID == 265
+    assert cfg.vocab_size == VOCAB_SIZE == 269 and THINK_ID == 264 and END_THINK_ID == 265
+    # the FIM sentinels have to fit inside the existing 272-row padding, or every checkpoint needs surgery
+    assert FIM_PREFIX_ID == 266 and FIM_MIDDLE_ID == 268 and VOCAB_SIZE <= cfg.pad_vocab_to
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg).eval()
     ids = torch.randint(0, 256, (2, 40))
