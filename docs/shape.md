@@ -115,6 +115,19 @@ fill-in-the-middle around its own `<|call|>`/`<|result|>` boundaries), `data/sim
 `data/sft_local:0.05:plain`. The old identity Q&A slot is gone from the mix: the card recited as an answer
 is what produced `identity_recite_rate` 0.70 before DPO ever ran.
 
+*The sim regenerates before any of this runs.* Signed 2026-08-26 after measuring that no action in any
+narrative could fail, which made 99.7 % of every tool result a restatement of its call and left the
+environment's three refusal strings absent from all 20,000 expert traces. `mote.sim.generate --p-fail`
+(rate swept 5/15/30 against the sim probe), `--parallel-frac` and `--swap-frac` (a share of worlds in all
+three locales, LINK-style lexical substitution on the English rest), plus retrodiction in all three acting
+domains and `mote.sim.long` for the dependency-dense documents. `build_spec_docs --typo-frac` corrupts a
+share of the identity documents, which is 2606.16246's answer to the repetition the 3 % share creates.
+
+*Three training-time augmentations exist and are OFF here.* `--aug-noise` / `--aug-r2l` / `--aug-offset`
+(2606.16246, all measured wins at 150M) are deliberately excluded from the 2x2 so its verdict is
+attributable to the data changes alone; they are their own two-arm comparison afterwards, which costs
+nothing because the shards are already built and they are runtime flags.
+
 *Why the schedule changed.* The old `cooldown` decayed to 0.1x over the whole branch as `1-sqrt(t)` — a
 concave curve at 55 % of peak by the first quarter, exactly when mix C's distribution shift arrives.
 Index-1.9B (2607.09885 §6.4-6.5) measured that configuration as *worse than not curating at all*: the
@@ -136,7 +149,9 @@ not a contestant.
 weighted top-1 byte agreement with held-out expert trajectories (2605.18607: cross-entropy ranks candidates
 at Spearman 0.36, trajectory proxies at 0.81, and "a model which cannot solve a problem can still track
 the CoT written by an expert"). Guards, all of which must hold: shared val bpb <= control + 0.005 **within
-the same decay condition**, `needle_auto` no-regression, `false_fire_rate` no-regression. Reading EM,
+the same decay condition**, and no regression on `needle_auto`, `false_fire_rate` or `recovery_rate`
+(`mote.eval.recovery_probe`: does the model try something else after the environment refuses — a mixture
+that teaches the world but not the response to it is not ready for RLVR-1, 2608.20314). Reading EM,
 sim-QA EM, chat val bpb, identity/hold/concede and the per-domain vals are reported and do not vote — at
 this scale exact match sits on its noise floor (docs/search.md records a flat 0 on reading at 35M), and a
 metric that cannot discriminate should not cast a ballot. Missing numbers fail closed. `needle` was

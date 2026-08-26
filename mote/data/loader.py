@@ -144,7 +144,18 @@ class MixedShard:
 
 class ByteShard:
     """Pretraining shards: ``{prefix}.meta.json`` + ``{prefix}.train.bin`` / ``.val.bin``.
-    SFT shards: ``{prefix}.sft.meta.json`` + ``.sft.{split}.bin`` and ``.sft.{split}.mask.bin``."""
+    SFT shards: ``{prefix}.sft.meta.json`` + ``.sft.{split}.bin`` and ``.sft.{split}.mask.bin``.
+
+    The augmentation flags are CLASS attributes, not only instance ones: `mote.eval.val_bpb.raw_shard`
+    builds a shard with `__new__` and fills a few fields by hand (a per-domain val slice has no meta of
+    its own), so anything `_window` reads has to have a default here or that path raises."""
+
+    keep = None
+    fim = False
+    noise = 0.0
+    r2l = 0.0
+    offset_max = 1
+    _rng = np.random.default_rng(0)
 
     def __init__(self, prefix: str | Path, split: str, sft: bool = False, plain: bool = False,
                  keep: str | Path | None = None, fim: bool = False, seed: int = 0,

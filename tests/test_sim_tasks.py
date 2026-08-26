@@ -54,7 +54,13 @@ def test_env_observations_budget_and_score():
         far = next(o for o in ("key", "book", "lamp", "coin", "apple", "letter", "cup", "knife") if o in env.world.names.values()
                    and env.world.get(env.world.eid(o), __import__("mote.sim.domains", fromlist=["InRoom"]).InRoom).room
                    != env.world.get(env.world.eid(who), __import__("mote.sim.domains", fromlist=["InRoom"]).InRoom).room)
-        assert env.act(f"{who}: take {far}") == "Nothing happened."
+        # Until 2026-08-26 this returned the bare "Nothing happened." — the system silently discarded an
+        # inapplicable action and the agent learned only that something had not worked. It now names the
+        # obstacle, which is a fact about the world the narrative had not otherwise stated, and it is what
+        # makes a refusal worth recovering from (docs/research/midtraining-2026-08-26.md).
+        obs = env.act(f"{who}: take {far}")
+        assert obs not in ("Nothing happened.", "Unknown action.")
+        assert "tried to" in obs and far in obs
         for t in task.expert:
             assert env.act(t) not in ("Nothing happened.", "Unknown action.")
         ok, frac = env.score()

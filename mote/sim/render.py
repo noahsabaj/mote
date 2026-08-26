@@ -7,6 +7,7 @@ Adding a locale = adding tables + a LOCALES entry (the sim never changes).
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Tuple
 
 from .domains import Q, Trace
@@ -562,6 +563,57 @@ LOCALES = {
 }
 
 
+# --- lexical substitution (LINK, 2605.23885) ---------------------------------------------------------
+# Swap a fraction of an English document's entity words for their ru/ja equivalents. The paper reports up
+# to a 2x speedup to equivalent performance from a bilingual vocabulary alone, and the renderer already
+# IS one — every room, object, container, good and title exists in all three languages here.
+#
+# Chosen over full parallel rendering as the default because parallel data has a weaker case than it
+# looked: 2603.29026 finds it has minimal effect on cross-lingual alignment, and 2606.06586 finds
+# continued pretraining on it HARMS multilingual models. Substitution costs no world diversity — the same
+# number of distinct worlds, with some of their words in another script — where rendering every world
+# three times costs two thirds of them.
+_SWAP_TABLES = None
+
+
+def _swap_tables():
+    global _SWAP_TABLES
+    if _SWAP_TABLES is None:
+        pairs = []
+        # `goods` is deliberately absent: those words only ever appear number-modified ("3 loaves"), and a
+        # bare-form substitution produces "3 буханка", which is wrong enough to read as noise rather than
+        # as code-switching. Rooms, objects, containers and titles all appear as bare nouns.
+        for field in ("rooms", "objects", "containers", "titles"):
+            for key, en in EN[field].items():
+                bare = en[4:] if en.startswith("the ") else en
+                for other, table in (("ru", RU_ROOMS if field == "rooms" else None), ("ja", JA[field])):
+                    if field == "rooms" and other == "ru":
+                        alt = RU_ROOMS[key][0]
+                    elif other == "ru":
+                        alt = {"objects": lambda k: RU_OBJ[k][0], "containers": lambda k: RU_CONT[k][0],
+                               "titles": lambda k: RU_TITLES[k]}[field](key)
+                    else:
+                        alt = table[key]
+                    if bare and alt:
+                        pairs.append((bare, alt))
+        _SWAP_TABLES = sorted(pairs, key=lambda kv: -len(kv[0]))
+    return _SWAP_TABLES
+
+
+def lexical_swap(text: str, rng, rate: float) -> str:
+    """Replace `rate` of the occurrences of translatable entity words with a ru or ja equivalent."""
+    if rate <= 0:
+        return text
+    for en, alt in _swap_tables():
+        if en not in text:
+            continue
+        # Word boundaries matter: without them "coin" matches inside "coins" and leaves "монетаs",
+        # which is not code-switching, it is corruption.
+        text = re.sub(rf"(?<![A-Za-z]){re.escape(en)}(?![A-Za-z])",
+                      lambda m: alt if rng.random() < rate else m.group(0), text)
+    return text
+
+
 def narrative(trace: Trace, locale: str) -> str:
     L = LOCALES[locale]
     return L["sep"].join(s for s in (L["event"](e) for e in trace.events) if s)
@@ -572,6 +624,8 @@ def qa_pairs(trace: Trace, locale: str) -> List[Dict[str, Any]]:
     out = []
     for q in trace.questions:
         qt, ans, wrong = L["qa"](q)
-        out.append({"question": qt, "answer": ans, "wrong": wrong,
+        # `args` travels with the rendered pair: without it a caller cannot tell "where is the cup" from
+        # "where is the book" once both are just strings, which is what the counterfactual pairing needs.
+        out.append({"question": qt, "answer": ans, "wrong": wrong, "args": dict(q.args),
                     "qtype": q.qtype, "wrong_kind": q.wrong_kind})
     return out

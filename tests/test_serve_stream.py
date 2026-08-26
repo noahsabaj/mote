@@ -48,6 +48,9 @@ def _reply(eng, max_bytes=24):
     return done[0]["text"]
 
 
+@pytest.mark.skipif(DEV != "cuda", reason="the GPU gate exists to keep serving off the card while a job "
+                                          "trains; on CPU there is nothing to contend for, so it is "
+                                          "never held and the assertion below is CUDA-specific")
 def test_gate_is_held_only_when_gated(tmp_path, monkeypatch):
     for gated in (False, True):
         eng = _engine(tmp_path / str(gated), monkeypatch, gated)

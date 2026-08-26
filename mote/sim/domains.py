@@ -142,6 +142,22 @@ def household_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
     return events
 
 
+def _divert_household(rng, action, objects, containers, byname, w, snap, who) -> Dict[str, Any]:
+    """A different final action from the same state — the counterfactual branch of a minimal pair."""
+    held = [o for o in objects if w.one(byname[o], "held_by") == byname[who]]
+    room = w.get(byname[who], InRoom).room
+    here = [o for o in objects if snap(o) == {"room": room, "held": "", "cont": ""}]
+    alts = []
+    if held:
+        alts.append({"kind": "put_down", "who": who, "obj": held[0]})
+        if containers:
+            alts.append({"kind": "put_in", "who": who, "obj": held[0], "cont": containers[0]})
+    if here:
+        alts.append({"kind": "take", "who": who, "obj": here[-1]})
+    alts = [a for a in alts if a != action]
+    return alts[0] if alts else action
+
+
 def _household(seed: int, diff: Dict[str, int]) -> Trace:
     rng = random.Random(seed)
     w = World(seed)
@@ -180,7 +196,16 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         "objects": {o: w.get(byname[o], InRoom).room for o in objects},
     })]
     p_fail = diff.get("p_fail", 0) / 100.0
-    for _ in range(diff["ticks"]):
+    # --- counterfactual fork -------------------------------------------------------------------------
+    # A minimal pair needs two narratives that differ in exactly one event and have different answers.
+    # That normally wants a replay-to-step API, which does not exist (the parked PIVOT item wants the same
+    # one). It is unnecessary for the LAST action: the RNG draws that choose it have already happened, so
+    # overriding the chosen action leaves every earlier byte identical and changes only the final sentence
+    # and the answers that depend on it. `divert` asks for that override; `make_counterfactual` below
+    # builds the pair. 2605.17528 (CausalSynth) generates causal skeletons from an SCM and pays an LLM to
+    # realise them — Mote's sim *is* the SCM, so the expensive half is free.
+    divert = diff.get("divert")
+    for tick in range(diff["ticks"]):
         # script one action per tick from the true state, then let the SYSTEM apply it
         p = rng.choice(people)
         proom = w.get(byname[p], InRoom).room
@@ -223,6 +248,8 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
                 action = {"kind": "put_in", "who": p, "obj": o, "cont": rng.choice(conts_here)}
             else:
                 action = {"kind": "put_down", "who": p, "obj": o}
+        if divert and tick == diff["ticks"] - 1:
+            action = _divert_household(rng, action, objects, containers, byname, w, snap, p)
         new_events = w.step([action])
         events.extend(new_events)
         for e in new_events:
@@ -517,15 +544,24 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
         def clashes(start, end, skip=None):
             return any(start < e2 and s2 < end for j, (s2, e2, _) in enumerate(cal[p].slots) if j != skip)
 
-        # Deliberately book over an existing slot. `tasks.py` already refuses exactly this at RL time
-        # (line 225, "illegal bookings are refused here instead"), so before 2026-08-26 the model would
-        # have met its first double-booking refusal during RLVR-1 having never seen one in training.
-        if cal[p].slots and rng.random() < p_fail:
-            s, e, _title = cal[p].slots[rng.randrange(len(cal[p].slots))]
-            free_titles = [x for x in TITLES if x not in {t2 for _s, _e, t2 in cal[p].slots}]
-            if free_titles:
-                events.extend(w.step([{"kind": "book", "who": p, "title": rng.choice(free_titles),
-                                       "start_h": s, "dur": max(1, e - s)}]))
+        # Deliberately book over an existing slot. `tasks.py` refuses exactly this at RL time, so before
+        # 2026-08-26 the model would have met its first double-booking refusal during RLVR-1 having never
+        # seen one in training — and it would have been the uninformative "Unknown action." at that, since
+        # the parser rejected clashes before they could reach this check.
+        if rng.random() < p_fail:
+            # Two ways to be refused, and both are reachable from tasks.py at RL time: double-booking, and
+            # moving a booking that does not exist. The second is what a model does when it hallucinates a
+            # slot, so the corpus has to contain the refusal it will get.
+            if cal[p].slots and rng.random() < 0.75:
+                s, e, _title = cal[p].slots[rng.randrange(len(cal[p].slots))]
+                free_titles = [x for x in TITLES if x not in {t2 for _s, _e, t2 in cal[p].slots}]
+                if free_titles:
+                    events.extend(w.step([{"kind": "book", "who": p, "title": rng.choice(free_titles),
+                                           "start_h": s, "dur": max(1, e - s)}]))
+                    continue
+            else:
+                events.extend(w.step([{"kind": "move", "who": p, "i": len(cal[p].slots) + rng.randint(0, 2),
+                                       "to_h": rng.randint(8, 16)}]))
                 continue
 
         if cal[p].slots and rng.random() < 0.3:  # move a booking (keeps its length, never self-overlaps)
@@ -595,3 +631,20 @@ def sample_difficulty(rng: random.Random, p_fail: int = 0) -> Dict[str, int]:
 def make_trace(domain: str, seed: int, difficulty: Optional[Dict[str, int]] = None) -> Trace:
     diff = difficulty or sample_difficulty(random.Random(seed ^ 0x5EED))
     return DOMAINS[domain](seed, diff)
+
+
+def make_counterfactual(domain: str, seed: int, difficulty: Optional[Dict[str, int]] = None):
+    """(factual, counterfactual) — the same world with a different final action.
+
+    Ordinary narratives never isolate *why* an answer is what it is: the reader sees one history and one
+    outcome. A pair that shares every byte but the last event, and disagrees on the answer, says which
+    event was load-bearing. Returns None when the divert produced no change (nothing else was available
+    from that state, or the alternative happened to give the same answer)."""
+    diff = dict(difficulty or sample_difficulty(random.Random(seed ^ 0x5EED)))
+    a = DOMAINS[domain](seed, diff)
+    b = DOMAINS[domain](seed, {**diff, "divert": True})
+    if len(a.events) != len(b.events) or a.events[:-1] != b.events[:-1] or a.events[-1] == b.events[-1]:
+        a.world.close()
+        b.world.close()
+        return None
+    return a, b

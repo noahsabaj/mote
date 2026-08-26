@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -184,14 +185,53 @@ def run(checkpoint: str | Path, items: List[Dict], device, card: Optional[str] =
     return out
 
 
-def gather_items(n_sim: int = 120, n_read: int = 120, locales: str = "en,ru,ja",
+def result_items(n: int, locales: List[str], seed_base: int = 8_000_000) -> List[Dict]:
+    """Trajectories where the expert's writing is the ENVIRONMENT's, not an answer: given the narrative so
+    far and a call, the gold continuation is what the world actually returned.
+
+    This is a real question only since 2026-08-26. Measured before that, 70 % of result bytes were fully
+    determined by (locale, call) and 4.7 % of the rest varied, so predicting a result was predicting a
+    template. With failures in the world a refusal depends on state the call does not carry — who holds
+    the object, what the seller has, whether the slot is free — which is what a world model is for."""
+    from ..sim.domains import DOMAINS, make_trace, sample_difficulty
+    from ..sim.render import LOCALES as RENDER_LOCALES, narrative
+
+    items: List[Dict] = []
+    doms = [d for d in sorted(DOMAINS) if d != "kinship"]
+    seed = seed_base
+    while len(items) < n and seed < seed_base + 40_000:
+        seed += 1
+        domain = doms[seed % len(doms)]
+        locale = locales[len(items) % len(locales)]
+        trace = make_trace(domain, seed, sample_difficulty(random.Random(seed ^ 0x5EED), p_fail=40))
+        try:
+            evs = trace.events
+            idx = [i for i, e in enumerate(evs) if e.kind == "failed" or i > 2]
+            if not idx:
+                continue
+            k = idx[len(idx) // 2]
+            render = RENDER_LOCALES[locale]["event"]
+            prefix = RENDER_LOCALES[locale]["sep"].join(s for s in (render(e) for e in evs[:k]) if s)
+            gold = render(evs[k])
+        finally:
+            trace.world.close()
+        if not prefix or not gold:
+            continue
+        items.append({"prompt": f"{prefix}\n\nWhat happened next?", "gold": gold,
+                      "source": "result", "domain": domain, "locale": locale})
+    return items
+
+
+def gather_items(n_sim: int = 120, n_read: int = 120, n_result: int = 0, locales: str = "en,ru,ja",
                  seed_base: Optional[int] = None) -> List[Dict]:
-    """The expert trajectories: held-out sim answers and reading-comprehension references.
+    """The expert trajectories: held-out sim answers, reading references, and world outcomes.
 
     Both are held out from training by construction — the sim probe draws worlds from seeds far above the
     generator's, and the reading items come from SQuAD's validation split. A gold answer is short, which
     is the point: it is the span where the model either tracks the expert or does not."""
     items: List[Dict] = []
+    if n_result:
+        items += result_items(n_result, [l.strip() for l in locales.split(",") if l.strip()])
     if n_sim:
         from .sim_probe import SEED_BASE, heldout_items
 
@@ -213,13 +253,14 @@ def main(argv=None):
     ap.add_argument("--device", default=None)
     ap.add_argument("--n-sim", type=int, default=120)
     ap.add_argument("--n-read", type=int, default=120)
+    ap.add_argument("--n-result", type=int, default=0, help="world-outcome trajectories: given the narrative so far, predict what the environment returned. A real question only since failures entered the world (docs/research/midtraining-2026-08-26.md)")
     ap.add_argument("--locales", default="en,ru,ja")
     ap.add_argument("--no-card", action="store_true", help="score without the identity system message")
     ap.add_argument("--out", default=None, help="default: proxy.json next to the checkpoint")
     args = ap.parse_args(argv)
 
     dev = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    items = gather_items(args.n_sim, args.n_read, args.locales)
+    items = gather_items(args.n_sim, args.n_read, args.n_result, args.locales)
     card = None
     if not args.no_card:
         from ..config import MoteConfig  # noqa: F401  (load_model reads it; card needs the param count)

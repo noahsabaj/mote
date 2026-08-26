@@ -31,12 +31,29 @@ TAIL=$(( MIN / 5 ))      # the last 20 %
 OUT=runs/mid
 mkdir -p "$OUT" docs/results
 
-echo "== 0. the extras — identical in both branches, so they are not a variable"
-python -m mote.data.build_spec_docs --out data/spec_docs.jsonl --n 400000 --params "$PARAMS" \
-    --spec-out docs/mote-spec.md
-python -m mote.data.build_local --out data/spec_plain --text data/spec_docs.jsonl
+P_FAIL="${P_FAIL:?set P_FAIL after sweeping 5/15/30 against the sim probe — see step 0b}"
+
+echo "== 0. regenerate the sim. Signed 2026-08-26: until then no action could fail, which made 99.7 % of"
+echo "      every tool result a restatement of its call, and left the environment's three refusal strings"
+echo "      absent from all 20,000 expert traces (docs/research/midtraining-2026-08-26.md)."
+python -m mote.sim.generate --out data/sim_state --mb 150 --dpo-pairs 20000 \
+    --p-fail "$P_FAIL" --parallel-frac 0.2 --swap-frac 0.3
+python -m mote.data.build_local --out data/sim_plain --text data/sim_state.narrative.jsonl --chat data/sim_state.qa.jsonl
+python -m mote.data.build_local --out data/sim_sft   --chat data/sim_state.qa.jsonl --sft
 python -m mote.sim.long --out data/sim_long --mb 320 --min-bytes 4000 --max-bytes 16000
-python -m mote.data.build_local --out data/sim_long_plain --text data/sim_long.jsonl
+python -m mote.sim.counterfactual --out data/sim_cf --n 20000 --p-fail "$P_FAIL"
+# Expert traces WITH recovery: until 2026-08-26 not one of 20,000 contained a refusal of any kind, so
+# RLVR-1 would have met its first one having never seen it (2608.20314, 2607.12463).
+python -m mote.sim.tasks --out data/sim_traces --n 20000 --recover-frac 0.35
+python -m mote.data.build_local --out data/sim_traces --chat data/sim_traces.jsonl --sft
+python -m mote.data.build_local --out data/sim_long_plain --text data/sim_long.jsonl data/sim_cf.jsonl
+
+echo "== 0b. the extras — identical in both branches, so they are not a variable"
+# --typo-frac is 2606.16246's answer to repetition applied where the repetition is: 3 % of an 8 GB branch
+# is ~240 MB generated from about 12 KB of distinct prose.
+python -m mote.data.build_spec_docs --out data/spec_docs.jsonl --n 400000 --params "$PARAMS" \
+    --typo-frac 0.3 --typo-rate 0.012 --spec-out docs/mote-spec.md
+python -m mote.data.build_local --out data/spec_plain --text data/spec_docs.jsonl
 
 # The extras budget, 15 % of each branch (docs/shape.md § mid). Identity is documents now, not Q&A: the
 # card recited as an answer is what produced identity_recite_rate 0.70 before DPO ever ran.

@@ -7,8 +7,12 @@ rebuilt for the episode. Reward = 1 iff every predicate holds at the end (the fr
 
 The model acts through the tool protocol: `<|call|>sim: ivy: take key<|result|>` -> the sim applies the
 action with `World.step`, renders its events in the task's locale (the same sentences as the narratives)
-and the reply resumes. An action the system ignores renders as "Nothing happened."; after the step budget
-(len(expert) + 2) the tool refuses. Kinship has no agent actions and is not a task domain.
+and the reply resumes. An action that cannot be applied renders the reason — "Ivy tried to pick up the
+cup, but it was in the attic" — rather than the bare "Nothing happened." it produced before 2026-08-26,
+because a refusal that names the obstacle is one the agent can act on. Malformed input still gets
+"Unknown action.", since there is no world state to report about it; after the step budget
+(len(expert) + 2) the tool refuses with "No moves left.". Kinship has no agent actions and is not a task
+domain.
 
 Action grammar (English keys in every locale; case-insensitive; `<who>` is a person key):
   household   <who>: move to <room> | <who>: take <object> | <who>: put <object> in <container> | <who>: put down <object>
@@ -221,8 +225,15 @@ def parse_action(domain: str, text: str, w: World, init: Dict[str, Any]) -> Opti
 
             if kind == "book":
                 h, dur = int(g[2]), int(g[3])
-                if g[1] in {t2 for _s, _e, t2 in cal.slots} or dur not in (1, 2) or h not in WINDOWS[g[1]] or h + dur > 17 or clashes(h, h + dur):
-                    return None  # the system trusts its caller; illegal bookings are refused here instead
+                # A CLASH is no longer rejected here (2026-08-26). This used to read "the system trusts
+                # its caller; illegal bookings are refused here instead", which was true when
+                # schedule_system had no feasibility check. It has one now, and letting a clash through
+                # means the agent gets "that time was already taken" instead of "Unknown action." — a
+                # refusal that names the obstacle rather than one that says only "no". Malformed input
+                # (unknown title, bad duration, outside the window) is still rejected here, because there
+                # is no world state to report about it.
+                if g[1] in {t2 for _s, _e, t2 in cal.slots} or dur not in (1, 2) or h not in WINDOWS[g[1]] or h + dur > 17:
+                    return None
                 return {"kind": "book", "who": g[0], "title": g[1], "start_h": h, "dur": dur}
             if kind == "move":
                 idx = next((i for i, (_s, _e, t2) in enumerate(cal.slots) if t2 == g[1]), None)
@@ -471,12 +482,68 @@ class SimEnv:
         self.world.close()
 
 
-def expert_messages(task: Task) -> List[Dict[str, Any]]:
-    """The expert trajectory as chat messages with tool parts (SFT traces; `build_local` renders them)."""
+def _misstep(task: Task, env: "SimEnv", rng: random.Random) -> Optional[str]:
+    """A call that PARSES but does not apply from the current state, so the tool refuses informatively.
+
+    Not an unparseable string: "Unknown action." teaches nothing about the world, while "Jon tried to pick
+    up the cup, but it was in the attic" tells the agent where the cup is. That is the failure worth
+    recovering from, and since 2026-08-26 it is what the environment actually returns."""
+    titles = _cal_titles(env.world) if task.domain == "schedule" else None
+    legal = {action_text(a, titles) for a in legal_actions(task.domain, env.world, env.init)}
+    people = people_of(env.world)
+    names = [n for n in env.world.names.values() if n not in people]
+    cands: List[str] = []
+    if task.domain == "household":
+        for who in people:
+            for obj in names:
+                cands += [f"{who}: take {obj}", f"{who}: put down {obj}"]
+    elif task.domain == "inventory":
+        # buy more than anyone could have: the refusal states what the seller actually holds
+        for buyer in people:
+            for seller in people:
+                if buyer == seller:
+                    continue
+                for g in GOODS:
+                    cands.append(f"{buyer}: buy 3 {g} from {seller}")
+    elif task.domain == "schedule":
+        # book on top of an existing slot: the refusal states the time is taken
+        for who in people:
+            cal = env.world.get(env.world.eid(who), Calendar)
+            for s, _e, _t in (cal.slots if cal else []):
+                for title in TITLES:
+                    cands.append(f"{who}: book {title} at {s} for 1h")
+    cands = [c for c in cands
+             if c not in legal and parse_action(task.domain, c, env.world, env.init) is not None]
+    return rng.choice(cands) if cands else None
+
+
+def expert_messages(task: Task, recover: bool = False, rng: Optional[random.Random] = None) -> List[Dict[str, Any]]:
+    """The expert trajectory as chat messages with tool parts (SFT traces; `build_local` renders them).
+
+    `recover`: insert one refused call before a step, then carry on correctly. Until 2026-08-26 not one of
+    the 20,000 traces contained a refusal of any kind — the environment refuses illegal actions
+    (`SimEnv.act`) and the corpus showed a flawless expert, so RLVR-1 would have met its first refusal
+    having never seen one and with no learned response. 2608.20314 and 2607.12463 both name recovery from
+    incomplete information as the thing mid-training should teach; this is the data for it.
+
+    The budget is len(expert) + 2, so exactly one wasted step still leaves the task achievable — the
+    assertion below is what proves it rather than assuming it."""
     env = SimEnv(task)
+    rng = rng or random.Random(task.seed)
     try:
         parts: List[Dict[str, str]] = []
-        for t in task.expert:
+        # From `at` onward, not exactly at it: a schedule task starts with an empty calendar, so there is
+        # no informative misstep to make until the expert has booked something. Taking the first index
+        # where one exists is what gets schedule traces into the recovery set at all.
+        at = rng.randrange(len(task.expert)) if recover and task.expert else -1
+        done_misstep = False
+        for i, t in enumerate(task.expert):
+            if at >= 0 and i >= at and not done_misstep:
+                bad = _misstep(task, env, rng)
+                if bad is not None:
+                    done_misstep = True
+                    parts.append({"type": "call", "text": f"sim: {bad}"})
+                    parts.append({"type": "result", "text": env.act(bad)})
             parts.append({"type": "call", "text": f"sim: {t}"})
             parts.append({"type": "result", "text": env.act(t)})
         assert env.score()[0], (task.domain, task.seed, task.expert)
@@ -499,6 +566,7 @@ def main(argv=None):
     ap.add_argument("--n", type=int, default=20000)
     ap.add_argument("--seed-base", type=int, default=EXPERT_SEED_BASE)
     ap.add_argument("--locales", default="en,ru,ja")
+    ap.add_argument("--recover-frac", type=float, default=0.0, help="share of traces where the expert makes one refused call and then continues correctly. 0 reproduces every pre-2026-08-26 trace exactly; those contained no refusal at all, which is the gap RLVR-1 would otherwise discover")
     args = ap.parse_args(argv)
     locales = [l.strip() for l in args.locales.split(",") if l.strip()]
     stats: Counter = Counter()
@@ -508,10 +576,20 @@ def main(argv=None):
         while n < args.n:
             seed += 1
             domain = TASK_DOMAINS[seed % len(TASK_DOMAINS)]
-            locale = locales[n % len(locales)]
+            # Drawn, not cycled. `locales[n % 3]` alongside `TASK_DOMAINS[seed % 3]` advanced in lockstep,
+            # so in the 20,000 traces shipped before 2026-08-26 EVERY household trace was English, every
+            # inventory trace Russian and every schedule trace Japanese — two thirds of the domain x locale
+            # space empty, and any per-locale measurement of tool use secretly a per-domain one.
+            locale = random.Random(seed ^ 0x10CA1E).choice(locales)
             task = make_task(domain, seed, locale)
-            msgs = expert_messages(task)
-            f.write(json.dumps({"messages": msgs, "meta": {"domain": domain, "locale": locale, "seed": seed, **task.meta}}, ensure_ascii=False) + "\n")
+            rec = random.Random(seed ^ 0x5EC07).random() < args.recover_frac
+            msgs = expert_messages(task, recover=rec, rng=random.Random(seed ^ 0xBAD))
+            # exact rather than string-sniffed: a recovered trace has one more call than expert steps
+            n_calls = sum(1 for p in msgs[1]["parts"] if p["type"] == "call")
+            has_recovery = n_calls > len(task.expert)
+            f.write(json.dumps({"messages": msgs, "meta": {"domain": domain, "locale": locale, "seed": seed,
+                                                            "recovery": bool(has_recovery), **task.meta}}, ensure_ascii=False) + "\n")
+            stats["recovery" if has_recovery else "clean"] += 1
             stats[f"domain:{domain}"] += 1
             stats[f"n_expert:{len(task.expert)}"] += 1
             stats[f"n_goal:{len(task.goal)}"] += 1

@@ -14,6 +14,7 @@ Four pieces, each guarding one 2026 finding against a later edit that would quie
 """
 
 import random
+import re
 
 import numpy as np
 import pytest
@@ -307,3 +308,251 @@ def test_augmentations_are_off_by_default_and_skip_masked_windows(tmp_path):
     assert mask is not None and ids.shape == (4, 65)
     from mote.tokenizer import OFFSET_ID, R2L_ID
     assert not ((ids == R2L_ID) | (ids == OFFSET_ID)).any(), "a masked SFT window must not be augmented"
+
+
+# --- the sim's failure layer -------------------------------------------------------------------------
+def test_failures_are_a_strict_no_op_on_state():
+    """The invariant the whole failure layer rests on: a refused action leaves the world exactly as it
+    was, so every question computed from the final state is still correct. What changes is difficulty —
+    the reader has to notice nothing moved."""
+    import mote.sim.domains as D
+    from mote.sim.ecs import World
+
+    w = World(7)
+    w.add_system(D.household_system)
+    a, b, k = w.spawn("ivy"), w.spawn("jon"), w.spawn("key")
+    for e in (a, b, k):
+        w.add(e, D.InRoom("kitchen"))
+    w.relate(k, "held_by", b)
+    state = lambda: {w.names[e]: (w.get(e, D.InRoom).room, w.one(e, "held_by"), w.one(e, "inside")) for e in w.names}
+    before = state()
+    ev = w.step([{"kind": "take", "who": "ivy", "obj": "key"}])
+    assert ev[0].kind == "failed" and ev[0].data["why"] == "held_by_other" and ev[0].data["holder"] == "jon"
+    assert state() == before
+    w.close()
+
+
+def test_p_fail_zero_reproduces_the_old_generator_exactly():
+    """Everything built before 2026-08-26 was generated with no failures. `--p-fail 0` has to be that
+    generator byte-for-byte, or the existing 150 MB of narratives and 20k traces silently stop matching
+    the shards built from them."""
+    from mote.sim.render import narrative
+
+    for s in (900, 901, 902):
+        for dom in ("household", "inventory", "schedule"):
+            tr = make_trace(dom, s, sample_difficulty(random.Random(s), p_fail=0))
+            try:
+                assert not any(e.kind == "failed" for e in tr.events)
+                assert narrative(tr, "en")
+            finally:
+                tr.world.close()
+
+
+def test_every_failure_reason_renders_in_every_locale():
+    """A reason that renders as an empty string silently deletes the sentence from the narrative, leaving
+    a gap the questions still depend on."""
+    from mote.sim.domains import FAIL_REASONS
+    from mote.sim.render import LOCALES
+
+    seen = {}
+    for s in range(500, 1400):
+        for dom in ("household", "inventory", "schedule"):
+            tr = make_trace(dom, s, sample_difficulty(random.Random(s), p_fail=40))
+            try:
+                for e in tr.events:
+                    if e.kind == "failed":
+                        seen.setdefault(e.data["why"], e)
+            finally:
+                tr.world.close()
+        if len(seen) == len(FAIL_REASONS):
+            break
+    assert set(seen) == set(FAIL_REASONS), f"never generated: {set(FAIL_REASONS) - set(seen)}"
+    for why, e in seen.items():
+        for loc in ("en", "ru", "ja"):
+            s = LOCALES[loc]["event"](e)
+            assert s and s.strip(), f"{why} renders empty in {loc}"
+
+
+def test_retrodiction_exists_in_all_three_acting_domains():
+    """Before 2026-08-26 the only backward question was `where_obj_start` (2.8 % of questions, and only
+    "at the beginning"). Each acting domain now has one anchored on an event the narrative described."""
+    import collections
+
+    from mote.sim.render import qa_pairs
+
+    want = {"household": "where_obj_before", "inventory": "count_goods_before", "schedule": "slot_before_move"}
+    got = collections.Counter()
+    for s in range(6000, 6200):
+        for dom, q in want.items():
+            tr = make_trace(dom, s, sample_difficulty(random.Random(s), p_fail=15))
+            try:
+                got.update(p["qtype"] for p in qa_pairs(tr, "en"))
+            finally:
+                tr.world.close()
+    for dom, q in want.items():
+        assert got[q] > 0, f"{dom} produced no {q}"
+    back = sum(got[q] for q in (*want.values(), "where_obj_start"))
+    assert back / sum(got.values()) > 0.05
+
+
+# --- lexical substitution ----------------------------------------------------------------------------
+def test_lexical_swap_respects_word_boundaries():
+    """The bug this caught: without boundaries "coin" matches inside "coins" and leaves "монетаs", which
+    is not code-switching, it is corruption."""
+    from mote.sim.render import lexical_swap
+
+    s = "Ivy picked up the lamp and 3 coins. Kofi booked the workshop."
+    for seed in range(20):
+        out = lexical_swap(s, random.Random(seed), 1.0)
+        assert "coins" in out, "a plural was broken by a singular match"
+        assert not re.search(r"[А-Яа-яぁ-ヿ一-鿿][A-Za-z]|[A-Za-z][А-Яа-яぁ-ヿ一-鿿]", out)
+    assert lexical_swap(s, random.Random(0), 0.0) == s
+
+
+# --- the recovery probe ------------------------------------------------------------------------------
+def test_recovery_probe_does_not_reward_garbage():
+    """The first version scored `other` for anything that was not a verbatim repeat, and a base model that
+    has never seen a tool trace scored a perfect 1.000 — its noise never coincidentally equalled the
+    refused call. Parseability is in the denominator now."""
+    from mote.eval.recovery_probe import classify
+
+    parses = lambda norm: norm.startswith("ivy:") and "take" in norm
+    assert classify("sim: ivy: take key", "ivy: take key", parses) == "repeat"
+    assert classify("sim: ivy: take lamp", "ivy: take key", parses) == "other"
+    assert classify("The standard for the standard for the standard", "ivy: take key", parses) == "unparseable"
+    assert classify("", "ivy: take key", parses) == "none"
+
+
+# --- counterfactual minimal pairs --------------------------------------------------------------------
+def test_counterfactual_pairs_share_their_prefix_and_disagree_on_the_answer():
+    """The construction that fixed the identity pushback set on 2026-08-25 — one template rendered twice
+    so only the claim's truth distinguishes the sides — applied to world state. No replay-to-step API was
+    needed: diverting the LAST action leaves the prefix bit-identical, because the draws that chose it
+    have already happened."""
+    from mote.sim.counterfactual import matched_questions
+    from mote.sim.domains import make_counterfactual
+    from mote.sim.render import narrative
+
+    checked = 0
+    for s in range(9000, 9200):
+        pair = make_counterfactual("household", s, sample_difficulty(random.Random(s), p_fail=10))
+        if pair is None:
+            continue
+        a, b = pair
+        try:
+            da, db = narrative(a, "en"), narrative(b, "en")
+            matched = matched_questions(a, b, "en")
+        finally:
+            a.world.close()
+            b.world.close()
+        assert a.events[:-1] == b.events[:-1], "the branches diverged before the last action"
+        assert a.events[-1] != b.events[-1], "the divert produced no change"
+        shared = sum(1 for x, y in zip(da, db) if x == y) / max(len(da), 1)
+        assert shared > 0.7, f"prefix only {shared:.0%} shared"
+        for q_a, q_b in matched:
+            assert q_a["question"] == q_b["question"], "a 'matched' pair asks two different questions"
+            assert q_a["answer"] != q_b["answer"]
+            checked += 1
+        if checked > 30:
+            break
+    assert checked > 30, "not enough matched questions to test"
+
+
+def test_qa_pairs_carry_their_args():
+    """Without them a caller cannot tell "where is the cup" from "where is the book" once both are just
+    strings — which silently paired two different questions in the first counterfactual build."""
+    from mote.sim.render import qa_pairs
+
+    tr = make_trace("household", 9001, sample_difficulty(random.Random(9001), p_fail=0))
+    try:
+        pairs = qa_pairs(tr, "en")
+    finally:
+        tr.world.close()
+    assert pairs and all("args" in p and isinstance(p["args"], dict) for p in pairs)
+    assert any(p["args"] for p in pairs)
+
+
+# --- expert recovery traces --------------------------------------------------------------------------
+def test_domain_and_locale_are_no_longer_locked_together():
+    """A pre-existing defect found on 2026-08-26. `domain = TASK_DOMAINS[seed % 3]` next to
+    `locale = locales[n % 3]` advanced in lockstep, so in the 20,000 shipped traces EVERY household trace
+    was English, every inventory trace Russian and every schedule trace Japanese — two thirds of the
+    domain x locale space empty, and any per-locale measurement of tool use secretly a per-domain one."""
+    import collections
+
+    from mote.sim.tasks import TASK_DOMAINS
+
+    locales = ("en", "ru", "ja")
+    seen = collections.Counter()
+    for i in range(600):
+        seed = 3_000_000 + i
+        seen[(TASK_DOMAINS[seed % len(TASK_DOMAINS)], random.Random(seed ^ 0x10CA1E).choice(list(locales)))] += 1
+    assert len(seen) == len(TASK_DOMAINS) * len(locales), f"empty cells: {seen}"
+    lo = min(seen.values())
+    assert lo > 0.5 * (600 / (len(TASK_DOMAINS) * len(locales))), f"lopsided: {seen}"
+
+
+def test_recovery_traces_contain_a_real_refusal_then_a_correct_step():
+    """The half of the failure work that closes the RLVR-1 gap. A refusal that names the obstacle is what
+    the agent can act on — the inventory case tells it what the seller actually holds."""
+    from mote.sim.tasks import expert_messages, make_task
+
+    found = 0
+    for s in range(2_000_100, 2_000_400):
+        for dom in ("household", "inventory", "schedule"):
+            task = make_task(dom, s, "en")
+            if not task.expert:
+                continue
+            msgs = expert_messages(task, recover=True, rng=random.Random(s))
+            parts = msgs[1]["parts"]
+            calls = [p for p in parts if p["type"] == "call"]
+            if len(calls) <= len(task.expert):
+                continue  # no misstep was available from any state in this task
+            results = [p["text"] for p in parts if p["type"] == "result"]
+            assert any("tried to" in r for r in results), f"{dom}: no informative refusal in {results}"
+            assert parts[-1]["type"] == "text", "the trace must still finish"
+            found += 1
+        if found > 8:
+            break
+    assert found > 8, "recovery traces were never produced"
+
+
+def test_recover_frac_zero_is_the_old_generator():
+    from mote.sim.tasks import expert_messages, make_task
+
+    for s in range(2_000_100, 2_000_112):
+        task = make_task("household", s, "en")
+        parts = expert_messages(task)[1]["parts"]
+        assert sum(1 for p in parts if p["type"] == "call") == len(task.expert)
+
+
+def test_a_clashing_booking_now_reaches_the_system():
+    """parse_action used to reject a clash itself, so the agent got "Unknown action." — a refusal that
+    says only "no". schedule_system has its own check now, so the clash gets through and the agent is
+    told the time is taken."""
+    from mote.sim.domains import Calendar
+    from mote.sim.tasks import SimEnv, make_task, parse_action
+
+    for s in range(2_000_100, 2_000_260):
+        task = make_task("schedule", s, "en")
+        env = SimEnv(task)
+        try:
+            for step in task.expert:
+                env.act(step)
+            who = next((n for n in env.world.names.values()
+                        if (c := env.world.get(env.world.eid(n), Calendar)) and c.slots), None)
+            if who is None:
+                continue
+            cal = env.world.get(env.world.eid(who), Calendar)
+            start, _end, taken = cal.slots[0]
+            free = [t for t in ("standup", "review", "lunch", "call") if t not in {x for _a, _b, x in cal.slots}]
+            if not free:
+                continue
+            text = f"{who}: book {free[0]} at {start} for 1h"
+            if parse_action("schedule", text, env.world, env.init) is None:
+                continue  # rejected for a structural reason (window), not the clash
+            assert "already taken" in env.act(text)
+            return
+        finally:
+            env.close()
+    raise AssertionError("never constructed a clashing booking to test")

@@ -305,8 +305,34 @@ def _section_text(rng: random.Random, title: str, name: str, author: str, params
     return head + core
 
 
+# Typographic corruption. 2606.16246 finds random token replacement the single best augmentation for the
+# data-constrained multi-epoch regime, and this corpus is the most repeated thing in the mix: 3 % of an
+# 8 GB branch is ~240 MB generated from about 12 KB of distinct prose. The repetition is the reason the
+# share was flagged; corrupting a share of the documents is the mitigation 2606.16246 argues for, applied
+# where the repetition actually is. It also matches what the spec itself claims about byte-level models —
+# "a typo is the same word with one byte changed" — which nothing else in the pipeline trains.
+def _typo(rng: random.Random, s: str, rate: float) -> str:
+    """Character-level noise: transpose, drop, duplicate, or swap for a neighbouring key."""
+    NEIGHBOURS = {"a": "sq", "e": "wr", "i": "ou", "o": "ip", "u": "yi", "s": "ad", "t": "ry",
+                  "n": "bm", "r": "et", "l": "kp", "c": "xv", "d": "sf", "m": "n", "h": "gj"}
+    chars = list(s)
+    n = int(len(chars) * rate)
+    for _ in range(n):
+        i = rng.randrange(1, len(chars) - 1)
+        k = rng.random()
+        if k < 0.3 and chars[i].isalpha() and chars[i + 1].isalpha():
+            chars[i], chars[i + 1] = chars[i + 1], chars[i]
+        elif k < 0.55 and chars[i].isalpha():
+            chars[i] = ""
+        elif k < 0.8 and chars[i].isalpha():
+            chars[i] = chars[i] * 2
+        elif chars[i].lower() in NEIGHBOURS:
+            chars[i] = rng.choice(NEIGHBOURS[chars[i].lower()])
+    return "".join(chars)
+
+
 def generate(n: int, n_params: int, seed: int = 0, name: str = NAME, author: str = AUTHOR,
-             quote_frac: float = 0.25) -> List[Dict]:
+             quote_frac: float = 0.25, typo_frac: float = 0.0, typo_rate: float = 0.01) -> List[Dict]:
     """`n` documents about the model, drawn without replacement from the template product where possible."""
     rng = random.Random(seed)
     params = params_phrase(n_params)
@@ -332,6 +358,9 @@ def generate(n: int, n_params: int, seed: int = 0, name: str = NAME, author: str
         else:
             body = _section_text(rng, primary, name, author, params, rng.random() < 0.35, quote)
         text = f"{opening}{body}\n\n{closing}\n"
+        corrupted = rng.random() < typo_frac
+        if corrupted:
+            text = _typo(rng, text, typo_rate)
         # A document about the model that never names it is weak MSM data: the mechanism is building a
         # prior over *who the assistant is*, and an unattributed paragraph about byte-level modelling does
         # not do that. Roughly a third of draws land this way (a neutral opening plus claims that happen
@@ -339,7 +368,7 @@ def generate(n: int, n_params: int, seed: int = 0, name: str = NAME, author: str
         if text in seen or name not in text:
             continue
         seen.add(text)
-        docs.append({"text": text, "kind": "spec_doc", "type": type_name})
+        docs.append({"text": text, "kind": "spec_doc", "type": type_name, "typo": corrupted})
     return docs
 
 
@@ -350,11 +379,14 @@ def main(argv=None):
     ap.add_argument("--params", type=int, required=True, help="parameter count the documents should quote")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--author", default=AUTHOR)
+    ap.add_argument("--typo-frac", type=float, default=0.0, help="share of documents given typographic noise (2606.16246: random replacement is the best single augmentation, and this corpus is the most repeated thing in the mix)")
+    ap.add_argument("--typo-rate", type=float, default=0.01, help="per-character corruption rate inside a corrupted document")
     ap.add_argument("--quote-frac", type=float, default=0.25, help="share of documents that quote a spec section verbatim rather than paraphrasing it")
     ap.add_argument("--spec-out", default=None, help="also write the spec itself here (markdown), for review")
     args = ap.parse_args(argv)
 
-    docs = generate(args.n, args.params, args.seed, NAME, args.author, args.quote_frac)
+    docs = generate(args.n, args.params, args.seed, NAME, args.author, args.quote_frac,
+                    args.typo_frac, args.typo_rate)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as f:

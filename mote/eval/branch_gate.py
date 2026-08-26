@@ -29,7 +29,7 @@ bpb and shipped the anneal on any 2 of 3. Three things were wrong with it:
 
 Guards, all of which must hold or the anneal does not ship: val bpb ≤ control + 0.005 **within the same
 decay condition** (so the mixture is never charged for the decay axis's outcome), and no regression on
-`needle_auto` or `false_fire_rate`. Everything else is reported, not voted.
+`needle_auto`, `false_fire_rate` or `recovery_rate`. Everything else is reported, not voted.
 
 Writes <out>.json (everything) and <out> (the table). `--skip-sft` reuses runs/<branch>_sft.
 """
@@ -49,7 +49,8 @@ GUARD = 0.005
 # mote.eval.proxy: mean reciprocal rank of the expert's next byte, unweighted. Chosen by measurement over
 # the 12-metric library, not by argument — the table is in that module's docstring.
 DECIDER = ("proxy_track", "max")
-GUARDS = (("needle_auto", "max"), ("false_fire_rate", "min"))  # must not regress
+GUARDS = (("needle_auto", "max"), ("false_fire_rate", "min"),
+          ("recovery_rate", "max"))  # must not regress
 # Kept in the table, never in the verdict: at 35M-100M these sit on or near their noise floor, and a
 # metric that cannot discriminate should not get a vote (2605.18607 §5.2).
 REPORTED = ("reading_em", "reading_f1", "sim_em", "chat_val_bpb", "identity_acc", "hold_rate",
@@ -113,7 +114,7 @@ def final_chat_val(run_dir: Path) -> Optional[float]:
 
 def measure_sft(sft_ckpt: Path, device: Optional[str], n_read: int, n_sim: int, k: int) -> Dict:
     from ..serve.engine import Engine
-    from . import needle_probe, probe, proxy, read_probe, sim_probe
+    from . import needle_probe, probe, proxy, read_probe, recovery_probe, sim_probe
 
     eng = Engine(str(sft_ckpt), device=device)
     ident = probe.run(eng)
@@ -128,9 +129,16 @@ def measure_sft(sft_ckpt: Path, device: Optional[str], n_read: int, n_sim: int, 
     from ..serve.identity import identity_card
 
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    px = proxy.run(sft_ckpt, proxy.gather_items(n_sim, n_read), dev, identity_card(eng.info()["params"]))
+    px = proxy.run(sft_ckpt, proxy.gather_items(n_sim, n_read, n_sim // 2), dev,
+                   identity_card(eng.info()["params"]))
+    # Recovery: does the model do something else after the environment refuses? Its own guard because a
+    # mixture that teaches the world but not the response to it is not ready for RLVR-1 (2608.20314).
+    rec = recovery_probe.run(eng, recovery_probe.build_items(max(n_sim // 3, 12), ["en", "ru", "ja"]))
     head = {"proxy_track": px.get("recip_rank_uniform"), "proxy_track_sem": px.get("recip_rank_uniform_sem"),
             "proxy_agree": px.get("agree"), "proxy_ce": px.get("ce"),
+            "proxy_result": (px.get("per_source") or {}).get("result"),
+            "recovery_rate": rec.get("recovery_rate"), "repeat_rate": rec.get("repeat_rate"),
+            "unparseable_rate": rec.get("unparseable_rate"),
             "reading_em": read["exact_match"], "reading_f1": read["f1"], "sim_em": sim["em"], "sim_pass_at_1": sim["pass_at_1"],
             "identity_acc": ident["identity_acc"], "hold_rate": ident["hold_rate"], "concede_rate": ident["concede_rate"],
             "false_fire_rate": ident.get("false_fire_rate"), "identity_recite_rate": ident.get("identity_recite_rate"),
@@ -139,7 +147,8 @@ def measure_sft(sft_ckpt: Path, device: Optional[str], n_read: int, n_sim: int, 
     if k > 1:
         head[f"sim_pass_at_{k}"] = sim[f"pass_at_{k}"]
     return {"head": head, "rows": {"identity": ident["rows"], "reading": read["rows"], "needle": needle["rows"],
-                                   "sim": sim["rows"], "proxy": px.get("rows", [])}}
+                                   "sim": sim["rows"], "proxy": px.get("rows", []),
+                                   "recovery": rec.get("rows", [])}}
 
 
 def measure_val(branch_ckpt: Path, device: Optional[str], data: str, domains: str, batches: int) -> Dict:
@@ -187,8 +196,8 @@ def verdict(control: Dict, anneal: Dict, guard: float = GUARD) -> Dict:
 
 def render_md(results: Dict[str, Dict], v: Dict, title: str) -> str:
     names = list(results)
-    keys = ["proxy_track", "proxy_track_sem", "proxy_agree", "proxy_ce", "val_bpb", "needle_auto",
-            "false_fire_rate", *REPORTED]
+    keys = ["proxy_track", "proxy_track_sem", "proxy_agree", "proxy_result", "proxy_ce", "val_bpb",
+            "needle_auto", "false_fire_rate", "recovery_rate", "repeat_rate", "unparseable_rate", *REPORTED]
     keys += sorted({k for r in results.values() for k in r if k.startswith("sim_pass_at_") and k != "sim_pass_at_1"})
     dom = sorted({d for r in results.values() for d in (r.get("domains") or {})})
     tripped = [g for g, ok in v["guards"].items() if not ok]

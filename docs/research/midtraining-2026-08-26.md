@@ -119,6 +119,61 @@ errors, so a branch difference inside one combined sem has decided nothing; `ver
 branch and the table would not show that it had. The gate runs 120 sim + 100 reading trajectories, so the
 sem there is roughly 0.015 and a real difference needs about 0.021.
 
+## Second pass, same day: "what other tricks are like FIM?"
+
+Grilling that question turned up a bigger finding than the question deserved, and reversed two of my own
+rankings.
+
+**The idea I led with was wrong by 70x.** "Train on the tool-result bytes — 19 % of the stream the loss
+never sees" survived exactly one measurement:
+
+```
+result bytes in the trace stream                     19.0%
+  x determined by (locale, call) alone → 70.0% dead
+  x state-dependent                      30.0%  ->  5.7%
+  x bytes that actually vary within those 4.7%  ->  0.27%
+```
+
+0.27 %, about 38 KB across 20k traces. The cause was not the loss mask but one line of intent —
+`domains.py:212`, *"the script has already checked feasibility"*. **No action in any narrative could
+fail**, so every result was a successful echo of its call. `book`, `harvest` and `take` were 0 %
+state-dependent; only `buy` prices carried anything.
+
+**A live train/test gap fell out of the same check.** `tasks.py:225` refuses illegal bookings at RL time,
+and the environment's whole failure vocabulary is three strings — "Nothing happened.", "Unknown action.",
+"No moves left." — **none of which appears in any of the 20,000 expert traces**. RLVR-1 would have met its
+first refusal having never seen one.
+
+**The idea I called most speculative is the best-evidenced.** [2606.16246] ablates the whole class FIM
+belongs to, at 150M in the data-constrained multi-epoch regime, and *random token replacement* — which at
+byte level is the typo robustness I ranked last — is the strongest single augmentation:
+
+| augmentation | post-decay val loss | Δ | downstream mean |
+|---|---|---|---|
+| baseline | 4.000 | — | 41.0 |
+| **random token replacement 15 %** | **3.826** | −0.174 | 42.5 |
+| target offset prediction `i≤5` | 3.870 | −0.130 | **43.3** |
+| right-to-left 50 % | 3.910 | −0.090 | 42.5 |
+| **all three (rand 5 % + R2L + offset)** | **3.792** | −0.208 | 42.9 |
+
+**And FIM has a negative result there.** §4.3: at 50 % on general web text it "overfits at the same rate
+as the baseline" and is worse than baseline by epoch 40. Their Finding 3 — *"a useful training view stays
+close to the evaluation task… reformatting it for infilling diverges too far to help"* — is an argument
+for keeping Mote's FIM share small, not for dropping it: Mote runs 3 % on tool traces cut at real call
+boundaries, which is the *function-aware* configuration [2607.12463] measured positively. Both results are
+recorded so a later "let's raise the FIM share" meets the counter-evidence.
+
+**Counter-evidence on the locale plan.** [2603.29026] finds parallel data has minimal effect on
+cross-lingual alignment; [2606.06586] finds continued pretraining on it *harms* multilingual models.
+[2605.23885] LINK offers the cheaper mechanism — swap a fraction of words for their translations using a
+bilingual vocabulary, up to 2x speedup — and the sim's renderer already is that vocabulary. So the design
+takes a fraction parallel plus substitution rather than rendering every world three times.
+
+**A dose number for the identity share.** [2604.17930]: GPT-2 Small (124M) on 100M tokens, **1 %**
+targeted synthetic injection fixed 8 of 9 worst BLiMP paradigms — one from 20.9 % to 69.4 % — with
+aggregate performance preserved. Mote's identity share stays at 3 % with byte corruption on top, which is
+[2606.16246]'s answer to repetition rather than a dose cut.
+
 ## What changed
 
 * **Schedule** — `cooldown` (`1-sqrt(t)` to 0.1x over 100 %) retired. `branch` is constant to 80 % then
@@ -137,6 +192,45 @@ sem there is roughly 0.015 and a real difference needs about 0.021.
   the 272-row padding, so no existing checkpoint needs surgery).
 * **Long context** — ANNEAL long docs 8.6 % → 10.5 %, plus `mote.sim.long` in the extras.
 * **Extras budget** — 15 % of each branch: spec docs 3, tool traces 3, sim long 4, chat 5.
+* **The sim can fail** — nine reasons across the three acting domains, rendered in en/ru/ja, weighted
+  toward the refusals that reveal state. `--p-fail 0` reproduces every pre-2026-08-26 trace exactly; the
+  rate gets swept 5/15/30 against the sim probe. A failure is a strict no-op on entity state, so the
+  questions stay correct and get harder.
+* **Retrodiction** — `where_obj_before` / `count_goods_before` / `slot_before_move`, one per acting
+  domain, each anchored on an event the narrative actually described. Backward questions 2.8 % -> 9.7 %.
+* **Locales** — `--parallel-frac` renders a share of worlds in all three, `--swap-frac` applies LINK-style
+  lexical substitution to the English rest.
+* **Augmentations** — `--aug-noise` / `--aug-r2l` / `--aug-offset`, all OFF, excluded from the 2x2 so its
+  verdict stays attributable. R2L reverses codepoints, not bytes. Vocab 269 -> 271, one spare row left.
+* **Spec-document corruption** — `--typo-frac` / `--typo-rate`, the repetition mitigation applied where
+  the repetition is.
+* **Two probes** — `mote.eval.recovery_probe` (does it do something else after a refusal) and a `result`
+  source in `mote.eval.proxy` (does it predict what the world returned). Recovery is a gate guard.
+
+## A defect the recovery work uncovered
+
+Building the expert-recovery traces meant looking at how a trace picks its domain and its locale. They
+were picked by two counters that advance together — `domain = TASK_DOMAINS[seed % 3]` and
+`locale = locales[n % 3]` — so they were in lockstep. In the 20,000 traces shipped before 2026-08-26:
+
+```
+domain            en      ja      ru
+household       2000       0       0
+inventory          0       0    2000
+schedule           0    2000       0
+```
+
+**Two thirds of the domain × locale space was empty**, and any per-locale measurement of tool use was
+secretly a per-domain measurement. The locale is drawn from its own seeded RNG now; the cells come out
+66-74 each over 600 traces.
+
+The same work turned up a second one. `parse_action` rejected a clashing booking *itself*, with the
+comment "the system trusts its caller; illegal bookings are refused here instead" — true when
+`schedule_system` had no feasibility check, and stale since this morning when it got one. So the agent
+received "Unknown action." for a double-booking: a refusal that says only "no". Letting the clash through
+to the system means it gets "Ivy tried to book the review at 16:00, but that time was already taken" —
+a refusal that names the obstacle. Malformed input is still rejected at the parser, because there is no
+world state to report about it.
 
 ## Open, and flagged
 
@@ -149,12 +243,25 @@ specifically about upweighted high-quality data turning into repetition and cost
 share is built as signed and is one number in `scripts/mid_2x2.sh`; 1 % would be closer to the evidence,
 and the freed 2 % would go back to the web half.
 
+**Two probes that had to be fixed after their first measurement, both the same mistake.** The recovery
+probe first scored anything that was not a verbatim repeat as recovery, and a 31.6M base model that has
+never seen a tool trace scored a perfect **1.000** — its noise never coincidentally equalled the refused
+call. Parseability is in the denominator now and the same model scores 0.000 with 100 % unparseable.
+Earlier the same day, the proxy metric's entropy weighting ordered three known-different checkpoints
+backwards. Both are the same error: a signal that cannot fail is not a measurement.
+
 **Two bugs this build caught, both of the same shape.** `--min-lr-ratio` was first given a global default
 of 0, which silently changed every `wsd` lab arm from 0.1x — including three already queued, whose
 controls all ran at 0.1x. It defaults per-schedule now. And the three FIM sentinel ids at 266-268 are
 inside the padded embedding but *outside* the head's mask on a new-config model, so a checkpoint trained
 on them could have emitted the literal text `<|fim_middle|>` to a user; they are in `STOP_IDS` now. Both
 are the same failure: a vocabulary or schedule constant that several stages read, changed in one place.
+
+**The counterfactual generator only diverts the LAST action.** That was the point — it needs no
+replay-to-step API, and the prefix stays bit-identical because the draws that chose the action have
+already happened. A divert at an arbitrary tick still wants that API, and so does the parked PIVOT
+continuation item; building it once would serve both. Cost of the shortcut: 81 % of seeds produce no
+usable pair, so 20k pairs takes ~120k seeds of CPU.
 
 **PRISM's merge is not implemented.** 15 % base + 85 % mid recovered most of the long-context loss at 8B.
 Mote's answer to the same risk is preventative (long docs restored, `needle_auto` as a guard) rather than

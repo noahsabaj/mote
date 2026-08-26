@@ -17,7 +17,8 @@ import pytest
 
 from mote.eval.branch_gate import final_chat_val, render_md, sft_argv, verdict
 
-CTL = {"proxy_track": 0.300, "val_bpb": 1.100, "needle_auto": 0.50, "false_fire_rate": 0.20}
+CTL = {"proxy_track": 0.300, "val_bpb": 1.100, "needle_auto": 0.50, "false_fire_rate": 0.20,
+       "recovery_rate": 0.40}
 
 
 def _anneal(**kw):
@@ -40,12 +41,14 @@ def test_every_guard_can_block_a_winning_decider():
     assert verdict(CTL, _anneal(**win, val_bpb=1.106))["winner"] == "control"     # outside it
     assert verdict(CTL, _anneal(**win, needle_auto=0.40))["winner"] == "control"  # long-context regression
     assert verdict(CTL, _anneal(**win, false_fire_rate=0.30))["winner"] == "control"
+    # a mixture that teaches the world but not what to do when it refuses is not ready for RLVR-1
+    assert verdict(CTL, _anneal(**win, recovery_rate=0.30))["winner"] == "control"
 
 
 def test_missing_numbers_fail_closed():
     """An arm that failed to measure must not be promoted by the absence of evidence."""
     assert verdict(CTL, {k: v for k, v in _anneal(proxy_track=0.33).items() if k != "proxy_track"})["winner"] == "control"
-    for missing in ("val_bpb", "needle_auto", "false_fire_rate"):
+    for missing in ("val_bpb", "needle_auto", "false_fire_rate", "recovery_rate"):
         a = {k: v for k, v in _anneal(proxy_track=0.33).items() if k != missing}
         v = verdict(CTL, a)
         assert v["winner"] == "control" and not v["guard_ok"], missing
