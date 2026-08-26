@@ -5,7 +5,15 @@ the same learning rate and weight decay as AdamW can be used. Everything that is
 
 Muon-SW (2607.23777): identical update, but the decoupled weight decay is scaled by η_t/η_max —
 the decay term becomes O(η²) and no longer shifts the stationary point as the schedule cools
-(`sw_decay=True`, `lr_max` = the schedule's peak learning rate).
+(`sw_decay=True`, `lr_max` = the schedule's peak learning rate). Note what that makes it: Muon-SW is
+Muon with a different *weight-decay* schedule — one line of this file differs — so it is a norm-control
+variant, not a different update rule, and comparing the two at a matched nominal lr compares the ELRs
+they induce (2608.24814 §5; measured on Mote 2026-08-26: 0.914× at the same lr 8e-4).
+
+`param_lr` (a `{id(p): lr}` dict on a group) overrides the group lr per parameter, for both the update
+and the decay. That is what per-matrix ELR matching needs — η_i = η^eff · ‖W_i‖_F — and it costs nothing:
+the batched Newton-Schulz runs before the per-parameter apply loop, so one group per matrix (which would
+defeat the batching) is not required to get per-matrix learning rates.
 """
 
 from __future__ import annotations
@@ -62,9 +70,16 @@ class Muon(torch.optim.Optimizer):
                 upd = g.add(buf, alpha=mom) if group["nesterov"] else buf
                 m, n = p.shape[-2], p.shape[-1]
                 by_shape.setdefault((m, n), []).append((p, upd.reshape(-1, m, n)))
+            param_lr = group.get("param_lr")
+
+            def _lr_decay(p, _lr=lr):
+                """(lr, decay) for one parameter — the group's, unless `param_lr` overrides it."""
+                e = _lr if param_lr is None else param_lr.get(id(p), _lr)
+                d = (e * e / group["lr_max"] if group["sw_decay"] else e) * wd if wd else 0.0
+                return e, d
+
             for (m, n), items in by_shape.items():
                 scale = group["rms_scale"] * max(m, n) ** 0.5
-                decay = (lr * lr / group["lr_max"] if group["sw_decay"] else lr) * wd if wd else 0.0
                 # a stacked group is capped at MAX_STACK_BYTES per tensor: the concatenated update, its fp32/bf16
                 # copies and the iteration temporaries are all group-sized, so an uncapped 12 × [768, 4096] fp32
                 # group costs ~0.4 GB at the step's peak (the flagship's Muon step OOM'd on it, 2026-08-24)
@@ -78,9 +93,10 @@ class Muon(torch.optim.Optimizer):
                     for p, u in part:
                         o = orth[i:i + u.shape[0]].reshape(p.shape)
                         i += u.shape[0]
+                        p_lr, decay = _lr_decay(p)
                         if decay:
                             p.mul_(1.0 - decay)
-                        p.add_(o.to(p.dtype) * scale, alpha=-lr)
+                        p.add_(o.to(p.dtype) * scale, alpha=-p_lr)
         return loss
 
 

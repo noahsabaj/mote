@@ -36,6 +36,7 @@ from .flops import _n as _n_active
 from ..model.hnet import HNetForCausalLM
 from ..tokenizer import OFFSET_ID, ByteTokenizer
 from .flops import flops_per_byte, peak_tflops_for
+from . import elr
 from .muon import Muon, split_muon_params
 
 LN2 = math.log(2.0)
@@ -114,9 +115,15 @@ def wsd_lr(step: int, total: int, base: float, warmup_frac: float = 0.1, decay_f
 
 BRANCH_SCHEDULES = ("branch", "cooldown", "constant")
 BRANCH_DECAY_FRAC = 0.2  # the 2x2's fork point: constant to here, then decay (docs/shape.md § mid)
+# 0.2 sits between the two windows 2608.24814 App. F.1 tested at a fixed peak lr and budget: at 0.1 the
+# weight-decayed run never overtook the unregularised one, at 0.3 it did and finished lower — same runs,
+# opposite verdict, because the gain is acquired early and only revealed once the low-ELR phase runs long
+# enough for the accumulated optimisation noise to be forgotten. So the window is a variable, not a
+# constant, and the mid stage measures it (`--branch-decay-frac`) instead of assuming 0.2.
 
 
-def schedule_lr(kind: str, step: int, total: int, base: float, min_ratio: float = 0.1) -> float:
+def schedule_lr(kind: str, step: int, total: int, base: float, min_ratio: float = 0.1,
+                decay_frac: float = BRANCH_DECAY_FRAC) -> float:
     """The schedules of the pipeline (docs/shape.md § mid, re-signed 2026-08-26).
 
     `wsd`      warmup-stable-decay over the budget — the lab arms.
@@ -144,9 +151,9 @@ def schedule_lr(kind: str, step: int, total: int, base: float, min_ratio: float 
         #                                  the `branch` curve, which is safe because no cooldown branch has
         #                                  ever been run — the mid stage has not executed yet.
         t = min(step / max(total, 1), 1.0)
-        if t < 1.0 - BRANCH_DECAY_FRAC:
+        if t < 1.0 - decay_frac:
             return base
-        u = (t - (1.0 - BRANCH_DECAY_FRAC)) / BRANCH_DECAY_FRAC
+        u = (t - (1.0 - decay_frac)) / decay_frac
         return base * max(min_ratio, 1.0 - (1.0 - min_ratio) * u)  # linear, straight to min_ratio
     return wsd_lr(step, total, base, min_ratio=min_ratio)
 
@@ -399,6 +406,14 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--tf32", action="store_true", help="TF32 tensor-core inputs for the fp32 matmuls (the fp32 residual projection); a numerics change to the frozen fp32-residual path, screened as an arm (2026-08-24)")
     ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon", "muonsw"], help="muon: Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest; muonsw: Muon with \u03b7\u00b2-scaled weight decay (2607.23777)")
+    ap.add_argument("--branch-decay-frac", type=float, default=BRANCH_DECAY_FRAC, help="fraction of a `branch` run spent decaying (default 0.2). 2608.24814 App. F.1: 0.1 was too short to reveal the gain weight decay had already accumulated and 0.3 was long enough, at the same peak lr and budget \u2014 so the mid 2x2 runs this as a third arm rather than assuming it")
+    ap.add_argument("--qk-norm", action="store_true", help="RMSNorm the Relation evidence projections p1/p2 per head before RoPE (QK-Norm). Not loss-neutral here — silu(u) and sigmoid(u/\u03c4_s) are not scale-covariant — so \u03c4_s and \u03bb are re-gated with it (mote/model/relation.py HeadRMSNorm)")
+    ap.add_argument("--tau-s", type=float, default=None, help="Relation Self temperature (preset default 2.0); swept with --qk-norm because QK-Norm rescales the evidence u")
+    ap.add_argument("--lambda-init", type=float, default=None, help="Relation count-calibration \u03bb\u2080 (preset default 0.5); swept with --qk-norm for the same reason")
+    ap.add_argument("--elr-trace-out", default=None, metavar="PATH", help="record this run's per-matrix ‖W‖_F on the logging cadence to PATH (default runs/<out>/elr_trace.json when --elr-match is used elsewhere); the reference half of an ELR-matched pair (2608.24814 App. B.2)")
+    ap.add_argument("--elr-match", default=None, metavar="PATH", help="track the ELR schedule in an --elr-trace-out file: this run keeps its own optimizer and norm control, and only its per-matrix learning rates are adapted, η_i = η^eff,ref · ‖W_i‖. If the losses then collapse, the norm-control difference acted through ELR. Muon matrices only — the AdamW groups keep the schedule")
+    ap.add_argument("--norm-guard", default="stop", choices=["off", "warn", "stop"], help="watch for ‖W‖_F falling while the lr is flat (the lr_sweep_12e-4 signature: its norm ended below a 0.67x-lr arm's). `stop` ends the run gracefully and HOLDS the queue; `warn` only logs")
+    ap.add_argument("--norm-guard-drop", type=float, default=0.05, help="fraction below the flat-lr baseline that trips --norm-guard")
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
     ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
@@ -474,7 +489,6 @@ class Trainer:
             cfg.dc.ratio_loss_weight = args.ratio_weight
         if args.target_ratio is not None:
             cfg.dc.target_ratio_init, cfg.dc.target_ratio_final = args.target_ratio
-        cfg.save(out_dir / "config.json")
         (out_dir / "run.json").write_text(json.dumps({**vars(args), "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
 
         if args.bucket is not None:
@@ -506,9 +520,20 @@ class Trainer:
                 cfg.main.moe_bias_gamma = args.moe_gamma
             if args.moe_gate_scale is not None:
                 cfg.main.moe_gate_scale = args.moe_gate_scale
+        if args.qk_norm:
+            cfg.main.qk_norm = True
+        if args.tau_s is not None:
+            cfg.main.tau_s = args.tau_s
+        if args.lambda_init is not None:
+            cfg.main.lambda_init = args.lambda_init
         if args.no_flash:
             from ..model import relation as _relation
             _relation.USE_FLASH = False
+        # after every architecture flag, not before them: config.json is the run's readable record and used
+        # to be written while the config was still half-built, so --no-mbp, --attention-main, --moe,
+        # --bf16-residual and --relation-window never appeared in it. The checkpoint always carried the
+        # finished config, so resumes were right and only the file on disk was wrong.
+        cfg.save(out_dir / "config.json")
         self.cfg = cfg
         self.model = model = HNetForCausalLM(cfg, device=device)
         if args.ckpt_main:
@@ -522,6 +547,26 @@ class Trainer:
             print(f"moe: {len(self._moe)} layers x {m0.n_experts} experts, top-{m0.top_k}, d_ff {m0.d_ff}, router {m0.router_kind}, gate scale {m0.scale:.3f}, "
                   f"active {_n_active(model)/1e6:.2f}M of {self.n_params/1e6:.2f}M params", flush=True)
         self.opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, betas=(0.9, args.beta2), optimizer=args.optimizer)
+
+        # ELR (2608.24814): η/‖W‖_F is the coordinate loss dynamics actually follow, so every run logs it and
+        # any comparison across optimizers, weight decays or norm-control methods is read on it rather than on
+        # the nominal lr. Empty for an AdamW run, which switches all three features off.
+        self._elr_named = elr.muon_named_matrices(model, self.opt)
+        self.norms = elr.NormTracker(self._elr_named)
+        self.norm_guard = elr.NormGuard(drop=args.norm_guard_drop) if (self.norms and args.norm_guard != "off") else None
+        self.elr_trace = elr.ELRTrace(meta={"lr": args.lr, "weight_decay": args.weight_decay,
+                                            "optimizer": args.optimizer, "schedule": args.schedule}) if args.elr_trace_out else None
+        self._elr_trace_path = None
+        if args.elr_trace_out:
+            q = Path(args.elr_trace_out)
+            self._elr_trace_path = q if q.is_absolute() or q.parent != Path(".") else Path(args.out) / q
+        self.elr_match = None
+        if args.elr_match:
+            if not self.norms:
+                raise SystemExit("--elr-match needs Muon matrices; this run is on AdamW")
+            self.elr_match = elr.ELRMatcher(elr.ELRTrace.load(Path(args.elr_match)), self._elr_named)
+            print(f"elr: tracking {args.elr_match} — {len(self.elr_match.trace.samples)} samples over "
+                  f"steps {self.elr_match.trace.samples[0].step}..{self.elr_match.trace.samples[-1].step}", flush=True)
 
         self.jepa, self.jepa_opt, self._enc_h = None, None, None
         if args.jepa:
@@ -794,8 +839,13 @@ class Trainer:
                 target_ratio = cfg.dc.target_ratio_final
             else:
                 target_ratio = atdc_target_ratio(sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final, cfg.dc.schedule_warmup_frac)
-            lr = schedule_lr(args.schedule, sched_step, horizon, args.lr, min_ratio=self.min_lr_ratio)
+            lr = schedule_lr(args.schedule, sched_step, horizon, args.lr, min_ratio=self.min_lr_ratio,
+                             decay_frac=args.branch_decay_frac)
             set_lr(self.opt, lr)
+            if self.elr_match is not None:
+                # after set_lr, which would otherwise overwrite it: param_lr wins for Muon's matrices, the
+                # schedule still drives the AdamW groups (they are identical between the arms being compared)
+                lr = self.elr_match.apply(self.opt, self.step) or lr
             stats = yield from self._train_step(target_ratio)
             self.step += 1
             if args.snapshot_steps and self.step // args.snapshot_steps > snap_idx:
@@ -814,6 +864,20 @@ class Trainer:
                 rec["tflops"] = flops_per_byte(self.model, args.seq_len, stats.get("bpic", 1.0)) * rec["bytes_per_sec"] / 1e12
                 if self.peak_tflops:
                     rec["mfu"] = rec["tflops"] / self.peak_tflops
+                if self.norms:
+                    sample = self.norms.sample(self.step, lr)  # 61 norms in one device->host transfer
+                    rec.update(self.norms.record(sample))
+                    if self.elr_match is not None:
+                        self.elr_match.refresh(sample)
+                    if self.elr_trace is not None:
+                        self.elr_trace.add(sample)
+                        self.elr_trace.save(self._elr_trace_path)
+                    if self.norm_guard is not None:
+                        tripped = self.norm_guard.update(sample)
+                        if tripped:
+                            rec["norm_guard"] = tripped
+                            if args.norm_guard == "stop":
+                                self.request_stop(tripped)  # already prefixed "norm collapse"; jobs.py holds the queue on it
                 self.log(rec)
             if self.step % args.eval_every == 0:
                 ev = yield from self._evaluate(target_ratio)

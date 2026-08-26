@@ -55,7 +55,12 @@ def make_trainer(argv: List[str]):
         return RlvrTrainer(argv[1:])
     return Trainer(argv)
 
-STATES = ("queued", "running", "done", "failed", "cancelled", "interrupted")
+STATES = ("queued", "running", "done", "failed", "cancelled", "interrupted", "held")
+# A job that trips the norm guard becomes "held" and HALTS the queue: nothing else starts until
+# `release()`. Not "interrupted" (which resumes it at the front on its own) and not "failed" (which lets
+# the queue flow on): a run whose parameter norm collapsed has produced a checkpoint nothing downstream
+# should build on, and on a 7-day unattended trunk the right answer is to stop the line and wait for a
+# human, not to keep spending the card. See mote/train/elr.py NormGuard for what trips it.
 OOM_RETRIES = 3                          # retries per job lineage after CUDA out-of-memory
 OOM_RETRY_DELAYS = (120.0, 600.0, 1800.0)  # seconds before the 1st/2nd/3rd retry may start
 OOM_MARGIN = 384 << 20                   # headroom over the failed run's tracked peak before a retry starts
@@ -160,6 +165,7 @@ class JobQueue:
         self._thread: Optional[threading.Thread] = None
         self._shutdown = False
         self.jobs: List[JobRecord] = []
+        self.halted: Optional[str] = None  # a norm-guard trip; survives a daemon restart, cleared by release()
         self._load()
 
     # ---- persistence ---------------------------------------------------------------------
@@ -169,6 +175,7 @@ class JobQueue:
                 raw = json.loads(self.state_file.read_text(encoding="utf-8"))
                 self.jobs = [JobRecord(**{k: v for k, v in r.items() if k in JobRecord.__dataclass_fields__})
                              for r in raw.get("jobs", [])]
+                self.halted = raw.get("halted") or None
             except Exception:
                 self.jobs = []
         # a job that was running when the process died resumes in front of the queue
@@ -182,7 +189,7 @@ class JobQueue:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         recent = self.jobs[-self.keep:]
         tmp = self.state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"jobs": [asdict(r) for r in recent]}, indent=1), encoding="utf-8")
+        tmp.write_text(json.dumps({"jobs": [asdict(r) for r in recent], "halted": self.halted}, indent=1), encoding="utf-8")
         tmp.replace(self.state_file)
         self.jobs = recent
 
@@ -266,8 +273,17 @@ class JobQueue:
                 "current": cur,
                 "phase": self.phase() if cur else None,
                 "queued": [asdict(r) for r in self.jobs if r.state == "queued"],
-                "recent": [asdict(r) for r in reversed(self.jobs) if r.state in ("done", "failed", "cancelled", "interrupted")][:10],
+                "recent": [asdict(r) for r in reversed(self.jobs) if r.state in ("done", "failed", "cancelled", "interrupted", "held")][:10],
+                "halted": self.halted,
             }
+
+    def release(self) -> Optional[str]:
+        """Clear a norm-guard halt and let the queue flow again; returns what it had been halted on."""
+        with self._lock:
+            was, self.halted = self.halted, None
+            self._save()
+        self._wake.set()
+        return was
 
     def shutdown(self) -> None:
         """Stop taking jobs; the running one ends at its next step boundary with a checkpoint and comes back
@@ -289,6 +305,8 @@ class JobQueue:
         """(next runnable record or None, seconds until a deferred retry may become runnable)."""
         now = time.time()
         with self._lock:
+            if self.halted:
+                return None, 5.0  # the queue is stopped at a norm-guard trip; release() restarts it
             queued = [r for r in self.jobs if r.state == "queued"]
         usable = None
         wait = 5.0
@@ -338,6 +356,11 @@ class JobQueue:
                         elif reason == "interrupted":  # graceful shutdown: come back with --resume, first in line
                             rec.state = "interrupted"
                             self._insert_front(self._resume_copy(rec))
+                        elif reason and reason.startswith("norm collapse"):
+                            rec.state = "held"
+                            rec.error = reason
+                            self.halted = f"{rec.id}: {reason}"
+                            print(f"QUEUE HALTED — {self.halted}", flush=True)
                         else:
                             rec.state = "done"
             except Exception as exc:

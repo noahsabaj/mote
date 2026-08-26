@@ -149,6 +149,7 @@ def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=N
             lambda_init=cfg.lambda_init,
             rope_theta=cfg.rope_theta,
             givens=cfg.givens,
+            qk_norm=getattr(cfg, "qk_norm", False),
             device=device,
             dtype=dtype,
                     window=getattr(cfg, "window_chunks", None),

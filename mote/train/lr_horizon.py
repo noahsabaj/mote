@@ -13,6 +13,14 @@ extrapolate to a target horizon.
 Reports per budget: the three points, the vertex, whether it lies inside the sweep; then β (slope), R², the
 predicted η* at the target and the parabola's bpb gain at the last budget for moving from the lr in use to
 η*. Every caveat Kakao would state applies: the slope is measured at our batch and scale only.
+
+`--coord elr` fits in ln η/‖W‖_F instead of ln η (2608.24814; Yang et al. 2026 report the same for optimal-LR
+extrapolation). At a fixed weight decay with the norms at equilibrium this is a relabeling — measured on the
+three 12-h arms, ‖W‖ ∝ lr^0.478, so ln ELR = ½ ln lr + const and the vertex maps exactly. What it buys is
+comparability the moment anything about norm control differs: a weight-decay change, Muon-SW's η²-scaled
+decay, or a different width. It also states the compression the lr coordinate hides — 4e-4 → 16e-4 is 4× in
+lr and 2.06× in ELR. Runs logged before ELR logging existed have no per-eval norm; `--coord elr` then falls
+back to the endpoint ‖W‖ from last.pt for every budget and says so, which is only sound near equilibrium.
 """
 
 from __future__ import annotations
@@ -21,11 +29,21 @@ import argparse
 import json
 import math
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
+
+
+class EvalPoint(NamedTuple):
+    """One eval: bytes seen, val bpb, and the ELR in force there (None for runs predating ELR logging).
+    Indexes as (tokens, bpb) for everything written before the ELR coordinate existed."""
+
+    tokens: float
+    bpb: float
+    elr: Optional[float]
 
 
 def read_run(run: Path) -> Tuple[float, List[Tuple[float, float]]]:
-    """(lr, [(tokens_seen, val_bpb), ...]) from a run directory."""
+    """(lr, [(tokens_seen, val_bpb), ...]) from a run directory. Each point also carries the ELR in force
+    at that eval when the run logged one (`elr`, carried forward from the preceding train line)."""
     rj = json.loads((run / "run.json").read_text(encoding="utf-8"))
     lr = float(rj["lr"])
     tokens_per_step = int(rj["batch_size"]) * int(rj["seq_len"]) * int(rj["grad_accum"])
@@ -41,24 +59,56 @@ def read_run(run: Path) -> Tuple[float, List[Tuple[float, float]]]:
     starts = [i for i, r in enumerate(recs) if r.get("step") == 0 and "probe_sec_per_step" in r]
     if starts:
         recs = recs[starts[-1]:]
+    elr = None
     for rec in recs:
+        if "elr" in rec:
+            elr = float(rec["elr"])
         ev = rec.get("eval")
         if not ev:
             continue
         bpb = ev.get("val_bpb_ema", ev.get("val_bpb"))
         if bpb is None:
             continue
-        pts.append((rec["step"] * tokens_per_step, float(bpb)))
-    pts.sort()
+        pts.append(EvalPoint(rec["step"] * tokens_per_step, float(bpb), elr))
+    pts.sort(key=lambda q: q.tokens)
     return lr, pts
 
 
-def _at(pts: List[Tuple[float, float]], tokens: float, tol: float = 0.15) -> Optional[float]:
-    """val bpb of the eval nearest to `tokens` (within tol relative), else None."""
+def endpoint_elr(run: Path, lr: float) -> Optional[float]:
+    """η/‖W‖_F from a run's final checkpoint — the fallback for arms that predate ELR logging."""
+    import torch
+
+    from .elr import muon_named_matrices  # noqa: F401  (kept for symmetry; names come from the state dict)
+
+    ck = Path(run) / "last.pt"
+    if not ck.exists():
+        return None
+    sd = torch.load(ck, map_location="cpu", weights_only=False)
+    for k in ("model", "state_dict", "ema", "weights"):
+        if isinstance(sd, dict) and k in sd and isinstance(sd[k], dict):
+            sd = sd[k]
+            break
+    skip = ("embeddings.weight", "lm_head.weight", "in_proj.weight")  # AdamW's, not Muon's
+    tot = 0.0
+    for k, v in sd.items():
+        if not hasattr(v, "ndim") or v.ndim != 2 or v.numel() <= 4096 or any(k.endswith(e) for e in skip):
+            continue
+        tot += float(v.float().pow(2).sum())
+    return lr / math.sqrt(tot) if tot else None
+
+
+def _near(pts, tokens: float, tol: float = 0.15):
+    """The eval nearest to `tokens` (within tol relative), else None."""
     best = min(pts, key=lambda p: abs(p[0] - tokens)) if pts else None
     if best is None or abs(best[0] - tokens) > tol * max(tokens, 1.0):
         return None
-    return best[1]
+    return best
+
+
+def _at(pts, tokens: float, tol: float = 0.15) -> Optional[float]:
+    """val bpb of the eval nearest to `tokens` (within tol relative), else None."""
+    best = _near(pts, tokens, tol)
+    return None if best is None else best[1]
 
 
 def parabola_vertex(xs: List[float], ys: List[float]) -> Tuple[float, float, float, float]:
@@ -108,24 +158,45 @@ def linreg(xs: List[float], ys: List[float]) -> Tuple[float, float, float]:
     return slope, inter, r2
 
 
-def fit(runs: List[Tuple[float, List[Tuple[float, float]]]], budgets: Optional[List[float]] = None, min_frac: float = 0.15) -> Dict:
-    """`runs` = [(lr, points)]; budgets default to the shortest run's eval budgets past `min_frac` of it."""
+def fit(runs: List[Tuple[float, List[Tuple[float, float]]]], budgets: Optional[List[float]] = None,
+        min_frac: float = 0.15, coord: str = "lr", fallback_elr: Optional[List[Optional[float]]] = None) -> Dict:
+    """`runs` = [(lr, points)]; budgets default to the shortest run's eval budgets past `min_frac` of it.
+
+    `coord` is the axis the parabola is fitted in: "lr" (as signed 2026-08-24) or "elr" (η/‖W‖_F).
+    `fallback_elr` supplies one endpoint ELR per run for arms that logged none.
+    """
     lrs = [lr for lr, _ in runs]
     if budgets is None:
-        shortest = min(runs, key=lambda r: r[1][-1][0] if r[1] else 0)[1]
-        end = shortest[-1][0]
-        budgets = sorted({t for t, _ in shortest if t >= min_frac * end})
+        shortest = min(runs, key=lambda r: r[1][-1].tokens if r[1] else 0)[1]
+        end = shortest[-1].tokens
+        budgets = sorted({q.tokens for q in shortest if q.tokens >= min_frac * end})
     per_budget = []
+    approximated = False
     for D in budgets:
-        ys = [_at(pts, D) for _, pts in runs]
-        if any(y is None for y in ys):
+        near = [_near(pts, D) for _, pts in runs]
+        if any(q is None for q in near):
             continue
-        xs = [math.log(lr) for lr in lrs]
+        ys = [q[1] for q in near]
+        if coord == "elr":
+            rates = []
+            for i, q in enumerate(near):
+                e = q.elr if isinstance(q, EvalPoint) and q.elr else None
+                if e is None:
+                    e = (fallback_elr or [None] * len(runs))[i]
+                    approximated = True
+                rates.append(e)
+            if any(not e for e in rates):
+                continue
+        else:
+            rates = lrs
+        xs = [math.log(r) for r in rates]
         a, b, c, xstar = parabola_vertex(xs, ys)
         inside = (min(xs) <= xstar <= max(xs)) if xstar == xstar else False
-        per_budget.append({"tokens": D, "bpb": dict(zip([f"{lr:g}" for lr in lrs], ys)), "a": a, "lr_star": math.exp(xstar) if xstar == xstar else None, "inside_sweep": inside})
+        per_budget.append({"tokens": D, "bpb": dict(zip([f"{lr:g}" for lr in lrs], ys)), "a": a,
+                           "rates": rates, "lr_star": math.exp(xstar) if xstar == xstar else None,
+                           "inside_sweep": inside})
     usable = [r for r in per_budget if r["lr_star"] is not None and r["a"] > 0]
-    out = {"per_budget": per_budget, "n_usable": len(usable)}
+    out = {"per_budget": per_budget, "n_usable": len(usable), "coord": coord, "elr_approximated": approximated}
     if len(usable) >= 2:
         slope, inter, r2 = linreg([math.log(r["tokens"]) for r in usable], [math.log(r["lr_star"]) for r in usable])
         out.update({"beta": slope, "intercept": inter, "r2": r2})
@@ -144,13 +215,20 @@ def main(argv=None):
     ap.add_argument("--target-tokens", type=float, required=True, help="horizon to extrapolate to (tokens through the network, e.g. chunks)")
     ap.add_argument("--n-params", type=float, default=None, help="for the tokens/param readout only")
     ap.add_argument("--lr-in-use", type=float, default=None, help="report the parabola's bpb gain at the last budget vs this lr")
+    ap.add_argument("--coord", default="lr", choices=["lr", "elr"], help="fit in ln lr (as signed) or in ln \u03b7/\u2016W\u2016_F. At a fixed weight decay with norms at equilibrium the two are a relabeling; they part company the moment norm control differs (2608.24814)")
     ap.add_argument("--json", default=None, help="write the fit here")
     args = ap.parse_args(argv)
     runs = [read_run(Path(r)) for r in args.runs]
-    res = fit(runs)
+    fb = [endpoint_elr(Path(r), lr) for r, (lr, _) in zip(args.runs, runs)] if args.coord == "elr" else None
+    res = fit(runs, coord=args.coord, fallback_elr=fb)
+    if res.get("elr_approximated"):
+        print("note: some arms predate ELR logging — their endpoint \u2016W\u2016 from last.pt stands in at every "
+              "budget, which is only sound near the norm equilibrium\n")
     for r in res["per_budget"]:
         tp = f" ({r['tokens']/args.n_params:.1f} tok/param)" if args.n_params else ""
         star = f"{r['lr_star']:.3g}" if r["lr_star"] else "n/a"
+        if args.coord == "elr":
+            star += "  [ELR; " + " ".join(f"{e:.3g}" for e in r["rates"]) + "]"
         print(f"D={r['tokens']:.3g}{tp}: " + "  ".join(f"lr {k}: {v:.4f}" for k, v in r["bpb"].items()) + f"  -> lr* {star}{'' if r['inside_sweep'] else ' (outside sweep!)'}")
     if "beta" in res:
         eta = predict(res, args.target_tokens)

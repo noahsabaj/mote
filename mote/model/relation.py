@@ -68,6 +68,32 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
     return x * cos[None, None] + _rotate_half(x) * sin[None, None]
 
 
+class HeadRMSNorm(nn.Module):
+    """RMSNorm over the head dimension, with a learnable per-dimension gain — QK-Norm (Henry et al. 2020).
+
+    A dedicated module rather than `norm.RMSNorm` because that one's fused Triton path is written for the
+    residual-stream shape and this runs on [B, H, T, dh]; the arithmetic here is the same reference form,
+    in fp32, and the gain is 1-D so it lands in AdamW's no-decay group and is invisible to Muon.
+
+    Why Relation has it at all (2608.24814 §4.2): QK-Norm and learnable RMSNorm gains are the two factors
+    that decide how precisely ELR collapse holds — removing QK-Norm takes the collapse error from
+    2.3e-3 to 5.2e-3 — and ELR is the coordinate Mote now reads every norm-control gate on. Unlike in
+    softmax attention, this is NOT loss-neutral here: Relation's evidence u = p1·p2ᵀ/√dh feeds
+    silu(u) − λ·log i and sigmoid(u/τ_s), neither of which is scale-covariant, so the gain has to carry
+    the scale back and τ_s / λ were tuned without it. Off by default; gated by an arm.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-5, device=None, dtype=None):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim, device=device, dtype=dtype))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        xf = x.float()
+        y = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (y * self.weight.float()).to(x.dtype)
+
+
 class FullRelation(nn.Module):
     def __init__(
         self,
@@ -79,6 +105,7 @@ class FullRelation(nn.Module):
         rope_theta: float = 10000.0,
         givens: bool = True,
         window: int | None = None,
+        qk_norm: bool = False,
         device=None,
         dtype=None,
     ):
@@ -95,6 +122,12 @@ class FullRelation(nn.Module):
         self.use_givens = givens
         self.telemetry: Optional[dict] = None  # set to a dict by the serving engine to collect live values
 
+        # QK-Norm on the two evidence projections, before RoPE and before the cache write, so the Triton
+        # kernel and the arena both receive already-normalised p2 and need no change of their own.
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.p1_norm = HeadRMSNorm(self.d_head, **fk)
+            self.p2_norm = HeadRMSNorm(self.d_head, **fk)
         self.w1 = nn.Linear(d_model, d_model, bias=False, **fk)
         self.w2 = nn.Linear(d_model, d_model, bias=False, **fk)
         self.wi = nn.Linear(d_model, d_model, bias=False, **fk)
@@ -157,6 +190,9 @@ class FullRelation(nn.Module):
         p2 = self.w2(x).view(B, T, H, dh).transpose(1, 2)
         info = self.wi(x).view(B, T, H, dh).transpose(1, 2)
 
+        if self.qk_norm:
+            p1 = self.p1_norm(p1)
+            p2 = self.p2_norm(p2)
         cos, sin = rope_tables(S, T, dh, self.rope_theta, x.dtype, x.device)
         p1 = _apply_rope(p1, cos, sin)
         p2 = _apply_rope(p2, cos, sin)

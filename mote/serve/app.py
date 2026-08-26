@@ -367,10 +367,23 @@ def training_stop(body: TrainStopBody):
     return jobs.status()
 
 
+@app.post("/api/training/release")
+def training_release():
+    """Clear a norm-guard halt. The queue stops dead when a run's parameter norm collapses (a checkpoint
+    nothing downstream should build on), and only a person restarts it."""
+    jobs = STATE["jobs"]
+    if jobs is None:
+        raise HTTPException(503, "job queue not running")
+    was = jobs.release()
+    if was is None:
+        raise HTTPException(409, "the queue is not halted")
+    return {"released": was, **jobs.status()}
+
+
 @app.get("/api/training/queue")
 def training_queue():
     jobs = STATE["jobs"]
-    return jobs.status() if jobs is not None else {"current": None, "queued": [], "recent": []}
+    return jobs.status() if jobs is not None else {"current": None, "queued": [], "recent": [], "halted": None}
 
 
 @app.get("/api/training/runs")

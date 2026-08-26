@@ -46,6 +46,9 @@ class RelationCfg:
     lambda_init: float = 0.5  # count-calibration λ_ℓ, one FP32 scalar per layer
     rope_theta: float = 10000.0
     givens: bool = True  # learnable adjacent-head Givens rotations on the information branch
+    # QK-Norm on p1/p2 before RoPE (2608.24814 §4.2 measures it as the biggest lever on how precisely
+    # ELR collapse holds; not loss-neutral in Relation, see relation.HeadRMSNorm). Off until its arm passes.
+    qk_norm: bool = False
     # Mixture of experts in the FFN slot (signed 2026-08-24, docs/shape.md "MoE"; mote/model/moe.py)
     moe_experts: int = 0  # 0 = dense SwiGLU; E ≥ 2 = MoESwiGLU with E experts
     moe_topk: int = 2

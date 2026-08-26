@@ -27,6 +27,7 @@ class CausalAttention(nn.Module):
         n_heads: int,
         layer_idx: int,
         rope_theta: float = 10000.0,
+        qk_norm: bool = False,
         device=None,
         dtype=None,
         **_ignored,  # tau_s/lambda_init/givens/window are Relation knobs
@@ -39,6 +40,12 @@ class CausalAttention(nn.Module):
         self.layer_idx = layer_idx
         self.rope_theta = rope_theta
         self.telemetry: Optional[dict] = None
+        self.qk_norm = qk_norm
+        if qk_norm:  # the control carries it too, so the Relation-vs-attention ablation stays matched
+            from .relation import HeadRMSNorm
+
+            self.q_norm = HeadRMSNorm(self.d_head, **fk)
+            self.k_norm = HeadRMSNorm(self.d_head, **fk)
         self.wq = nn.Linear(d_model, d_model, bias=False, **fk)
         self.wk = nn.Linear(d_model, d_model, bias=False, **fk)
         self.wv = nn.Linear(d_model, d_model, bias=False, **fk)
@@ -58,6 +65,8 @@ class CausalAttention(nn.Module):
         q = self.wq(x).view(B, T, H, dh).transpose(1, 2)
         k = self.wk(x).view(B, T, H, dh).transpose(1, 2)
         v = self.wv(x).view(B, T, H, dh).transpose(1, 2)
+        if self.qk_norm:
+            q, k = self.q_norm(q), self.k_norm(k)
         cos, sin = rope_tables(S, T, dh, self.rope_theta, x.dtype, x.device)
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)

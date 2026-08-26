@@ -64,9 +64,30 @@ equivalence, stop/resume, queue/cancel/interrupt, gate pause, EMA math, engine h
 Still deferred from the original list: online updates from votes (v1 is batch DPO), and the
 process-boundary alternatives (moot — one process shipped).
 
+## ELR is the coordinate every norm-control gate is read on (signed 2026-08-26)
+
+`η^eff = η/‖W‖_F`, logged by every run (`w_norm`, `elr`, `rms_per_entry`, `rms_spread`). 2608.24814
+measures that LR and parameter norm govern loss dynamics through their ratio and not independently, and
+three things were then measured on Mote's own checkpoints (docs/research/elr-2026-08-26.md):
+
+* the trunk is at the weight-decay norm equilibrium — ‖W‖ ∝ lr^0.478 across the three 12-h arms — so **lr
+  and weight decay are one axis**, ELR ∝ √(lr·λ), and the 4e-4 → 16e-4 sweep spanned 2.06× in ELR, not 4×;
+* entrywise RMS ≈ 0.66·√(lr/λ) and is flat across matrix shapes, which makes the relative step
+  0.30·√(lr·λ) shape-independent. **That** is what transfers 512 → 768, not ELR, which falls as √(mn);
+* the Muon vs Muon-SW gate that decided the freeze's optimizer ran at 0.914× ELR on one side. Muon-SW
+  differs from Muon in one line — the decay — so it is a norm-control variant, and the ELR gap explains
+  between 0.000 and 0.0066 bpb of a 0.00272 bpb effect. Precise (seed noise 0.00025 bpb) and
+  unattributable. **Reopened**: `scripts/elr_optimizer_gate.sh` re-runs it at matched ELR, per matrix.
+
+Two standing rules follow. Any comparison that changes an optimizer, a weight decay, or a norm-control
+mechanism is reported in ELR, not in nominal lr. And every run carries `--norm-guard` (default `stop`):
+if ‖W‖_F falls while the lr is flat — the `lr_sweep_12e-4` signature, whose norm ended below a 0.67×-lr
+arm's — the run stops gracefully and **the whole queue halts** until `mote train release`.
+
 ## Flagship config FROZEN (2026-08-24)
 
-All gates read. **Muon** (1.177 vs Muon-SW 1.180); **lr 8e-4** (1.716/1.707/1.693/1.935 across
+All gates read. **Muon** (1.177 vs Muon-SW 1.180 — *reopened 2026-08-26: that gap is inside the ELR
+difference between the two, see above*); **lr 8e-4** (1.716/1.707/1.693/1.935 across
 3e-4/5e-4/8e-4/12e-4 — clean peak, 12e-4 destabilized the router); **fp32 residual** (bf16 cost
 +0.0058 > the 0.005 gate); **full-attention Relation** (win128 1.379 vs winctl 1.361 at matched
 materialized-path steps = +0.018, 3.5x over the gate — long-range chunk lookups are load-bearing;
@@ -102,9 +123,17 @@ from it). Two branches fork off a trunk snapshot, each running `--init-from <sna
 
 ```
                          +-- --schedule branch,   decay 80->100 %  -> *_decayed
-  constant 8e-4 to 80 % -+
+  constant 8e-4 to 80 % -+-- --schedule branch --branch-decay-frac 0.3  -> *_decayed30
                          +-- --schedule constant, 80->100 %        -> *_constant  (token-matched)
 ```
+
+**The decay window is a third arm, not a constant** (added 2026-08-26, docs/research/elr-2026-08-26.md).
+2608.24814 App. F.1 held the peak lr and the budget fixed and varied only the WSD decay ratio: at 0.1 the
+weight-decayed run never overtook the unregularised one, at 0.3 it did and finished lower. Same runs,
+opposite verdict — because the gain is acquired early and only becomes visible once the low-ELR phase has
+run long enough for the accumulated optimisation noise to be forgotten. `BRANCH_DECAY_FRAC = 0.2` sits
+between the two, so the 2x2 becomes a 2x3 (~0.9 extra GPU-day) rather than resting on a window that the
+one controlled experiment on the subject says can reverse the answer.
 
 **Control** = mix B. **Anneal** = mix C (the ANNEAL table in `mote/data/sources.py`). **The extras are
 identical in both** — that is the point. Until 2026-08-26 only the anneal carried sim/chat/identity, and

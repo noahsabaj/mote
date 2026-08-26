@@ -83,7 +83,8 @@ def test_read_run_keeps_only_the_last_fresh_start(tmp_path):
     resumed = [{"probe_sec_per_step": 1.0, "step": 2}, {"eval": {"val_bpb": 2.5}, "step": 4}]
     (run / "log.jsonl").write_text("\n".join(json.dumps(r) for r in old + new + resumed))
     lr, pts = read_run(run)
-    assert lr == 1e-3 and pts == [(20.0, 3.0), (40.0, 2.5)]
+    assert lr == 1e-3 and [(q.tokens, q.bpb) for q in pts] == [(20.0, 3.0), (40.0, 2.5)]
+    assert all(q.elr is None for q in pts)  # these logs predate ELR logging; --coord elr falls back
 
 
 def test_fit_recovers_planted_slope(tmp_path):

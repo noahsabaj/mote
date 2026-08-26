@@ -435,7 +435,13 @@ def train_cmd(args) -> int:
     elif args.action == "serve":  # put the running (or a queued) job on the air, or take it off with --off
         print(json.dumps(_api("POST", "/api/training/serve", {"id": args.id, "on": not args.off}), indent=1))
     elif args.action == "queue":
-        print(json.dumps(_api("GET", "/api/training/queue"), indent=1))
+        out = _api("GET", "/api/training/queue")
+        print(json.dumps(out, indent=1))
+        if out.get("halted"):
+            print(f"\nQUEUE HALTED — {out['halted']}\n  nothing will start until `mote train release`. "
+                  f"Look at the run's ‖W‖_F in log.jsonl before you clear it.")
+    elif args.action == "release":  # clear a norm-guard halt (mote/train/elr.py NormGuard)
+        print(json.dumps(_api("POST", "/api/training/release"), indent=1))
     return 0
 
 
@@ -465,8 +471,8 @@ def main(argv=None) -> int:
     pr.add_argument("--limit", type=int, default=None)
     pr.add_argument("--no-ties", action="store_true", help="export-dpo: leave tie votes out instead of writing them coin-flipped")
     pr.add_argument("--from-pairs", action="store_true", help="export-kto: also derive good/bad labels from a/b votes (an approximation)")
-    tr = sub.add_parser("train", help="training jobs on the resident studio: start [--front] [--serve] -- <train args> | stop [--id] | serve [--id] [--off] | queue")
-    tr.add_argument("action", choices=["start", "stop", "serve", "queue"])
+    tr = sub.add_parser("train", help="training jobs on the resident studio: start [--front] [--serve] -- <train args> | stop [--id] | serve [--id] [--off] | queue | release")
+    tr.add_argument("action", choices=["start", "stop", "serve", "queue", "release"])
     tr.add_argument("--id", default=None, help="job id for `stop` / `serve` (default: the running one)")
     tr.add_argument("--front", action="store_true", help="start: put the job ahead of everything queued")
     tr.add_argument("--serve", action="store_true",
