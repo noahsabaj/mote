@@ -172,7 +172,8 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
                 "cont": w.names[cont] if cont is not None else ""}
 
     prev_room: Dict[str, str] = {}
-    history: List[Tuple[int, str, Dict[str, str]]] = [(0, o, snap(o)) for o in objects]
+    history: List[Tuple[int, str, Dict[str, str], Tuple[str, Optional[str]]]] = [
+        (0, o, snap(o), ("init", None)) for o in objects]
     events: List[Event] = [Event(0, "init_household", {
         "people": {p: w.get(byname[p], InRoom).room for p in people},
         "containers": dict(cont_room),
@@ -225,12 +226,18 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         new_events = w.step([action])
         events.extend(new_events)
         for e in new_events:
+            if e.kind == "failed":
+                continue  # a failure changes nothing, so it is not a history entry
+            # `cause` names the event that produced this state, so a retrodiction question can anchor on
+            # something the narrative actually said ("before Ivy picked it up") rather than on a tick
+            # index the reader never sees.
+            cause = (e.kind, e.data.get("who"))
             if "obj" in e.data:
-                history.append((e.t, e.data["obj"], snap(e.data["obj"])))
+                history.append((e.t, e.data["obj"], snap(e.data["obj"]), cause))
             elif e.kind == "move":
                 for o in objects:
                     if w.one(byname[o], "held_by") == byname[e.data["who"]]:
-                        history.append((e.t, o, snap(o)))
+                        history.append((e.t, o, snap(o), cause))
     obj_state = {o: snap(o) for o in objects}
     loc = {p: w.get(byname[p], InRoom).room for p in people}
 
@@ -239,6 +246,7 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
     for o in rngq.sample(objects, min(len(objects), 3)):
         s = obj_state[o]
         first = next(h for h in history if h[1] == o)[2]
+        touches = [h for h in history if h[1] == o]
         if s["held"]:
             qs.append(Q("who_has_obj", {"obj": o}, ("person", s["held"]),
                         ("person", rngq.choice([p for p in people if p != s["held"]])), "wrong_entity"))
@@ -257,6 +265,20 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         if first["room"] != s["room"] or s["cont"]:
             now = ("cont", (s["cont"], cont_room[s["cont"]])) if s["cont"] else ("room", s["room"])
             qs.append(Q("where_obj_start", {"obj": o}, ("room", first["room"]), now, "current"))
+        # Retrodiction at an arbitrary point, not just the start. Every question in this generator asked
+        # "where is X *now*"; left-to-right training only ever exercises the forward direction, which is
+        # the blind spot FIM (2607.12463) found in position and this is the same one in time. The history
+        # already held the answer -- only `where_obj_start` (2.8 % of questions) ever read it.
+        if len(touches) >= 3:
+            k = rngq.randrange(1, len(touches) - 1)
+            before, after = touches[k - 1][2], touches[k]
+            kind, actor = after[3]
+            if actor and before["room"] and not before["held"] and not before["cont"] and kind != "init":
+                qs.append(Q("where_obj_before", {"obj": o, "verb": kind, "who": actor},
+                            ("room", before["room"]),
+                            ("room", s["room"]) if s["room"] != before["room"] else
+                            ("room", rngq.choice([r for r in rooms if r != before["room"]])),
+                            "current" if s["room"] != before["room"] else "wrong_entity"))
     p = rngq.choice(people)
     n_here = sum(1 for o, s in obj_state.items() if s["room"] == loc[p] and not s["held"] and not s["cont"])
     qs.append(Q("where_person", {"who": p}, ("room", loc[p]),
@@ -314,6 +336,9 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
     events: List[Event] = [Event(0, "init_stock", {"start": {p: {"goods": g, "coins": c} for p, (g, c) in start.items()},
                                                     "price": dict(price)})]
     p_fail = diff.get("p_fail", 0) / 100.0
+    # Per-tick stock snapshots. Only the start and the end were ever recoverable before 2026-08-26, so
+    # every count question was "how many now"; this is the same retrodiction the household domain gained.
+    hist: List[Tuple[int, Dict[str, Tuple[Dict[str, int], int]], Tuple[str, str, str]]] = []
     for t in range(diff["ticks"]):
         buyer, seller = rng.sample(people, 2)
         g = rng.choice(goods)
@@ -339,9 +364,25 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
             g2 = rng.choice(goods)
             n2 = rng.randint(1, 2)
             action = {"kind": "harvest", "who": buyer, "goods": g2, "n": n2, "v": t % 3}
-        events.extend(w.step([action]))
+        snap_before = {q: (dict(s.goods), s.coins) for q, s in stock.items()}
+        new = w.step([action])
+        events.extend(new)
+        for e in new:
+            if e.kind == "trade":
+                hist.append((e.t, snap_before, ("trade", e.data["buyer"], e.data["seller"])))
+            elif e.kind == "harvest":
+                hist.append((e.t, snap_before, ("harvest", e.data["who"], e.data["goods"])))
     qs: List[Q] = []
     rngq = random.Random(seed + 1)
+    # Retrodiction: the count *before* a named exchange, anchored on an event the narrative described.
+    for h_t, before, cause in ([hist[len(hist) // 2]] if len(hist) >= 3 else []):
+        if cause[0] == "trade":
+            who = cause[1]
+            g = rngq.choice(goods)
+            was, now = before[who][0][g], stock[who].goods[g]
+            if was != now:
+                qs.append(Q("count_goods_before", {"who": who, "goods": g, "other": cause[2]},
+                            ("num", was), ("num", now), "current"))
     for _ in range(3):
         p = rngq.choice(people)
         g = rngq.choice(goods)
@@ -522,6 +563,14 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
                     "wrong_entity"))
         qs.append(Q("count_meetings", {"who": p}, ("num", len(cal[p].slots)),
                     ("num", len(cal[p].slots) + rngq.choice([1, -1])), "off_by_one"))
+    # Retrodiction, free in this domain: the `moved` event already records where the booking came from,
+    # and nothing ever asked. The distractor is the CURRENT time, so answering needs the earlier state
+    # rather than the latest mention -- which is the whole point of asking backwards.
+    moves = [e for e in events if e.kind == "moved"]
+    if moves:
+        m = moves[len(moves) // 2].data
+        qs.append(Q("slot_before_move", {"who": m["who"], "title": m["title"]},
+                    ("hour", m["from_h"]), ("hour", m["to_h"]), "current"))
     a, b = rngq.sample(booked, 2) if len(booked) >= 2 else rngq.sample(people, 2)
     overlap = any(sa < eb and sb < ea for sa, ea, _ in cal[a].slots for sb, eb, _ in cal[b].slots)
     qs.append(Q("overlap", {"a": a, "b": b}, ("bool", overlap), ("bool", not overlap), "flip"))

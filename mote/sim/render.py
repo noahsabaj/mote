@@ -71,6 +71,13 @@ RU_OBJ_GENDER = {"key": "m", "book": "f", "lamp": "f", "coin": "f", "apple": "n"
 RU_WAS = {"m": "был", "f": "была", "n": "было"}
 RU_TITLES = {"standup": "летучка", "review": "ревью", "lunch": "обед", "planning": "планирование",
              "call": "созвон", "workshop": "воркшоп"}
+# EN['titles'] carries its own article ("the planning meeting"), which reads wrong after a possessive:
+# "Rui's the planning meeting". EN_TITLE_BARE drops it. RU_TITLE_GENDER is needed because a past-tense
+# participle agrees with its subject and these three genders all occur ("была записана летучка" but
+# "было записано планирование").
+EN_TITLE_BARE = {k: v[4:] if v.startswith("the ") else v for k, v in EN["titles"].items()}
+RU_TITLE_GENDER = {"standup": "f", "review": "n", "lunch": "m", "planning": "n", "call": "m", "workshop": "m"}
+RU_BOOKED = {"m": ("был", "записан"), "f": ("была", "записана"), "n": ("было", "записано")}
 
 JA = {
     "rooms": {"kitchen": "台所", "garden": "庭", "study": "書斎", "hall": "広間", "cellar": "地下室", "attic": "屋根裏"},
@@ -83,6 +90,15 @@ JA = {
 }
 JA_COUNTER = {"apples": "個", "loaves": "個", "candles": "本", "nails": "本", "eggs": "個"}
 
+
+# Retrodiction anchors (2026-08-26). The question names the event the narrative already described, so
+# the model has to locate it and read the state *before* it -- the backward direction that left-to-right
+# training never exercises. Same insight as FIM, applied to time instead of position.
+EN_BEFORE = {"take": "picked it up", "put_in": "put it away", "put_down": "put it down", "move": "moved"}
+RU_BEFORE = {"take": ("взял", "взяла"), "put_in": ("убрал", "убрала"),
+             "put_down": ("положил", "положила"), "move": ("перешёл", "перешла")}
+RU_PRON_ACC = {"m": "его", "f": "её", "n": "его"}  # the object pronoun agrees with the OBJECT's gender
+JA_BEFORE = {"take": "取る", "put_in": "しまう", "put_down": "置く", "move": "移動する"}
 
 def _cap(s: str) -> str:
     return s[:1].upper() + s[1:]
@@ -329,6 +345,9 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
     if q.qtype == "where_obj_start":
         return (f"Where was {EN['objects'][a['obj']]} at the beginning?",
                 f"It was {_place_en(q.answer)}.", f"It was {_place_en(q.wrong)}.")
+    if q.qtype == "where_obj_before":
+        return (f"Where was {EN['objects'][a['obj']]} before {_cap(a['who'])} {EN_BEFORE[a['verb']]}?",
+                f"It was {_place_en(q.answer)}.", f"It was {_place_en(q.wrong)}.")
     if q.qtype == "who_has_obj":
         return (f"Who has {EN['objects'][a['obj']]} now?", f"{_cap(q.answer[1])}.", f"{_cap(q.wrong[1])}.")
     if q.qtype == "where_person":
@@ -342,6 +361,9 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
     if q.qtype == "count_goods":
         return (f"How many {EN['goods'][a['goods']]} does {_cap(a['who'])} have now?",
                 f"{_cap(a['who'])} has {en_n(q.answer[1], a['goods'])}.", f"{_cap(a['who'])} has {en_n(q.wrong[1], a['goods'])}.")
+    if q.qtype == "count_goods_before":
+        return (f"How many {EN['goods'][a['goods']]} did {_cap(a['who'])} have before trading with {_cap(a['other'])}?",
+                f"{_cap(a['who'])} had {en_n(q.answer[1], a['goods'])}.", f"{_cap(a['who'])} had {en_n(q.wrong[1], a['goods'])}.")
     if q.qtype == "count_coins":
         return (f"How many coins does {_cap(a['who'])} have now?",
                 f"{_cap(a['who'])} has {q.answer[1]} coins.", f"{_cap(a['who'])} has {q.wrong[1]} coins.")
@@ -366,6 +388,9 @@ def _qa_en(q: Q) -> Tuple[str, str, str]:
                 f"{_cap(EN['titles'][q.answer[1]])}.", f"{_cap(EN['titles'][q.wrong[1]])}.")
     if q.qtype == "count_meetings":
         return (f"How many bookings does {_cap(a['who'])} have?", f"{q.answer[1]}.", f"{q.wrong[1]}.")
+    if q.qtype == "slot_before_move":
+        return (f"What time was {_cap(a['who'])}'s {EN_TITLE_BARE[a['title']]} before it was moved?",
+                f"{q.answer[1]}:00.", f"{q.wrong[1]}:00.")
     if q.qtype == "overlap":
         yes, no = "Yes.", "No."
         return (f"Do {_cap(a['a'])} and {_cap(a['b'])} have overlapping bookings?",
@@ -395,6 +420,14 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
         o = RU_OBJ[a["obj"]][0]
         was = RU_WAS[RU_OBJ_GENDER[a["obj"]]]
         return (f"Где изначально {was} {o}?", f"{_cap(o)} {was} {_place_ru(q.answer)}.", f"{_cap(o)} {was} {_place_ru(q.wrong)}.")
+    if q.qtype == "where_obj_before":
+        o = RU_OBJ[a["obj"]][0]
+        was = RU_WAS[RU_OBJ_GENDER[a["obj"]]]
+        vb = RU_BEFORE[a["verb"]]
+        pron = "" if a["verb"] == "move" else " " + RU_PRON_ACC[RU_OBJ_GENDER[a["obj"]]]
+        clause = f"{_cap(a['who'])} {_ru_v(vb, a['who'])}{pron}"
+        return (f"Где {was} {o} до того, как {clause}?",
+                f"{_cap(o)} {was} {_place_ru(q.answer)}.", f"{_cap(o)} {was} {_place_ru(q.wrong)}.")
     if q.qtype == "who_has_obj":
         return (f"У кого сейчас {RU_OBJ[a['obj']][0]}?", f"У {_cap(q.answer[1])}.", f"У {_cap(q.wrong[1])}.")
     if q.qtype == "where_person":
@@ -407,6 +440,10 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
         return (f"Сколько {RU_GOODS[a['goods']]} сейчас у {_cap(a['who'])}?",
                 f"У {_cap(a['who'])} {ru_n(q.answer[1], RU_GOODS_FORMS[a['goods']])}.",
                 f"У {_cap(a['who'])} {ru_n(q.wrong[1], RU_GOODS_FORMS[a['goods']])}.")
+    if q.qtype == "count_goods_before":
+        return (f"Сколько {RU_GOODS[a['goods']]} было у {_cap(a['who'])} до сделки с {_cap(a['other'])}?",
+                f"У {_cap(a['who'])} было {ru_n(q.answer[1], RU_GOODS_FORMS[a['goods']])}.",
+                f"У {_cap(a['who'])} было {ru_n(q.wrong[1], RU_GOODS_FORMS[a['goods']])}.")
     if q.qtype == "count_coins":
         return (f"Сколько монет сейчас у {_cap(a['who'])}?",
                 f"У {_cap(a['who'])} {ru_n(q.answer[1], RU_COIN_FORMS)}.",
@@ -433,6 +470,10 @@ def _qa_ru(q: Q) -> Tuple[str, str, str]:
                 f"«{_cap(RU_TITLES[q.wrong[1]])}».")
     if q.qtype == "count_meetings":
         return (f"Сколько записей в календаре у {_cap(a['who'])}?", f"{q.answer[1]}.", f"{q.wrong[1]}.")
+    if q.qtype == "slot_before_move":
+        was, booked = RU_BOOKED[RU_TITLE_GENDER[a["title"]]]
+        return (f"На какое время {was} {booked} {RU_TITLES[a['title']]} у {_cap(a['who'])} до переноса?",
+                f"На {q.answer[1]}:00.", f"На {q.wrong[1]}:00.")
     if q.qtype == "overlap":
         yes, no = "Да.", "Нет."
         return (f"Пересекаются ли записи в календарях {_cap(a['a'])} и {_cap(a['b'])}?",
@@ -462,6 +503,10 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
                 return f"最初、{o}は{_cap(ans[1])}が持っていた。"
             return f"最初、{o}は{_place_ja(ans)[:-2]}あった。"
         return (f"{o}は最初どこにあった？", was(q.answer), was(q.wrong))
+    if q.qtype == "where_obj_before":
+        o = JA["objects"][a["obj"]]
+        return (f"{_cap(a['who'])}が{JA_BEFORE[a['verb']]}前、{o}はどこにあった？",
+                f"{o}は{_place_ja(q.answer)[:-2]}あった。", f"{o}は{_place_ja(q.wrong)[:-2]}あった。")
     if q.qtype == "who_has_obj":
         return (f"{JA['objects'][a['obj']]}を今持っているのは誰？", f"{_cap(q.answer[1])}。", f"{_cap(q.wrong[1])}。")
     if q.qtype == "where_person":
@@ -475,6 +520,10 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
     if q.qtype == "count_goods":
         c = JA_COUNTER[a['goods']]
         return (f"{_cap(a['who'])}は今{JA['goods'][a['goods']]}をいくつ持っている？",
+                f"{q.answer[1]}{c}。", f"{q.wrong[1]}{c}。")
+    if q.qtype == "count_goods_before":
+        c = JA_COUNTER[a["goods"]]
+        return (f"{_cap(a['other'])}との取引の前、{_cap(a['who'])}は{JA['goods'][a['goods']]}をいくつ持っていた？",
                 f"{q.answer[1]}{c}。", f"{q.wrong[1]}{c}。")
     if q.qtype == "count_coins":
         return (f"{_cap(a['who'])}は今コインを何枚持っている？", f"{q.answer[1]}枚。", f"{q.wrong[1]}枚。")
@@ -497,6 +546,9 @@ def _qa_ja(q: Q) -> Tuple[str, str, str]:
         return (f"{_cap(a['who'])}の最初の予定は何？", f"{JA['titles'][q.answer[1]]}。", f"{JA['titles'][q.wrong[1]]}。")
     if q.qtype == "count_meetings":
         return (f"{_cap(a['who'])}の予定はいくつ？", f"{q.answer[1]}件。", f"{q.wrong[1]}件。")
+    if q.qtype == "slot_before_move":
+        return (f"{_cap(a['who'])}の{JA['titles'][a['title']]}は移動される前は何時だった？",
+                f"{q.answer[1]}時。", f"{q.wrong[1]}時。")
     if q.qtype == "overlap":
         yes, no = "はい、重なっている。", "いいえ、重なっていない。"
         return (f"{_cap(a['a'])}と{_cap(a['b'])}の予定は重なっている？", yes if q.answer[1] else no, yes if q.wrong[1] else no)
