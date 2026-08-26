@@ -222,3 +222,88 @@ def test_proxy_scores_only_the_reply_span():
     late = trajectory_stats(_FakeModel(266, 272), ids, 90, torch.device("cpu"), vocab=266)
     assert early["n_bytes"] > late["n_bytes"]
     assert trajectory_stats(_FakeModel(266, 272), ids, len(ids), torch.device("cpu"), vocab=266) is None
+
+
+# --- training-time augmentation (2606.16246) ---------------------------------------------------------
+def test_r2l_reverses_codepoints_not_bytes():
+    """The obstacle that is specific to a byte model. 2606.16246 reverses tokens; reversing raw UTF-8
+    bytes is not the byte-level analogue of that, it is corruption — a window of Japanese becomes
+    mojibake. Reversing decoded characters preserves the text AND the byte length, because UTF-8 spends
+    the same multiset of bytes either way."""
+    from mote.data.loader import r2l_window
+    from mote.tokenizer import R2L_ID
+
+    text = "Hello ランプは地下室にある。"
+    ids = np.array(list(text.encode()), dtype=np.int64)
+    out = r2l_window(ids)
+    assert len(out) == len(ids), "a reversed window still has to be exactly seq_len+1"
+    assert out[0] == R2L_ID
+    body = bytes(int(x) for x in out[1:] if x < 256).decode("utf-8", errors="strict")
+    assert "ランプ" not in body and "プンラ" in body, "characters reversed, not shattered"
+    assert "�" not in body, "a byte-level reversal would leave replacement characters here"
+
+
+def test_noise_corrupts_content_but_never_structure():
+    """A special id is structure, not content: corrupting <|assistant|> teaches the chat template wrong."""
+    from mote.data.loader import noise_window
+    from mote.tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID
+
+    ids = np.array([BOS_ID] + list(b"hello there friend") + [ASSISTANT_ID] + list(b"reply") + [EOS_ID],
+                   dtype=np.int64)
+    out = noise_window(ids, np.random.default_rng(0), 0.5)
+    assert len(out) == len(ids)
+    for i, v in enumerate(ids):
+        if v >= 256:
+            assert out[i] == v, f"special id at {i} was corrupted"
+    assert (out != ids).any(), "nothing was corrupted at rate 0.5"
+    assert (out < 256).sum() == (ids < 256).sum(), "a corrupted byte is still a byte"
+    assert np.array_equal(noise_window(ids, np.random.default_rng(0), 0.0), ids)  # rate 0 is a no-op
+
+
+def test_offset_window_declares_its_own_label_shift():
+    """Self-describing on purpose: `compute_losses` reads the offset back off the front of the batch, so
+    no signature elsewhere grows a parameter for a training-only knob."""
+    from mote.data.loader import offset_window
+    from mote.tokenizer import OFFSET_ID
+
+    ids = np.arange(100, 140, dtype=np.int64)
+    out = offset_window(ids, 3)
+    assert len(out) == len(ids) and out[0] == OFFSET_ID and out[1] == ord("3")
+    assert np.array_equal(offset_window(ids, 1), ids), "offset 1 is ordinary next-byte prediction"
+
+
+def test_compute_losses_shifts_targets_by_the_declared_offset():
+    from mote.data.loader import offset_window
+
+    ids = torch.tensor(offset_window(np.arange(100, 120, dtype=np.int64), 3))[None]
+    i = int(ids[0, 1].item() - ord("0"))
+    L = ids.shape[1] - 1
+    idx = torch.arange(L) + i
+    targets = ids[:, idx.clamp(max=ids.shape[1] - 1)]
+    # position t predicts x_{t+i}: the input at t and the target at t are i apart in the window
+    for t in range(2, L - i):
+        assert targets[0, t] == ids[0, t + i]
+    assert int((idx >= ids.shape[1]).sum()) == i - 1, "the tail that runs off the end is dropped"
+
+
+def test_augmentations_are_off_by_default_and_skip_masked_windows(tmp_path):
+    """Two invariants. Off by default, so every run to date and the mid-training 2x2 are unaffected. And
+    never applied to an SFT window: the loss mask is aligned to the original byte positions, so reversing
+    or shifting the ids under it would train on the wrong span."""
+    from mote.data.loader import ByteShard
+
+    rng = np.random.default_rng(3)
+    rng.integers(0, 256, size=8000, dtype=np.uint16).tofile(tmp_path / "s.sft.train.bin")
+    np.ones(8000, dtype=np.uint8).tofile(tmp_path / "s.sft.train.mask.bin")
+    (tmp_path / "s.sft.meta.json").write_text(
+        '{"train": {"file": "s.sft.train.bin", "mask_file": "s.sft.train.mask.bin"}}')
+
+    plain = ByteShard(tmp_path / "s", "train", sft=True)
+    assert (plain.noise, plain.r2l, plain.offset_max) == (0.0, 0.0, 1)
+
+    loud = ByteShard(tmp_path / "s", "train", sft=True, noise=0.5, r2l=1.0, offset_max=5)
+    g = torch.Generator().manual_seed(0)
+    ids, mask = loud.sample_batch(4, 64, g)
+    assert mask is not None and ids.shape == (4, 65)
+    from mote.tokenizer import OFFSET_ID, R2L_ID
+    assert not ((ids == R2L_ID) | (ids == OFFSET_ID)).any(), "a masked SFT window must not be augmented"

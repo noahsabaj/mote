@@ -193,9 +193,12 @@ def test_queue_hooks_fire_around_jobs(tmp_path, monkeypatch):
 
 def test_padding_rows_are_masked_and_never_sampled():
     cfg = _cfg(pad_vocab_to=272)
-    assert cfg.vocab_size == VOCAB_SIZE == 269 and THINK_ID == 264 and END_THINK_ID == 265
-    # the FIM sentinels have to fit inside the existing 272-row padding, or every checkpoint needs surgery
+    assert cfg.vocab_size == VOCAB_SIZE == 271 and THINK_ID == 264 and END_THINK_ID == 265
+    # every added id has to fit inside the existing 272-row padding, or every checkpoint needs surgery.
+    # One row is left after the FIM (266-268) and augmentation (269-270) sentinels; the next protocol id
+    # raises pad_vocab_to to 288.
     assert FIM_PREFIX_ID == 266 and FIM_MIDDLE_ID == 268 and VOCAB_SIZE <= cfg.pad_vocab_to
+    assert cfg.pad_vocab_to - VOCAB_SIZE == 1, "the spare-row budget changed; raise pad_vocab_to to 288"
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg).eval()
     ids = torch.randint(0, 256, (2, 40))

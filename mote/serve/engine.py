@@ -28,7 +28,8 @@ from .context import fold
 from .graph import BUCKET, GraphDecoder
 from .identity import identity_card, with_system_card
 from ..tokenizer import (ASSISTANT_ID, BOS_ID, CALL_ID, EOS_ID, FIM_MIDDLE_ID, FIM_PREFIX_ID, FIM_SUFFIX_ID,
-                          PAD_ID, RESULT_ID, SYSTEM_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer, parse_call)
+                          OFFSET_ID, PAD_ID, R2L_ID, RESULT_ID, SYSTEM_ID, USER_ID, ByteTokenizer,
+                          ChatMessage, Utf8Streamer, parse_call)
 from .prefix_cache import Hit, PrefixStore
 from ..model import triton_lock
 
@@ -39,7 +40,7 @@ triton_lock.install()  # serving launches autotuned kernels beside the training 
 # a reply can never contain one, and without this a checkpoint trained on them could emit the literal text
 # "<|fim_middle|>" to a user, since the head only masks ids at or above vocab_size.
 STOP_IDS = {EOS_ID, PAD_ID, SYSTEM_ID, USER_ID, ASSISTANT_ID, BOS_ID, RESULT_ID,
-            FIM_PREFIX_ID, FIM_SUFFIX_ID, FIM_MIDDLE_ID}
+            FIM_PREFIX_ID, FIM_SUFFIX_ID, FIM_MIDDLE_ID, R2L_ID, OFFSET_ID}
 
 
 @dataclass

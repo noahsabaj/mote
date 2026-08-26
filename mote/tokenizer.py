@@ -37,7 +37,22 @@ END_THINK_ID = 265
 FIM_PREFIX_ID = 266
 FIM_SUFFIX_ID = 267
 FIM_MIDDLE_ID = 268
-VOCAB_SIZE = 269  # 256 bytes + 13 specials; MoteConfig.pad_vocab_to (272) rounds the embedding up
+# Training-time augmentation, signed 2026-08-26 (docs/research/midtraining-2026-08-26.md). 2606.16246
+# ablates three orthogonal categories at 150M in the data-constrained multi-epoch regime — Mote's regime —
+# and all three lower post-decay validation loss: random token replacement 4.000 -> 3.826, target offset
+# prediction -> 3.870, right-to-left -> 3.910, and the three together -> 3.792.
+#
+#   <|r2l|>     prepended when the window is reversed. Reversal is over CODEPOINTS, not bytes: reversing
+#               raw UTF-8 turns 'ランプ' into mojibake, while reversing characters preserves both the text
+#               and the byte length exactly.
+#   <|offset|>  prepended, followed by an ASCII digit, when the target is x_{t+i} instead of x_{t+1}.
+#               One id plus a digit rather than one id per offset — the embedding has three spare rows and
+#               spending five of them on a training-only knob would need pad_vocab_to raised.
+#
+# Random byte replacement needs no id at all: a corrupted byte is still a byte.
+R2L_ID = 269
+OFFSET_ID = 270
+VOCAB_SIZE = 271  # 256 bytes + 15 specials; MoteConfig.pad_vocab_to (272) rounds the embedding up
 
 SPECIAL_NAMES = {
     BOS_ID: "<|bos|>",
@@ -53,6 +68,8 @@ SPECIAL_NAMES = {
     FIM_PREFIX_ID: "<|fim_prefix|>",
     FIM_SUFFIX_ID: "<|fim_suffix|>",
     FIM_MIDDLE_ID: "<|fim_middle|>",
+    R2L_ID: "<|r2l|>",
+    OFFSET_ID: "<|offset|>",
 }
 
 

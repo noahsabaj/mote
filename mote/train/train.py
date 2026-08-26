@@ -34,7 +34,7 @@ from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.moe import collect_moe, moe_modules
 from .flops import _n as _n_active
 from ..model.hnet import HNetForCausalLM
-from ..tokenizer import ByteTokenizer
+from ..tokenizer import OFFSET_ID, ByteTokenizer
 from .flops import flops_per_byte, peak_tflops_for
 from .muon import Muon, split_muon_params
 
@@ -191,6 +191,19 @@ def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: fl
     assistant bytes (SFT). Every stat is a 0-dim device tensor: nothing here synchronises."""
     inputs, targets = batch[:, :-1], batch[:, 1:]
     tmask = loss_mask[:, 1:] if loss_mask is not None else None  # mask is per target position
+    # Target offset prediction (2606.16246 §2.3), read back off the window rather than passed in: a window
+    # that opens `<|offset|> <digit>` declares that its label at position t is x_{t+i}, not x_{t+1}. The
+    # tail where t+i runs past the window is dropped from the loss. Nothing happens when the flag is off,
+    # which is every run to date and the mid-training 2x2.
+    if batch.shape[1] > 2 and bool((batch[:, 0] == OFFSET_ID).any()):
+        i = int(batch[0, 1].item() - ord("0"))
+        if i > 1:
+            L = inputs.shape[1]
+            idx = torch.arange(L, device=batch.device) + i
+            valid = idx < batch.shape[1]
+            targets = batch[:, idx.clamp(max=batch.shape[1] - 1)]
+            keep = valid[None, :].expand_as(targets)
+            tmask = keep.to(targets.dtype) if tmask is None else tmask * keep.to(tmask.dtype)
     out = model(inputs)
     ce_sum, n = _masked_ce_sum(out.logits, targets, tmask)
     mask = torch.ones_like(inputs, dtype=torch.bool)
@@ -418,6 +431,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--min-lr-ratio", type=float, default=None, help="where a decay lands, as a fraction of --lr. Default depends on the schedule: 0 for a branch (straight to zero — Bergsma 2502.15938, and 2602.06797's optimal schedules also terminate at 0), 0.1 for wsd, which every lab arm to date was run with and must stay comparable to.")
     ap.add_argument("--snapshot-steps", type=int, default=0, help="also keep a weights-only snap_<step>.pt every N steps (the branch points for the mid-training branches)")
     ap.add_argument("--snapshot-at", type=float, default=None, metavar="FRAC", help="also snapshot the first time the run crosses this fraction of its horizon. The 2x2 forks here: the decayed arm keeps going under --schedule branch, and the no-decay arm resumes from this snapshot under --schedule constant for the remaining bytes, so the two are token-matched (docs/shape.md § mid)")
+    # 2606.16246's three augmentations, all OFF by default. Built 2026-08-26 and deliberately held out of
+    # the mid-training 2x2 so its verdict stays attributable to the data changes; they are their own
+    # comparison afterwards, which costs nothing because the shards are already built.
+    ap.add_argument("--aug-noise", type=float, default=0.0, help="replace this fraction of content bytes with random bytes (their best single augmentation: post-decay val loss 4.000 -> 3.826 at 15 %%; 5 %% in the winning three-way combination)")
+    ap.add_argument("--aug-r2l", type=float, default=0.0, help="reverse this share of training windows over codepoints, marked with <|r2l|> (-> 3.910 at 0.5; reversing raw bytes would be corruption, not reversal)")
+    ap.add_argument("--aug-offset", type=int, default=1, help="largest target offset i for x_{t+i} prediction, sampled exponentially per micro-batch (-> 3.870 at 5, and the highest downstream mean of any single method). 1 = ordinary next-byte prediction")
     ap.add_argument("--eval-spread", action="store_true", help="evaluate on windows spread over the whole val shard instead of its head (= first source only); use for the trunk and branches, never mid-queue")
     ap.add_argument("--eval-ema", type=float, default=0.0, help="also evaluate an EMA of the weights (per-step decay; 0 = off): the decayed-quality stand-in for constant-LR runs that the LR-vs-horizon fit reads (2608.20061 §2.2.1; mote/train/lr_horizon.py); logs val_bpb_ema")
     return ap
@@ -514,14 +533,15 @@ class Trainer:
             self.jepa_opt = torch.optim.AdamW(self.jepa.parameters(), lr=args.lr, betas=(0.9, args.beta2), weight_decay=0.0)
             print(f"jepa aux: {args.jepa}, weight {args.jepa_weight}, {sum(q.numel() for q in self.jepa.parameters())/1e6:.2f}M aux params", flush=True)
 
-        train_shard = ByteShard(args.data, "train", sft=args.sft)
+        aug = {"noise": args.aug_noise, "r2l": args.aug_r2l, "offset_max": args.aug_offset}
+        train_shard = ByteShard(args.data, "train", sft=args.sft, seed=args.seed, **aug)
         self.val_shard = ByteShard(args.data, "val", sft=args.sft)
         if args.mix:
             extras = []
             for spec in args.mix:
                 prefix, share, plain, fim = parse_mix_spec(spec)
                 extras.append((ByteShard(prefix, "train", sft=args.sft or plain, plain=plain, fim=fim,
-                                         seed=args.seed + len(extras) + 1), share))
+                                         seed=args.seed + len(extras) + 1, **aug), share))
             main_w = max(1.0 - sum(w for _, w in extras), 0.0)
             train_shard = MixedShard([train_shard] + [s for s, _ in extras], [main_w] + [w for _, w in extras])
             print("training mix:", {args.data: main_w, **{spec: parse_mix_spec(spec)[1] for spec in args.mix}}, flush=True)
