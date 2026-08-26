@@ -82,6 +82,10 @@ class World:
     def eid(self, name: str) -> int:
         return next(k for k, v in self.names.items() if v == name)
 
+    def name(self, eid: int) -> str:
+        """The inverse of `eid` — a failure event has to say *who* holds the object it could not take."""
+        return self.names[eid]
+
     def add(self, eid: int, comp: Any) -> None:
         self._use()
         esper.add_component(eid, comp)

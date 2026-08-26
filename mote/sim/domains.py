@@ -72,8 +72,32 @@ class Portable:
     pass
 
 
+# --- failures ---------------------------------------------------------------------------------------
+# Until 2026-08-26 the scripts only ever proposed legal actions ("the script has already checked
+# feasibility"), so no action in any narrative could fail and every result was a successful restatement of
+# its call. Measured over 20k traces: 70 % of result bytes were fully determined by (locale, call), and
+# only 0.27 % of the trace stream was genuinely unpredictable. A world where nothing can fail has almost
+# no state-dependent outcome to model, and it is a weak RL substrate besides — `mote/sim/tasks.py` refuses
+# illegal actions, so RLVR-1 would have met its first refusal having never seen one.
+#
+# The systems below already detected illegality; they simply emitted nothing. Now they emit a `failed`
+# event carrying the reason, which the renderers turn into prose and which the questions can be asked
+# about. `_maybe_illegal` in each script chooses an illegal action at `p_fail`, weighted toward the ones
+# whose refusal *reveals* state (taking an object someone else holds says who holds it).
+FAIL_REASONS = ("not_here", "held_by_other", "already_holding", "inside_container", "not_holding",
+                "no_goods", "no_coins", "slot_clash", "no_such_booking")
+
+
+def _failed(w: World, kind: str, why: str, **data) -> Event:
+    return Event(w.t, "failed", {"kind": kind, "why": why, **data})
+
+
 def household_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
-    """move / take / put_in / put_down against InRoom + the held_by and inside relations."""
+    """move / take / put_in / put_down against InRoom + the held_by and inside relations.
+
+    An action that cannot be applied emits a `failed` event rather than nothing, so the narrative records
+    the attempt and its reason. The world state is unchanged, which is what makes the questions harder:
+    the reader has to notice that the object did not move."""
     events: List[Event] = []
     for a in actions:
         who = w.eid(a["who"])
@@ -84,8 +108,20 @@ def household_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
             events.append(Event(w.t, "move", {"who": a["who"], "to": a["to"]}))
         elif a["kind"] == "take":
             o = w.eid(a["obj"])
-            if (w.one(o, "held_by") is None and w.one(o, "inside") is None
-                    and w.get(o, InRoom).room == w.get(who, InRoom).room):
+            holder = w.one(o, "held_by")
+            cont = w.one(o, "inside")
+            if holder == who:  # self-hold: "Mara tried to take the key, but Mara was holding it" reads
+                events.append(_failed(w, "take", "already_holding", who=a["who"], obj=a["obj"]))
+            elif holder is not None:
+                events.append(_failed(w, "take", "held_by_other", who=a["who"], obj=a["obj"],
+                                      holder=w.name(holder)))
+            elif cont is not None:
+                events.append(_failed(w, "take", "inside_container", who=a["who"], obj=a["obj"],
+                                      cont=w.name(cont)))
+            elif w.get(o, InRoom).room != w.get(who, InRoom).room:
+                events.append(_failed(w, "take", "not_here", who=a["who"], obj=a["obj"],
+                                      room=w.get(o, InRoom).room))
+            else:
                 w.relate(o, "held_by", who)
                 events.append(Event(w.t, "take", {"who": a["who"], "obj": a["obj"]}))
         elif a["kind"] == "put_in":
@@ -94,11 +130,15 @@ def household_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
                 w.unrelate(o, "held_by")
                 w.relate(o, "inside", w.eid(a["cont"]))
                 events.append(Event(w.t, "put_in", {"who": a["who"], "obj": a["obj"], "cont": a["cont"]}))
+            else:
+                events.append(_failed(w, "put_in", "not_holding", who=a["who"], obj=a["obj"], cont=a["cont"]))
         elif a["kind"] == "put_down":
             o = w.eid(a["obj"])
             if w.one(o, "held_by") == who:
                 w.unrelate(o, "held_by")
                 events.append(Event(w.t, "put_down", {"who": a["who"], "obj": a["obj"], "room": w.get(o, InRoom).room}))
+            else:
+                events.append(_failed(w, "put_down", "not_holding", who=a["who"], obj=a["obj"]))
     return events
 
 
@@ -138,17 +178,41 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         "containers": dict(cont_room),
         "objects": {o: w.get(byname[o], InRoom).room for o in objects},
     })]
+    p_fail = diff.get("p_fail", 0) / 100.0
     for _ in range(diff["ticks"]):
         # script one action per tick from the true state, then let the SYSTEM apply it
         p = rng.choice(people)
         proom = w.get(byname[p], InRoom).room
         held_by_p = [o for o in objects if w.one(byname[o], "held_by") == byname[p]]
         here = [o for o in objects if snap(o) == {"room": proom, "held": "", "cont": ""}]
+        # A deliberate illegal attempt, weighted toward the ones whose refusal *reveals* state: failing to
+        # take an object says who holds it or which room it is in, which is information the narrative does
+        # not otherwise volunteer. A failed action leaves the world unchanged, so the questions below stay
+        # correct — they just get harder, because the reader has to notice nothing moved.
+        illegal = None
+        if rng.random() < p_fail:
+            elsewhere = [o for o in objects if snap(o)["room"] != proom or snap(o)["held"] or snap(o)["cont"]]
+            not_held = [o for o in objects if w.one(byname[o], "held_by") != byname[p]]
+            # Weighted, not uniform. "You are not holding that" is a bare negation; "Ivy has it" and "it is
+            # in the cellar" each hand the reader a fact the narrative did not otherwise state. A uniform
+            # draw put 69 % of household failures on the uninformative branch, so `take` gets the weight.
+            choices, weights = [], []
+            if elsewhere:
+                choices.append({"kind": "take", "who": p, "obj": rng.choice(elsewhere)}); weights.append(6)
+            if not_held:
+                choices.append({"kind": "put_down", "who": p, "obj": rng.choice(not_held)}); weights.append(1)
+                if containers:
+                    choices.append({"kind": "put_in", "who": p, "obj": rng.choice(not_held), "cont": rng.choice(containers)})
+                    weights.append(1)
+            if choices:
+                illegal = rng.choices(choices, weights)[0]
         act = rng.random()
-        if act < 0.4 or (not here and not held_by_p):
+        if illegal is not None:
+            action = illegal
+        elif act < 0.4 or (not here and not held_by_p):
             options = [r for r in rooms if r != proom and r != prev_room.get(p)] or [r for r in rooms if r != proom]
             action = {"kind": "move", "who": p, "to": rng.choice(options)}
-            prev_room[p] = proom
+            prev_room[p] = proom  # noqa: E501
         elif (act < 0.7 and here) or not held_by_p:
             action = {"kind": "take", "who": p, "obj": rng.choice(here)}
         else:
@@ -209,13 +273,19 @@ class Stock:
 
 
 def inventory_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
-    """trade / harvest against Stock (the script has already checked feasibility)."""
+    """trade / harvest against Stock. A trade the seller or buyer cannot cover emits `failed`."""
     events: List[Event] = []
     for a in actions:
         if a["kind"] == "trade":
             buyer, seller = w.get(w.eid(a["buyer"]), Stock), w.get(w.eid(a["seller"]), Stock)
             g, n, cost = a["goods"], a["n"], a["cost"]
-            if seller.goods[g] >= n and buyer.coins >= cost:
+            if seller.goods[g] < n:
+                events.append(_failed(w, "trade", "no_goods", buyer=a["buyer"], seller=a["seller"],
+                                      goods=g, n=n, have=seller.goods[g]))
+            elif buyer.coins < cost:
+                events.append(_failed(w, "trade", "no_coins", buyer=a["buyer"], seller=a["seller"],
+                                      goods=g, n=n, cost=cost, have=buyer.coins))
+            else:
                 seller.goods[g] -= n
                 buyer.goods[g] += n
                 buyer.coins -= cost
@@ -243,10 +313,26 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
     start = {p: (dict(s.goods), s.coins) for p, s in stock.items()}
     events: List[Event] = [Event(0, "init_stock", {"start": {p: {"goods": g, "coins": c} for p, (g, c) in start.items()},
                                                     "price": dict(price)})]
+    p_fail = diff.get("p_fail", 0) / 100.0
     for t in range(diff["ticks"]):
         buyer, seller = rng.sample(people, 2)
         g = rng.choice(goods)
         n = rng.randint(1, 3)
+        # A trade nobody can cover. Its refusal is the most informative failure in this domain: it says
+        # what the seller actually has, or what the buyer can actually afford — numbers the narrative
+        # otherwise only reveals through the running arithmetic.
+        if rng.random() < p_fail:
+            if rng.random() < 0.5:                       # seller cannot supply: reveals what they have
+                over = stock[seller].goods[g] + rng.randint(1, 3)
+                action = {"kind": "trade", "buyer": buyer, "seller": seller, "goods": g, "n": over,
+                          "cost": over * price[g]}
+            else:                                        # buyer cannot pay: reveals their purse
+                have = stock[seller].goods[g]
+                n2 = max(1, have)
+                action = {"kind": "trade", "buyer": buyer, "seller": seller, "goods": g, "n": n2,
+                          "cost": stock[buyer].coins + rng.randint(1, 9)}
+            events.extend(w.step([action]))
+            continue
         if stock[seller].goods[g] >= n and stock[buyer].coins >= n * price[g]:
             action = {"kind": "trade", "buyer": buyer, "seller": seller, "goods": g, "n": n, "cost": n * price[g]}
         else:
@@ -340,16 +426,32 @@ class Calendar:
 
 
 def schedule_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
-    """book / move against Calendar (the script has already chosen a clash-free slot)."""
+    """book / move against Calendar. Unlike the other two this had no feasibility check at all — the
+    script guaranteed a clash-free slot — so the clash test lives here now and `failed` is emitted for a
+    double-booking or a move of a booking that does not exist."""
     events: List[Event] = []
     for a in actions:
         cal = w.get(w.eid(a["who"]), Calendar)
+
+        def clashes(start, end, skip=None):
+            return any(start < e2 and s2 < end for j, (s2, e2, _t) in enumerate(cal.slots) if j != skip)
+
         if a["kind"] == "move":
+            if not (0 <= a["i"] < len(cal.slots)):
+                events.append(_failed(w, "move", "no_such_booking", who=a["who"], i=a["i"]))
+                continue
             s, e, title = cal.slots[a["i"]]
             ns = a["to_h"]
+            if clashes(ns, ns + (e - s), skip=a["i"]):
+                events.append(_failed(w, "move", "slot_clash", who=a["who"], title=title, to_h=ns))
+                continue
             cal.slots[a["i"]] = (ns, ns + (e - s), title)
             events.append(Event(w.t, "moved", {"who": a["who"], "title": title, "from_h": s, "to_h": ns, "end_h": ns + (e - s)}))
         elif a["kind"] == "book":
+            if clashes(a["start_h"], a["start_h"] + a["dur"]):
+                events.append(_failed(w, "book", "slot_clash", who=a["who"], title=a["title"],
+                                      start_h=a["start_h"], end_h=a["start_h"] + a["dur"]))
+                continue
             cal.slots.append((a["start_h"], a["start_h"] + a["dur"], a["title"]))
             events.append(Event(w.t, "booked", {"who": a["who"], "title": a["title"], "start_h": a["start_h"], "end_h": a["start_h"] + a["dur"]}))
     return events
@@ -367,11 +469,23 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
         cal[p] = m
         w.add(eid, m)
     events: List[Event] = []
+    p_fail = diff.get("p_fail", 0) / 100.0
     for _ in range(diff["ticks"]):
         p = rng.choice(people)
 
         def clashes(start, end, skip=None):
             return any(start < e2 and s2 < end for j, (s2, e2, _) in enumerate(cal[p].slots) if j != skip)
+
+        # Deliberately book over an existing slot. `tasks.py` already refuses exactly this at RL time
+        # (line 225, "illegal bookings are refused here instead"), so before 2026-08-26 the model would
+        # have met its first double-booking refusal during RLVR-1 having never seen one in training.
+        if cal[p].slots and rng.random() < p_fail:
+            s, e, _title = cal[p].slots[rng.randrange(len(cal[p].slots))]
+            free_titles = [x for x in TITLES if x not in {t2 for _s, _e, t2 in cal[p].slots}]
+            if free_titles:
+                events.extend(w.step([{"kind": "book", "who": p, "title": rng.choice(free_titles),
+                                       "start_h": s, "dur": max(1, e - s)}]))
+                continue
 
         if cal[p].slots and rng.random() < 0.3:  # move a booking (keeps its length, never self-overlaps)
             i = rng.randrange(len(cal[p].slots))
@@ -417,12 +531,15 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
 DOMAINS = {"household": _household, "inventory": _inventory, "kinship": _kinship, "schedule": _schedule}
 
 
-def sample_difficulty(rng: random.Random) -> Dict[str, int]:
+def sample_difficulty(rng: random.Random, p_fail: int = 0) -> Dict[str, int]:
+    """`p_fail` is a PERCENTAGE, kept an int so it survives the difficulty dict's JSON round-trip in the
+    generators' `meta`. 0 reproduces every trace generated before 2026-08-26 exactly."""
     return {
         "people": rng.randint(2, 5),
         "rooms": rng.randint(3, 5),
         "objects": rng.randint(3, 6),
         "ticks": rng.randint(4, 18),
+        "p_fail": p_fail,
     }
 
 

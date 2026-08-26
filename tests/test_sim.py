@@ -28,7 +28,12 @@ def test_household_routes_through_step_actions_and_relations():
     assert w.reverse(p, "held_by") == {o}
     w.step([{"kind": "move", "who": "mara", "to": "garden"}])
     assert w.get(o, InRoom).room == "garden"  # held objects travel
-    assert w.step([{"kind": "take", "who": "mara", "obj": "key"}]) == []  # already held: refused, no event
+    # Until 2026-08-26 an impossible action produced NO event and vanished from the narrative, which is
+    # why no result in 20k traces could carry state (docs/research/midtraining-2026-08-26.md). It now
+    # emits `failed` with a reason, and the world is still untouched.
+    ev = w.step([{"kind": "take", "who": "mara", "obj": "key"}])
+    assert len(ev) == 1 and ev[0].kind == "failed" and ev[0].data["why"] == "already_holding"
+    assert w.one(w.eid("key"), "held_by") == w.eid("mara")  # the failure changed nothing
     w.close()
 
 

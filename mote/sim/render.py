@@ -93,6 +93,96 @@ def _ru_v(verb_mf: Tuple[str, str], who: str) -> str:
 
 
 # ---------------------------------------------------------------- event sentences
+# --- failed actions ---------------------------------------------------------------------------------
+# Added 2026-08-26. Before this no action in any narrative could fail, so every result was a successful
+# restatement of its call and the result stream carried almost no state (0.27 % of the trace stream was
+# genuinely unpredictable). A refusal is the most informative sentence in the domain: "Ivy has it" and
+# "it is in the cellar" each state a fact the narrative did not otherwise volunteer.
+def _fail_en(d) -> str:
+    w, why = _cap(d["who"] if "who" in d else d.get("buyer", "")), d["why"]
+    if why == "held_by_other":
+        return f"{w} tried to pick up {EN['objects'][d['obj']]}, but {_cap(d['holder'])} was holding it."
+    if why == "already_holding":
+        return f"{w} tried to pick up {EN['objects'][d['obj']]}, but was already holding it."
+    if why == "inside_container":
+        return f"{w} tried to pick up {EN['objects'][d['obj']]}, but it was inside {EN['containers'][d['cont']]}."
+    if why == "not_here":
+        return f"{w} tried to pick up {EN['objects'][d['obj']]}, but it was in {EN['rooms'][d['room']]}."
+    if why == "not_holding":
+        return f"{w} tried to put {EN['objects'][d['obj']]} down, but was not holding it."
+    if why == "no_goods":
+        return (f"{_cap(d['buyer'])} tried to buy {en_n(d['n'], d['goods'])} from {_cap(d['seller'])}, "
+                f"who only had {en_n(d['have'], d['goods'])}.")
+    if why == "no_coins":
+        coins = "1 coin" if d["have"] == 1 else f"{d['have']} coins"
+        return (f"{_cap(d['buyer'])} tried to buy {en_n(d['n'], d['goods'])} from {_cap(d['seller'])} "
+                f"for {d['cost']} coins, but had only {coins}.")
+    if why == "slot_clash":
+        return (f"{_cap(d['who'])} tried to book {EN['titles'][d['title']]} at {d['start_h']}:00, "
+                f"but that time was already taken.")
+    if why == "no_such_booking":
+        return f"{_cap(d['who'])} tried to move a booking that did not exist."
+    return ""
+
+
+def _fail_ru(d) -> str:
+    why = d["why"]
+    who = d.get("who") or d.get("buyer", "")
+    tried = _ru_v(("попытался", "попыталась"), who)
+    if why == "held_by_other":
+        held = _ru_v(("держал", "держала"), d["holder"])
+        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но {_cap(d['holder'])} {held} её."
+    if why == "already_holding":
+        held = _ru_v(("держал", "держала"), who)
+        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но уже {held} её."
+    if why == "inside_container":
+        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но она была в {RU_CONT[d['cont']][2]}."
+    if why == "not_here":
+        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но она была {ru_room_in(d['room'])}."
+    if why == "not_holding":
+        held = _ru_v(("держал", "держала"), who)
+        return f"{_cap(who)} {tried} положить {RU_OBJ[d['obj']][1]}, но не {held} её."
+    if why == "no_goods":
+        return (f"{_cap(d['buyer'])} {tried} купить {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)} "
+                f"у {_cap(d['seller'])}, но у него было только "
+                f"{ru_n(d['have'], RU_GOODS_FORMS[d['goods']])}.")
+    if why == "no_coins":
+        return (f"{_cap(d['buyer'])} {tried} купить {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)} "
+                f"у {_cap(d['seller'])} за {ru_n(d['cost'], RU_COIN_FORMS)}, но у него было только "
+                f"{ru_n(d['have'], RU_COIN_FORMS)}.")
+    if why == "slot_clash":
+        return (f"{_cap(who)} {tried} записать {RU_TITLES[d['title']]} на {d['start_h']}:00, "
+                f"но это время было занято.")
+    if why == "no_such_booking":
+        return f"{_cap(who)} {tried} перенести несуществующую запись."
+    return ""
+
+
+def _fail_ja(d) -> str:
+    why = d["why"]
+    if why == "held_by_other":
+        return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を取ろうとしたが、{_cap(d['holder'])}が持っていた。"
+    if why == "already_holding":
+        return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を取ろうとしたが、すでに持っていた。"
+    if why == "inside_container":
+        return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を取ろうとしたが、{JA['containers'][d['cont']]}の中にあった。"
+    if why == "not_here":
+        return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を取ろうとしたが、{JA['rooms'][d['room']]}にあった。"
+    if why == "not_holding":
+        return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を置こうとしたが、持っていなかった。"
+    if why == "no_goods":
+        return (f"{_cap(d['buyer'])}は{_cap(d['seller'])}から{JA['goods'][d['goods']]}を{d['n']}つ買おうとしたが、"
+                f"{d['have']}つしかなかった。")
+    if why == "no_coins":
+        return (f"{_cap(d['buyer'])}は{_cap(d['seller'])}から{JA['goods'][d['goods']]}を{d['n']}つ"
+                f"{d['cost']}コインで買おうとしたが、{d['have']}コインしか持っていなかった。")
+    if why == "slot_clash":
+        return f"{_cap(d['who'])}は{d['start_h']}時に{JA['titles'][d['title']]}を入れようとしたが、その時間は埋まっていた。"
+    if why == "no_such_booking":
+        return f"{_cap(d['who'])}は存在しない予定を動かそうとした。"
+    return ""
+
+
 def _ev_en(e, kin_names=None) -> str:
     d = e.data
     k = e.kind
@@ -126,6 +216,8 @@ def _ev_en(e, kin_names=None) -> str:
         return f"{_cap(d['who'])} booked {EN['titles'][d['title']]} from {d['start_h']}:00 to {d['end_h']}:00."
     if k == "moved":
         return f"{_cap(d['who'])} moved {EN['titles'][d['title']]} to {d['to_h']}:00–{d['end_h']}:00."
+    if k == "failed":
+        return _fail_en(d)
     if k == "family":
         out = [f"{_cap(a)} and {_cap(b)} are married." for a, b in
                sorted({tuple(sorted((x, y))) for x, y in d["spouses"].items() if y})]
@@ -138,6 +230,8 @@ def _ev_en(e, kin_names=None) -> str:
 def _ev_ru(e) -> str:
     d = e.data
     k = e.kind
+    if k == "failed":
+        return _fail_ru(d)
     if k == "init_household":
         out = [f"{_cap(p)} {ru_room_in(r)}." for p, r in d["people"].items()]
         out += [f"{_cap(RU_CONT[c][0])} {ru_room_in(r)}." for c, r in d["containers"].items()]
@@ -178,6 +272,8 @@ def _ev_ru(e) -> str:
 def _ev_ja(e) -> str:
     d = e.data
     k = e.kind
+    if k == "failed":
+        return _fail_ja(d)
     if k == "init_household":
         out = [f"{_cap(p)}は{JA['rooms'][r]}にいた。" for p, r in d["people"].items()]
         out += [f"{JA['containers'][c]}は{JA['rooms'][r]}にあった。" for c, r in d["containers"].items()]
