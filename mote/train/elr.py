@@ -33,7 +33,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
-SAMPLE_EVERY = 100  # steps between norm samples; the norm's own time constant is 1/(lr·λ) ≈ 12,500 steps
+# Norms are sampled on the trainer's logging cadence (`--log-every`), which is fine at any setting it takes:
+# the norm's own time constant is 1/(lr·λ) ≈ 12,500 steps, far slower than anything that is logged.
+SAVE_EVERY = 20  # samples between rewrites of the trace file, plus one when the run ends
 
 
 def muon_named_matrices(model, opt) -> List[Tuple[str, torch.nn.Parameter]]:

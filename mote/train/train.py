@@ -870,8 +870,11 @@ class Trainer:
                     if self.elr_match is not None:
                         self.elr_match.refresh(sample)
                     if self.elr_trace is not None:
+                        # rewritten whole, so not on every sample: a 2-h run logs ~3,000 of them and
+                        # saving each one would push several GB through the disk for a 2 MB file
                         self.elr_trace.add(sample)
-                        self.elr_trace.save(self._elr_trace_path)
+                        if len(self.elr_trace.samples) % elr.SAVE_EVERY == 0:
+                            self.elr_trace.save(self._elr_trace_path)
                     if self.norm_guard is not None:
                         tripped = self.norm_guard.update(sample)
                         if tripped:
@@ -893,6 +896,8 @@ class Trainer:
             yield ("step", None)
         if self._stop:
             self.log({"stopped": self.stopped_reason or "requested"})
+        if self.elr_trace is not None:  # the throttled save above can be up to SAVE_EVERY samples behind
+            self.elr_trace.save(self._elr_trace_path)
 
         if self.stopped_reason != "interrupted":  # an interrupted run resumes: checkpoint only, no final eval
             ev = yield from self._evaluate(cfg.dc.target_ratio_final)
