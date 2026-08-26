@@ -556,3 +556,90 @@ def test_a_clashing_booking_now_reaches_the_system():
         finally:
             env.close()
     raise AssertionError("never constructed a clashing booking to test")
+
+
+# --- replay and rollout branching ---------------------------------------------------------------------
+def test_world_deserialize_round_trips_exactly():
+    """`serialize` had no inverse until 2026-08-26. Counterfactuals never needed one — re-running a seeded
+    script to tick k costs 0.28 ms and reproduces the prefix exactly. What needs it is branching a LIVE
+    episode: during RLVR-1 the state comes from the model's own choices, so there is nothing to re-run."""
+    from mote.sim.domains import (Calendar, Container, InRoom, Person, Portable, Stock,
+                                  household_system)
+    from mote.sim.ecs import World
+
+    comps = {c.__name__: c for c in (InRoom, Person, Container, Portable, Stock, Calendar)}
+    for dom in ("household", "inventory", "schedule"):
+        tr = make_trace(dom, 4242, sample_difficulty(random.Random(4242), p_fail=15))
+        blob = tr.world.serialize()
+        tr.world.close()
+        w = World.deserialize(blob, comps, seed=4242)
+        try:
+            assert w.serialize() == blob, f"{dom}: round trip is not byte-exact"
+        finally:
+            w.close()
+
+    # a restored world is a working world, not just a readable dump
+    tr = make_trace("household", 4242, sample_difficulty(random.Random(4242), p_fail=15))
+    blob = tr.world.serialize()
+    tr.world.close()
+    w = World.deserialize(blob, comps, seed=4242)
+    try:
+        w.add_system(household_system)
+        who = next(n for n in w.names.values() if w.get(w.eid(n), InRoom))
+        assert w.step([{"kind": "move", "who": who, "to": "attic"}])
+    finally:
+        w.close()
+
+
+def test_counterfactual_diverts_in_every_acting_domain():
+    """Built household-only at first, so two thirds of seeds produced nothing and the waste looked like a
+    limitation of the last-action approach. It was a missing feature."""
+    from mote.sim.domains import make_counterfactual
+
+    for dom in ("household", "inventory", "schedule"):
+        usable = sum(1 for s in range(9000, 9100)
+                     if make_counterfactual(dom, s, sample_difficulty(random.Random(s), p_fail=15)) is not None)
+        assert usable > 40, f"{dom}: only {usable}/100 seeds usable"
+
+
+def test_divert_at_an_arbitrary_tick():
+    """`divert=True` is the last tick; `divert=k` is tick k, which is what a PIVOT-style continuation
+    wants. Re-running the seeded script to k IS the replay — the draws up to k are identical."""
+    from mote.sim.domains import DOMAINS
+    from mote.sim.render import narrative
+
+    diff = sample_difficulty(random.Random(11), p_fail=0)
+    base = DOMAINS["household"](11, diff)
+    try:
+        n = len(base.events)
+        text = narrative(base, "en")
+    finally:
+        base.world.close()
+    early = DOMAINS["household"](11, {**diff, "divert": 1})
+    try:
+        # a divert at tick 1 must change the narrative EARLIER than a divert at the last tick does
+        shared_early = sum(1 for x, y in zip(text, narrative(early, "en")) if x == y) / max(len(text), 1)
+    finally:
+        early.world.close()
+    late = DOMAINS["household"](11, {**diff, "divert": True})
+    try:
+        shared_late = sum(1 for x, y in zip(text, narrative(late, "en")) if x == y) / max(len(text), 1)
+    finally:
+        late.world.close()
+    assert shared_early < shared_late, "diverting at tick 1 should diverge sooner than at the last tick"
+
+
+def test_sim_probe_worlds_can_carry_failures():
+    """A probe whose worlds cannot fail cannot measure whether the model tracks a world that can. It used
+    to build at the default 0 whatever the training data did."""
+    from mote.eval.sim_probe import heldout_items
+
+    def fail_share(pf):
+        items = heldout_items(60, ["en", "ru", "ja"], p_fail=pf)
+        hits = sum(1 for x in items
+                   if "tried to" in x["prompt"] or "попыта" in x["prompt"] or "としたが" in x["prompt"])
+        return hits / len(items)
+
+    assert fail_share(0) == 0.0
+    assert fail_share(15) > 0.3
+    assert fail_share(30) > fail_share(15)

@@ -232,6 +232,39 @@ to the system means it gets "Ivy tried to book the review at 16:00, but that tim
 a refusal that names the obstacle. Malformed input is still rejected at the parser, because there is no
 world state to report about it.
 
+## Third pass: what the open items actually were
+
+Two of the three things left open at the end of the second pass turned out to be wrong, and one of my own
+scripts was decorative.
+
+**The counterfactual waste had nothing to do with the replay API.** I reported "81 % of seeds produce no
+usable pair for want of a replay-to-step API". The real cause was that `_divert_household` existed and
+`_divert_inventory` / `_divert_schedule` did not — two thirds of seeds had no divert at all. With all
+three: household 63.7 %, inventory 85.7 %, schedule 76.7 %, **75.4 % overall against 25 %**.
+
+**And the replay API is one line, not a rewrite.** Re-running a seeded script to tick k IS the replay: the
+draws up to k are identical, so the prefix is reproduced exactly. Measured: one full trace is 0.28 ms, so
+20k counterfactual pairs cost 11 s of CPU. `divert=True` (last tick) became `divert=k` (any tick), which
+is also what a PIVOT-style continuation wants.
+
+`World.deserialize` was built anyway, for the case the seed re-run genuinely cannot serve: **branching a
+live episode**. During RLVR-1 the state comes from the model's own choices rather than a seed, so there is
+nothing to re-run and a snapshot is the only way to score an alternative from the same state. Round-trips
+byte-exactly in all three domains, and a restored world still steps.
+
+**`scripts/sweep_p_fail.sh` could not distinguish the rates it existed to compare.** `sim_probe`
+built its held-out worlds at the default `p_fail=0` whatever the training data did, and the script ran the
+probe once, on one checkpoint — it would have printed the same number for 5, 15 and 30. Deleted. The probe
+takes `--p-fail` now, and the rate is decided by three 30-minute arms read as a **3x3 matrix** (each arm
+probed at every rate): the diagonal says whether training at a rate helps at it, and the off-diagonal says
+whether a high rate transfers *down*, which is the answer that actually decides. `scripts/queue_thursday.sh`
+queues the arms; `scripts/pfail_matrix.sh` and `scripts/pfail_report.py` read them.
+
+That is the third decorative signal caught in one day, and the only one I wrote *after* catching the other
+two — the recovery probe scoring 1.000 for noise, and the proxy metric's entropy weighting ordering three
+known-different checkpoints backwards. A signal that cannot fail is not a measurement, and knowing the
+rule does not stop you writing one.
+
 ## Open, and flagged
 
 **The extras budget is more aggressive than the papers it is calibrated on.** 3 % of an 8 GB branch is
@@ -256,12 +289,6 @@ controls all ran at 0.1x. It defaults per-schedule now. And the three FIM sentin
 inside the padded embedding but *outside* the head's mask on a new-config model, so a checkpoint trained
 on them could have emitted the literal text `<|fim_middle|>` to a user; they are in `STOP_IDS` now. Both
 are the same failure: a vocabulary or schedule constant that several stages read, changed in one place.
-
-**The counterfactual generator only diverts the LAST action.** That was the point — it needs no
-replay-to-step API, and the prefix stays bit-identical because the draws that chose the action have
-already happened. A divert at an arbitrary tick still wants that API, and so does the parked PIVOT
-continuation item; building it once would serve both. Cost of the shortcut: 81 % of seeds produce no
-usable pair, so 20k pairs takes ~120k seeds of CPU.
 
 **PRISM's merge is not implemented.** 15 % base + 85 % mid recovered most of the long-context loss at 8B.
 Mote's answer to the same risk is preventative (long docs restored, `needle_auto` as a guard) rather than

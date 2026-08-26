@@ -162,3 +162,37 @@ class World:
                           for rel, store in sorted(self._rel.items())},
         }
         return json.dumps(state, sort_keys=True, ensure_ascii=False).encode("utf-8")
+
+    @classmethod
+    def deserialize(cls, blob: bytes, components: Dict[str, type], seed: Optional[int] = None) -> "World":
+        """Rebuild a world from `serialize` output. The inverse that was missing until 2026-08-26.
+
+        The counterfactual generator does not need this — re-running a seeded script to tick k costs
+        0.28 ms and reproduces the prefix exactly. What needs it is branching a LIVE episode: during
+        RLVR-1 the state comes from the model's own choices, not from a seed, so there is nothing to
+        re-run and the only way to score an alternative from the same state is to restore a snapshot.
+
+        `components` maps a class name to its dataclass, because the blob stores names rather than types;
+        pass `{c.__name__: c for c in (InRoom, Stock, Calendar, ...)}` from the domain module. Systems are
+        NOT restored — a caller re-adds them, since a function cannot be serialised. `rng` restarts from
+        `seed` (default: the recorded one), so a restored world is only deterministic forward if the
+        caller supplies the actions."""
+        state = json.loads(blob.decode("utf-8"))
+        if state.get("schema") != SCHEMA_VERSION:
+            raise ValueError(f"schema {state.get('schema')} != {SCHEMA_VERSION}")
+        w = cls(seed if seed is not None else 0)
+        w.t = int(state["t"])
+        remap: Dict[int, int] = {}
+        for old, name in sorted(state["names"].items(), key=lambda kv: int(kv[0])):
+            remap[int(old)] = w.spawn(name)
+        for cname, per_entity in state["components"].items():
+            comp = components.get(cname)
+            if comp is None:
+                raise KeyError(f"no dataclass supplied for component {cname!r}")
+            for old, fields in per_entity.items():
+                w.add(remap[int(old)], comp(**fields))
+        for rel, store in state["relations"].items():
+            for old, objs in store.items():
+                for o in objs:
+                    w.relate(remap[int(old)], rel, remap[int(o)])
+        return w

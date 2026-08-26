@@ -142,6 +142,16 @@ def household_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
     return events
 
 
+def _divert_tick(divert: Any, ticks: int) -> int:
+    """`divert=True` means the last tick (where the prefix is bit-identical and the pair is minimal);
+    `divert=k` means tick k, which is what a PIVOT-style continuation wants. Re-running the seeded script
+    to k IS the replay — the draws up to k are identical, so the prefix is reproduced exactly and a
+    resumable API would only save the 0.28 ms the re-run costs."""
+    if divert is True:
+        return ticks - 1
+    return max(0, min(int(divert), ticks - 1))
+
+
 def _divert_household(rng, action, objects, containers, byname, w, snap, who) -> Dict[str, Any]:
     """A different final action from the same state — the counterfactual branch of a minimal pair."""
     held = [o for o in objects if w.one(byname[o], "held_by") == byname[who]]
@@ -248,7 +258,7 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
                 action = {"kind": "put_in", "who": p, "obj": o, "cont": rng.choice(conts_here)}
             else:
                 action = {"kind": "put_down", "who": p, "obj": o}
-        if divert and tick == diff["ticks"] - 1:
+        if divert is not None and tick == _divert_tick(divert, diff["ticks"]):
             action = _divert_household(rng, action, objects, containers, byname, w, snap, p)
         new_events = w.step([action])
         events.extend(new_events)
@@ -346,6 +356,23 @@ def inventory_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
     return events
 
 
+def _divert_inventory(rng, action, people, goods, price, stock) -> Dict[str, Any]:
+    """A different affordable final action from the same state."""
+    alts = []
+    for buyer in people:
+        for seller in people:
+            if buyer == seller:
+                continue
+            for g in goods:
+                n = 1
+                if stock[seller].goods[g] >= n and stock[buyer].coins >= n * price[g]:
+                    alts.append({"kind": "trade", "buyer": buyer, "seller": seller, "goods": g,
+                                 "n": n, "cost": n * price[g]})
+    alts += [{"kind": "harvest", "who": p, "goods": g, "v": 0, "n": 1} for p in people for g in goods]
+    alts = [a for a in alts if a != action]
+    return rng.choice(alts) if alts else action
+
+
 def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
     rng = random.Random(seed)
     w = World(seed)
@@ -362,6 +389,7 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
     start = {p: (dict(s.goods), s.coins) for p, s in stock.items()}
     events: List[Event] = [Event(0, "init_stock", {"start": {p: {"goods": g, "coins": c} for p, (g, c) in start.items()},
                                                     "price": dict(price)})]
+    divert = diff.get("divert")
     p_fail = diff.get("p_fail", 0) / 100.0
     # Per-tick stock snapshots. Only the start and the end were ever recoverable before 2026-08-26, so
     # every count question was "how many now"; this is the same retrodiction the household domain gained.
@@ -391,6 +419,8 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
             g2 = rng.choice(goods)
             n2 = rng.randint(1, 2)
             action = {"kind": "harvest", "who": buyer, "goods": g2, "n": n2, "v": t % 3}
+        if divert is not None and t == _divert_tick(divert, diff["ticks"]):
+            action = _divert_inventory(rng, action, people, goods, price, stock)
         snap_before = {q: (dict(s.goods), s.coins) for q, s in stock.items()}
         new = w.step([action])
         events.extend(new)
@@ -525,6 +555,21 @@ def schedule_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
     return events
 
 
+def _divert_schedule(rng, action, who, cal) -> Dict[str, Any]:
+    """The same booking at a different free hour, or a different free title."""
+    taken = {t2 for _s, _e, t2 in cal.slots}
+    clashes = lambda s, e: any(s < e2 and s2 < e for s2, e2, _t in cal.slots)
+    alts = []
+    for title in TITLES:
+        if title in taken:
+            continue
+        for h in range(8, 17):
+            if h in WINDOWS[title] and not clashes(h, h + 1):
+                alts.append({"kind": "book", "who": who, "title": title, "start_h": h, "dur": 1})
+    alts = [a for a in alts if a != action]
+    return rng.choice(alts) if alts else action
+
+
 def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
     rng = random.Random(seed)
     w = World(seed)
@@ -537,8 +582,9 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
         cal[p] = m
         w.add(eid, m)
     events: List[Event] = []
+    divert = diff.get("divert")
     p_fail = diff.get("p_fail", 0) / 100.0
-    for _ in range(diff["ticks"]):
+    for _tick in range(diff["ticks"]):
         p = rng.choice(people)
 
         def clashes(start, end, skip=None):
@@ -582,6 +628,8 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
             title = rng.choice(free_titles)
             cands = [h for h in cands if h in WINDOWS[title]] or cands
             action = {"kind": "book", "who": p, "title": title, "start_h": rng.choice(cands), "dur": dur}
+        if divert is not None and _tick == _divert_tick(divert, diff["ticks"]):
+            action = _divert_schedule(rng, action, p, cal[p])
         events.extend(w.step([action]))
     qs: List[Q] = []
     rngq = random.Random(seed + 1)

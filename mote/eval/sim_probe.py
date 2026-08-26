@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import threading
 from collections import defaultdict
@@ -27,7 +28,7 @@ from typing import Dict, List
 
 from ..serve.engine import Engine, GenParams
 from ..serve.identity import with_system_card
-from ..sim.domains import DOMAINS, make_trace
+from ..sim.domains import DOMAINS, make_trace, sample_difficulty
 from ..sim.render import narrative, qa_pairs
 
 SEED_BASE = 5_000_000
@@ -49,8 +50,14 @@ def contains(pred: str, gold: str) -> bool:
     return bool(g) and g in normalize(pred)
 
 
-def heldout_items(n: int, locales: List[str], seed_base: int = SEED_BASE, per_trace: int = 2) -> List[Dict]:
-    """n questions over fresh worlds: domains round-robin by seed, locales round-robin by item."""
+def heldout_items(n: int, locales: List[str], seed_base: int = SEED_BASE, per_trace: int = 2,
+                  p_fail: int = 0) -> List[Dict]:
+    """n questions over fresh worlds: domains round-robin by seed, locales round-robin by item.
+
+    `p_fail` must MATCH the rate the training data was built at (signed 2026-08-26). The probe used to
+    build its worlds at the default 0 whatever the training data did, so it could never contain a failure
+    the model has to notice — it measured a world the model no longer trains on. Held out remains held
+    out either way: the seeds start at SEED_BASE, far above the generator's."""
     domains = sorted(DOMAINS)
     items: List[Dict] = []
     seed = seed_base
@@ -58,7 +65,7 @@ def heldout_items(n: int, locales: List[str], seed_base: int = SEED_BASE, per_tr
         seed += 1
         domain = domains[seed % len(domains)]
         locale = locales[len(items) % len(locales)]
-        trace = make_trace(domain, seed)
+        trace = make_trace(domain, seed, sample_difficulty(random.Random(seed ^ 0x5EED), p_fail))
         try:
             doc = narrative(trace, locale)
             pairs = qa_pairs(trace, locale)
@@ -119,10 +126,12 @@ def main(argv=None):
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--locales", default="en,ru,ja")
     ap.add_argument("--seed-base", type=int, default=SEED_BASE)
+    ap.add_argument("--p-fail", type=int, default=0, help="build the held-out worlds at this failure rate; MATCH the training data or the probe measures a world the model does not train on (docs/research/midtraining-2026-08-26.md)")
     ap.add_argument("--max-bytes", type=int, default=48)
     ap.add_argument("--out", default=None, help="default: sim_probe.json next to the checkpoint")
     args = ap.parse_args(argv)
-    items = heldout_items(args.n, [l.strip() for l in args.locales.split(",") if l.strip()], args.seed_base)
+    items = heldout_items(args.n, [l.strip() for l in args.locales.split(",") if l.strip()], args.seed_base,
+                          p_fail=args.p_fail)
     eng = Engine(args.checkpoint, device=args.device)
     res = run(eng, items, k=args.k, temperature=args.temperature, max_bytes=args.max_bytes)
     out = Path(args.out) if args.out else Path(args.checkpoint).parent / "sim_probe.json"
