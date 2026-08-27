@@ -413,8 +413,10 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--lambda-init", type=float, default=None, help="Relation count-calibration \u03bb\u2080 (preset default 0.5); swept with --qk-norm for the same reason")
     ap.add_argument("--elr-trace-out", default=None, metavar="PATH", help="record this run's per-matrix ‖W‖_F on the logging cadence to PATH (default runs/<out>/elr_trace.json when --elr-match is used elsewhere); the reference half of an ELR-matched pair (2608.24814 App. B.2)")
     ap.add_argument("--elr-match", default=None, metavar="PATH", help="track the ELR schedule in an --elr-trace-out file: this run keeps its own optimizer and norm control, and only its per-matrix learning rates are adapted, η_i = η^eff,ref · ‖W_i‖. If the losses then collapse, the norm-control difference acted through ELR. Muon matrices only — the AdamW groups keep the schedule")
-    ap.add_argument("--norm-guard", default="stop", choices=["off", "warn", "stop"], help="watch for ‖W‖_F falling while the lr is flat (the lr_sweep_12e-4 signature: its norm ended below a 0.67x-lr arm's). `stop` ends the run gracefully and HOLDS the queue; `warn` only logs")
-    ap.add_argument("--norm-guard-drop", type=float, default=0.05, help="fraction below the flat-lr baseline that trips --norm-guard")
+    ap.add_argument("--norm-guard", default="stop", choices=["off", "warn", "stop"], help="watch for ‖W‖_F falling faster than weight decay alone could take it — an update systematically anti-aligned with its own weights, which is what the lr_sweep_12e-4 collapse was. `stop` ends the run gracefully and HOLDS the queue; `warn` only logs")
+    ap.add_argument("--norm-guard-slack", type=float, default=1.25,
+                    help="how far past the weight-decay budget ‖W‖ may fall before --norm-guard trips; 1.0 is the "
+                         "bound an orthogonal update cannot cross, the slack absorbs the aligned component and noise")
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
     ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
@@ -576,7 +578,7 @@ class Trainer:
         # the nominal lr. Empty for an AdamW run, which switches all three features off.
         self._elr_named = elr.muon_named_matrices(model, self.opt)
         self.norms = elr.NormTracker(self._elr_named)
-        self.norm_guard = elr.NormGuard(drop=args.norm_guard_drop) if (self.norms and args.norm_guard != "off") else None
+        self.norm_guard = elr.NormGuard(slack=args.norm_guard_slack) if (self.norms and args.norm_guard != "off") else None
         self.elr_trace = elr.ELRTrace(meta={"lr": args.lr, "weight_decay": args.weight_decay,
                                             "optimizer": args.optimizer, "schedule": args.schedule}) if args.elr_trace_out else None
         self._elr_trace_path = None
@@ -888,7 +890,7 @@ class Trainer:
                 if self.peak_tflops:
                     rec["mfu"] = rec["tflops"] / self.peak_tflops
                 if self.norms:
-                    sample = self.norms.sample(self.step, lr)  # 61 norms in one device->host transfer
+                    sample = self.norms.sample(self.step, lr, self.args.weight_decay)  # 61 norms in one device->host transfer
                     rec.update(self.norms.record(sample))
                     if self.elr_match is not None:
                         self.elr_match.refresh(sample)

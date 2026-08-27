@@ -59,6 +59,7 @@ class NormSample:
     step: int
     lr: float
     norms: Dict[str, float]
+    wd: float = 0.0  # the decay actually applied this step; NormGuard's whole budget comes from it
 
     @property
     def total(self) -> float:
@@ -82,9 +83,9 @@ class NormTracker:
         return bool(self.params)
 
     @torch.no_grad()
-    def sample(self, step: int, lr: float) -> NormSample:
+    def sample(self, step: int, lr: float, wd: float = 0.0) -> NormSample:
         vals = torch.stack([p.detach().float().norm() for p in self.params]).cpu().tolist()
-        self.last = NormSample(step, lr, dict(zip(self.names, vals)))
+        self.last = NormSample(step, lr, dict(zip(self.names, vals)), wd)
         return self.last
 
     def record(self, s: Optional[NormSample] = None) -> Dict[str, float]:
@@ -102,6 +103,11 @@ class NormTracker:
         # `residual_proj` is zero-initialised and stays zero until the first update moves it.
         rms = sorted(s.norms[n] / math.sqrt(self.numel[n]) for n in self.names if s.norms[n] > 0)
         out = {"w_norm": total, "elr": s.lr / total if total else 0.0}
+        # ‖W‖/√lr is constant across arms at equilibrium (‖W‖ ∝ √(η/λ)), so it is the coordinate that
+        # says whether two runs sit on the same equilibrium. It is NOT what the guard watches: at
+        # constant lr it divides by a constant, and a relative rule cannot see that.
+        if s.lr > 0:
+            out["w_norm_inv"] = total / math.sqrt(s.lr)
         if rms:
             out["rms_per_entry"] = sum(rms) / len(rms)
             out["rms_spread"] = rms[-1] / rms[0]
@@ -111,43 +117,59 @@ class NormTracker:
 
 
 class NormGuard:
-    """Trip when ‖W‖_F falls while the learning rate is flat.
+    """Trip when ‖W‖_F falls faster than weight decay alone could take it.
 
-    The rule is relative on purpose. The failure this is built from — `lr_sweep_12e-4`, whose norm ended
-    at 221.5, *below* the 8e-4 arm's 294.6 at 1.5× the learning rate — is a collapse, not a drift, and a
-    relative rule needs no fitted constant. The absolute alternative would compare against
-    0.66·√(lr/λ)·√(mn), and that 0.66 was fitted on the 35M preset at 12 h; an uncalibrated constant on a
-    7-day unattended run is a false positive that halts a healthy trunk.
+    Muon applies `p.mul_(1 - ηλ)` and then adds its orthogonalised update. If that update is not
+    aligned with the weights it contributes in quadrature, so
 
-    Arming only during a flat-lr phase is what keeps warmup and an intended decay tail from firing it:
-    both move the equilibrium down by design, and a norm that follows them down is correct behaviour.
+        ‖W‖²_{n+1} = (1-ηλ)²‖W‖²_n + η²‖U‖²   ≥   (1-ηλ)²‖W‖²_n
+
+    and the norm **cannot** fall faster than (1-ηλ) per step. A run that does is not relaxing — its
+    updates are systematically anti-aligned with its own weights, destroying norm rather than adding
+    to it, which is what a collapse is. The bound needs no equilibrium estimate and no fitted
+    constant, which is what the earlier level rule could not manage.
+
+    The level rule it replaces compared ‖W‖ against its own flat-lr maximum, and could not tell a
+    collapse from a correct relaxation toward a *lower* equilibrium. Five arms queued on 2026-08-26
+    init from a checkpoint trained at 4e-4 and run at 3e-4; equilibrium moves as √(η/λ), so their
+    norms correctly fall 13.4 %, and the deviation relaxes at rate 2ηλ — 3.79 % inside a 30-minute
+    arm's flat window, against a 5 % threshold. A 1.32x margin on healthy runs doing the right thing.
+
+    Changing coordinates does not help: at constant lr, ‖W‖/√lr is ‖W‖ over a constant, and a
+    relative rule is invariant to it. The fix has to be a rate, not a level.
+
+    `slack` absorbs the component of the update that *is* aligned with W plus sampling noise; the
+    trip needs `consecutive` samples so a single noisy interval cannot fire it. `arm_frac` keeps the
+    guard out of a decay tail that runs the lr to zero, where the budget degenerates.
     """
 
-    def __init__(self, drop: float = 0.05, consecutive: int = 3, arm_after: int = 20):
-        self.drop, self.consecutive, self.arm_after = drop, consecutive, arm_after
-        self.baseline: Optional[float] = None
-        self.flat = 0          # consecutive samples at an unchanged lr
-        self.below = 0         # consecutive samples under the threshold
-        self._lr: Optional[float] = None
+    def __init__(self, slack: float = 1.25, consecutive: int = 3, arm_frac: float = 0.05):
+        self.slack, self.consecutive, self.arm_frac = slack, consecutive, arm_frac
+        self.prev: Optional[NormSample] = None
+        self.lr_max = 0.0
+        self.below = 0         # consecutive intervals that overspent the decay budget
 
     def update(self, s: NormSample) -> Optional[str]:
         """The trip reason, or None. Call once per norm sample."""
-        if self._lr is None or abs(s.lr - self._lr) > 1e-12 * max(abs(s.lr), 1.0):
-            self._lr, self.flat, self.baseline, self.below = s.lr, 0, None, 0  # lr moved: disarm and re-arm
+        prev, self.prev = self.prev, s
+        self.lr_max = max(self.lr_max, s.lr)
+        if prev is None or s.wd <= 0.0 or s.lr <= 0.0 or s.total <= 0.0 or prev.total <= 0.0:
             return None
-        self.flat += 1
-        if self.flat < self.arm_after:
+        if s.lr < self.arm_frac * self.lr_max:
+            self.below = 0     # a decay tail near zero lr has no budget to compare against
             return None
-        total = s.total
-        if self.baseline is None or total > self.baseline:
-            self.baseline = total
-            self.below = 0
+        steps = s.step - prev.step
+        if steps <= 0:
             return None
-        if total < self.baseline * (1.0 - self.drop):
+        budget = steps * math.log1p(-s.lr * s.wd) * self.slack   # negative: the most decay alone can take
+        observed = math.log(s.total) - math.log(prev.total)
+        if observed < budget:
             self.below += 1
             if self.below >= self.consecutive:
-                return (f"norm collapse: ‖W‖_F {total:.2f} is {100*(1-total/self.baseline):.1f} % below its "
-                        f"flat-lr baseline {self.baseline:.2f} for {self.below} samples at lr {s.lr:g}")
+                per_step = math.expm1(observed / steps)
+                return (f"norm collapse: ‖W‖_F fell {100 * -math.expm1(observed):.2f} % over {steps} steps "
+                        f"({100 * -per_step:.4f} %/step) — faster than the {100 * s.lr * s.wd:.4f} %/step "
+                        f"weight decay alone allows, for {self.below} samples at lr {s.lr:g}")
         else:
             self.below = 0
         return None

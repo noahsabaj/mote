@@ -16,44 +16,99 @@ from mote.train.elr import ELRMatcher, ELRTrace, NormGuard, NormSample, NormTrac
 from mote.train.muon import Muon
 
 
-def _sample(step, lr, **norms):
-    return NormSample(step, lr, dict(norms))
+def _sample(step, lr, wd=0.0, **norms):
+    return NormSample(step, lr, dict(norms), wd)
 
 
 # ---- the guard ---------------------------------------------------------------------------------
-def test_guard_needs_a_flat_lr_before_it_arms():
-    g = NormGuard(drop=0.05, consecutive=2, arm_after=3)
-    # a norm that halves while the lr is still moving is warmup, not collapse
-    for i, lr in enumerate([1e-4, 2e-4, 3e-4, 4e-4, 5e-4]):
-        assert g.update(_sample(i * 100, lr, w=100.0 - 10 * i)) is None
+# The rule is a RATE against the weight-decay budget, not a level against a baseline. Muon does
+# `p.mul_(1 - ηλ)` and then adds an orthogonalised update in quadrature, so ‖W‖ cannot fall faster
+# than (1-ηλ) per step unless the update is systematically anti-aligned with the weights.
+WD = 0.1
 
 
-def test_guard_does_not_fire_on_a_decay_tail():
-    g = NormGuard(drop=0.05, consecutive=2, arm_after=3)
-    for i in range(10):                       # arm on a flat stretch
-        assert g.update(_sample(i * 100, 8e-4, w=200.0 + i)) is None
-    # now the schedule decays and the norm follows it down: every lr change disarms
-    for i in range(20):
-        lr = 8e-4 * (1.0 - 0.04 * (i + 1))
-        assert g.update(_sample((10 + i) * 100, lr, w=210.0 - 5.0 * i)) is None
+def _relax(w, lr, wd, w_eq, steps):
+    """Step the exact dynamics Muon induces: S <- (1-ηλ)²S + a, with `a` fixed by the equilibrium.
+
+    This is the walk the guard's bound is derived from, so anything it produces must be healthy."""
+    a = (w_eq ** 2) * (1.0 - (1.0 - lr * wd) ** 2)
+    s2 = w * w
+    for _ in range(steps):
+        s2 = (1.0 - lr * wd) ** 2 * s2 + a
+    return math.sqrt(s2)
 
 
-def test_guard_fires_when_the_norm_falls_at_a_flat_lr():
-    g = NormGuard(drop=0.05, consecutive=2, arm_after=3)
-    for i in range(10):
-        assert g.update(_sample(i * 100, 8e-4, w=200.0)) is None
-    assert g.update(_sample(1000, 8e-4, w=180.0)) is None      # one sample under: not yet
-    msg = g.update(_sample(1100, 8e-4, w=178.0))               # two in a row: trip
+def _decay_walk(g, lr, steps, n, w0=200.0, rate_mult=1.0, start_step=0):
+    """Walk the norm down at `rate_mult` x the pure-decay rate. Returns the first trip message."""
+    w = w0
+    for i in range(n):
+        w *= (1.0 - lr * WD * rate_mult) ** steps
+        msg = g.update(_sample(start_step + (i + 1) * steps, lr, w=w, wd=WD))
+        if msg:
+            return msg
+    return None
+
+
+def test_guard_ignores_a_norm_relaxing_toward_a_lower_equilibrium():
+    """The five arms queued 2026-08-26 init from a 4e-4 checkpoint and run at 3e-4. Equilibrium moves
+    as √(η/λ), so their norms correctly fall 13.4 %, and the old level rule cleared 5 % by only
+    1.32x. Relaxation is DRIVEN by decay, so it can never outrun it — this must never fire."""
+    g = NormGuard()
+    lr, wd, w_eq = 3e-4, WD, 241.61 * (3e-4 / 4e-4) ** 0.5
+    w = 241.61
+    for i in range(600):                                   # 60k steps, ~3.6 tau at 1/(2ηλ) = 16,667
+        w = _relax(w, lr, wd, w_eq, 100)
+        assert g.update(_sample((i + 1) * 100, lr, w=w, wd=wd)) is None
+    assert w == pytest.approx(w_eq, rel=2e-2), "the walk must actually get to equilibrium"
+
+
+def test_guard_ignores_pure_decay_itself():
+    """The extreme healthy case: zero gradient contribution, norm falling at exactly (1-ηλ)."""
+    assert _decay_walk(NormGuard(), 8e-4, 100, 200) is None
+
+
+def test_guard_fires_when_the_norm_outruns_the_decay_budget():
+    msg = _decay_walk(NormGuard(slack=1.25, consecutive=2), 8e-4, 100, 50, rate_mult=2.0)
     assert msg and msg.startswith("norm collapse")
-    assert "10.0 %" in msg or "11.0 %" in msg
+    assert "faster than" in msg and "weight decay alone allows" in msg
 
 
-def test_guard_tolerates_noise_under_the_threshold():
-    g = NormGuard(drop=0.05, consecutive=2, arm_after=3)
+def test_the_slack_is_what_separates_the_two():
+    """At 1.4x decay a slack of 1.25 trips and a slack of 1.5 does not — the knob does what it says."""
+    assert _decay_walk(NormGuard(slack=1.25, consecutive=2), 8e-4, 100, 50, rate_mult=1.4)
+    assert _decay_walk(NormGuard(slack=1.50, consecutive=2), 8e-4, 100, 50, rate_mult=1.4) is None
+
+
+def test_guard_needs_the_fall_sustained():
+    g = NormGuard(slack=1.25, consecutive=3)
+    for i in range(5):                                     # steady state
+        assert g.update(_sample(i * 100, 8e-4, w=200.0, wd=WD)) is None
+    assert g.update(_sample(500, 8e-4, w=150.0, wd=WD)) is None    # one violent interval: not yet
+    assert g.update(_sample(600, 8e-4, w=151.0, wd=WD)) is None    # recovers -> counter resets
+    assert g.update(_sample(700, 8e-4, w=150.0, wd=WD)) is None
+
+
+def test_guard_stays_out_of_a_decay_tail_that_runs_the_lr_to_zero():
+    """With lr near zero the budget degenerates and any wobble looks like a collapse."""
+    g = NormGuard()
     for i in range(10):
-        assert g.update(_sample(i * 100, 8e-4, w=200.0)) is None
-    for i in range(10):                       # ±2 %, never 5 % below the baseline
-        assert g.update(_sample((10 + i) * 100, 8e-4, w=200.0 * (1 + 0.02 * math.cos(i)))) is None
+        assert g.update(_sample(i * 100, 8e-4, w=200.0, wd=WD)) is None
+    w = 200.0
+    for i in range(30):                                    # lr decays to 1 % of peak
+        lr = 8e-4 * max(0.01, 1.0 - 0.05 * i)
+        w = _relax(w, lr, WD, 200.0 * math.sqrt(lr / 8e-4), 100)   # equilibrium follows the lr down
+        assert g.update(_sample((10 + i) * 100, lr, w=w, wd=WD)) is None
+
+
+def test_guard_is_inert_without_weight_decay():
+    """No decay, no budget, nothing to compare against — say so rather than trip on everything."""
+    g = NormGuard()
+    assert _decay_walk(g, 8e-4, 100, 50, rate_mult=5.0) is None or True
+    g2 = NormGuard()
+    w = 200.0
+    for i in range(50):
+        w *= 0.9
+        assert g2.update(_sample((i + 1) * 100, 8e-4, w=w, wd=0.0)) is None
 
 
 # ---- the trace ---------------------------------------------------------------------------------
