@@ -40,11 +40,18 @@ def main(argv=None):
     ap.add_argument("--trace", default=None, help="write a Chrome trace json here")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--chunk-bytes", type=float, default=None, help="profiling only: force a boundary every N bytes (trained routers land near 5-6), so a preset with no checkpoint is profiled at a realistic chunk count")
+    ap.add_argument("--spine", default=None, choices=["off", "expand", "frac"], help="hyper-connection spine mode (mote/model/spine.py)")
+    ap.add_argument("--spine-n", type=int, default=None, help="streams (expand) or slices (frac)")
+    ap.add_argument("--out", default=None, help="also write the result json here")
     ap.add_argument("--init-from", default=None, help="profile a trained checkpoint: a random router makes ~9 chunks per 2048 bytes, a trained one ~370, and the main network and dechunk costs scale with that")
     args = ap.parse_args(argv)
 
     device = torch.device(args.device)
     cfg: MoteConfig = resolve_preset(args.preset)
+    if args.spine is not None:
+        cfg.spine.mode = args.spine
+    if args.spine_n is not None:
+        cfg.spine.n = args.spine_n
     if args.bucket is not None:
         cfg.dc.chunk_bucket = args.bucket
     if args.no_flash:
@@ -144,14 +151,18 @@ def main(argv=None):
     fl = flops_per_byte(model, args.seq_len, bpic)
     tflops = fl * bytes_per_step / sec / 1e12
     peak = peak_tflops_for(device) if device.type == "cuda" else None
-    print(json.dumps({
-        "preset": args.preset, "params": model.num_params(), "batch": args.batch_size, "seq_len": args.seq_len,
+    result = {
+        "preset": args.preset, "spine": cfg.spine.mode, "spine_n": cfg.spine.n, "params": model.num_params(), "batch": args.batch_size, "seq_len": args.seq_len,
         "grad_accum": args.grad_accum, "bucket": cfg.dc.chunk_bucket, "flash": not args.no_flash, "ckpt_main": args.ckpt_main,
         "block_local_mbp": not args.dense_mbp, "mbp": not args.no_mbp,
         "sec_per_step": round(sec, 4), "bytes_per_sec": round(bytes_per_step / sec), "bytes_per_chunk": round(bpic, 2),
         "flops_per_byte_M": round(fl / 1e6, 1), "tflops": round(tflops, 2), "mfu": round(tflops / peak, 3) if peak else None,
         "peak_mem_GB": round(torch.cuda.max_memory_allocated() / 1e9, 2) if device.type == "cuda" else None,
-    }, indent=1), flush=True)
+    }
+    print(json.dumps(result, indent=1), flush=True)
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(result, indent=1))
 
     activities = [ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device.type == "cuda" else [])
     with profile(activities=activities, record_shapes=False, profile_memory=False, with_stack=False) as prof:

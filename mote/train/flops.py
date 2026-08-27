@@ -42,7 +42,11 @@ def flops_per_byte(model, seq_len: int, bytes_per_chunk: float) -> float:
     bpc = max(float(bytes_per_chunk), 1.0)
     T_main = seq_len / bpc  # chunk-level positions per sequence
 
-    byte_level = _n(model.encoder) + _n(model.decoder) + _n(model.routing_module) + _n(model.residual_proj)
+    byte_level = _n(model.encoder) + _n(model.decoder) + _n(model.routing_module)
+    # The spine replaces residual_proj with its own generators; both are byte-level and per-position.
+    # `_n(model.encoder)` already counts the encoder's and decoder's spine sites, since they are
+    # submodules of those stacks — only the chunk-stage site and the stream scales are left over.
+    byte_level += _n(model.chunk_spine) + model.stream.scale.numel() if model.spine_on else _n(model.residual_proj)
     byte_level += _n(model.lm_head)  # next-byte head
     main = _n(model.main_network) + (model.pad_dimension.numel() if model.pad_dimension is not None else 0)
     fl = 6.0 * byte_level + 6.0 * main / bpc
