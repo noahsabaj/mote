@@ -188,3 +188,116 @@ def test_read_asks_the_kernel_for_its_output_dtype():
         u, _ = s.read(x)
     assert u.dtype is torch.bfloat16
     assert s.read(x)[0].dtype is torch.float32
+
+
+# ---- the two failure modes that do not show up in the loss -------------------------------------
+
+def _spine_model(mode="expand", n=4, preset="mote-1m"):
+    from mote.config import resolve_preset
+    from mote.model.hnet import HNetForCausalLM
+
+    cfg = resolve_preset(preset)
+    cfg.spine.mode, cfg.spine.n, cfg.mbp.enabled = mode, n, False
+    return HNetForCausalLM(cfg), cfg
+
+
+def _stream(m):
+    from mote.model.spine import StreamExpand
+
+    return next(x for x in m.modules() if isinstance(x, StreamExpand))
+
+
+def test_stream_stats_are_off_until_armed():
+    """The activation reduction is over [B, L, n, d]; at 16384 that is not something to pay for on
+    every step, so it is sampled only on the steps that get logged."""
+    from mote.model.spine import set_stream_collect, spine_stats
+
+    m, _ = _spine_model()
+    x = torch.randint(0, 256, (2, 64))
+    with torch.no_grad():
+        m(x)
+    assert "stream_rms" not in spine_stats(m), "sampled without being armed"
+    set_stream_collect(m, True)
+    with torch.no_grad():
+        m(x)
+    s = spine_stats(m)
+    assert len(s["stream_rms"]) == 4 and s["stream_spread"] >= 1.0
+    set_stream_collect(m, False)
+    assert "stream_rms" not in spine_stats(m)
+
+
+def test_streams_start_as_near_exact_copies():
+    """HC replicates the state, so every stream begins in the permutation-symmetric fixed point and
+    training has to differentiate them. The design doc's first stated risk is that seven sites may
+    not be enough to do it, so the starting point has to be measurable: cos ~= 1 at init."""
+    from mote.model.spine import set_stream_collect, spine_stats
+
+    m, _ = _spine_model(preset="mote-13m")
+    set_stream_collect(m, True)
+    with torch.no_grad():
+        m(torch.randint(0, 256, (2, 64)))
+    assert spine_stats(m)["stream_cos"] > 0.99
+
+
+def test_it_sees_streams_that_stop_being_distinct():
+    """2606.03483's collapse is REDUNDANCY, not inequality, and the two do not measure the same
+    thing. Per-stream norm is compressed: a starved stream still sits at RMS ~1 because a
+    near-identity H_res carries its initial state forward, so a maximally starved stack reads only
+    ~1.5x a healthy one and a 1.4 would look fine. The cosine has the range."""
+    from mote.model.spine import Spine, set_stream_collect, spine_stats
+
+    x = torch.randint(0, 256, (2, 64))
+
+    def run(mutate=None):
+        torch.manual_seed(0)
+        m, _ = _spine_model(preset="mote-13m")
+        set_stream_collect(m, True)
+        with torch.no_grad():
+            if mutate:
+                mutate(m)
+            m(x)
+        return spine_stats(m)
+
+    def drive_apart(m):
+        for sp in m.modules():
+            if isinstance(sp, Spine):
+                sp.b_post.copy_(torch.tensor([3.0, -3.0, 3.0, -3.0]))
+
+    base, apart = run(), run(drive_apart)
+    assert base["stream_cos"] > apart["stream_cos"] + 0.05, "the cosine does not track differentiation"
+    assert apart["stream_cos"] < 0.95
+    # and the norm measure, for the record: it moves, but only over a compressed range
+    assert 1.0 <= base["stream_spread"] < 1.1 < apart["stream_spread"] < 4.0
+
+
+def test_it_sees_a_read_out_that_only_reads_one_stream():
+    from mote.model.spine import spine_stats
+
+    m, _ = _spine_model()
+    assert spine_stats(m)["read_out_max"] < 0.4  # near-uniform at init (1/n = 0.25)
+    with torch.no_grad():
+        _stream(m).read_out.copy_(torch.tensor([20.0, 0.0, 0.0, 0.0]))
+    assert spine_stats(m)["read_out_max"] > 0.99
+
+
+def test_it_sees_identity_degeneration():
+    """H_res pinned at I means no cross-stream mixing happens and the spine is an expensive plain
+    residual. This is what sHC's spectral sphere exists to prevent and what decides A3."""
+    from mote.model.spine import spine_stats
+
+    m, _ = _spine_model()
+    s = spine_stats(m)
+    assert s["h_res_drift"] < 0.35, "the static mixer should start at (nearly) the identity"
+    assert s["alpha_res"] == pytest.approx(0.01), "the dynamic gate starts small, per mHC"
+    with torch.no_grad():
+        for sp in m.modules():
+            if type(sp).__name__ == "Spine":
+                sp.b_res.mul_(0.0)  # a mixer that has moved well off the identity
+    assert spine_stats(m)["h_res_drift"] > 0.5
+
+
+def test_stats_are_empty_without_a_spine():
+    from mote.model.spine import spine_stats
+
+    m, _ = _spine_model(mode="off")
+    assert spine_stats(m) == {}

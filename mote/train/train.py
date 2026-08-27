@@ -32,6 +32,7 @@ triton_lock.install()  # the trainer shares autotuned kernels with serving repli
 from ..data.loader import ByteShard, MixedShard
 from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.moe import collect_moe, moe_modules
+from ..model import spine
 from .flops import _n as _n_active
 from ..model.hnet import HNetForCausalLM
 from ..tokenizer import OFFSET_ID, ByteTokenizer
@@ -563,6 +564,9 @@ class Trainer:
         self.model = model = HNetForCausalLM(cfg, device=device)
         if args.ckpt_main:
             model.main_network.grad_checkpoint = True
+        # stream collapse and identity degeneration are the two ways this stack fails without the
+        # loss saying so; both are only meaningful when there is a spine at all
+        self._spine_stats = getattr(cfg.spine, "mode", "off") != "off"
         self.n_params = model.num_params()
         self.peak_tflops = peak_tflops_for(device) if device.type == "cuda" else None
         print(f"params: {self.n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('mote.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('mote.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
@@ -871,6 +875,10 @@ class Trainer:
                 # after set_lr, which would otherwise overwrite it: param_lr wins for Muon's matrices, the
                 # schedule still drives the AdamW groups (they are identical between the arms being compared)
                 lr = self.elr_match.apply(self.opt, self.step) or lr
+            # arm the spine's activation sample for exactly the forward that will be logged: the
+            # reduction is over [B, L, n, d] and is not free at 16384
+            if self._spine_stats:
+                spine.set_stream_collect(self.model, (self.step + 1) % args.log_every == 0)
             stats = yield from self._train_step(target_ratio)
             self.step += 1
             if args.snapshot_steps and self.step // args.snapshot_steps > snap_idx:
@@ -889,6 +897,8 @@ class Trainer:
                 rec["tflops"] = flops_per_byte(self.model, args.seq_len, stats.get("bpic", 1.0)) * rec["bytes_per_sec"] / 1e12
                 if self.peak_tflops:
                     rec["mfu"] = rec["tflops"] / self.peak_tflops
+                if self._spine_stats:
+                    rec.update(spine.spine_stats(self.model))
                 if self.norms:
                     sample = self.norms.sample(self.step, lr, self.args.weight_decay)  # 61 norms in one device->host transfer
                     rec.update(self.norms.record(sample))

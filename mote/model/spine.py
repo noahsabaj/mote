@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -312,12 +312,93 @@ class StreamExpand(nn.Module):
             if p is not None:
                 p._no_weight_decay = True
                 p._no_muon = True
+        # Stream collapse (2606.03483) is an ACTIVATION property: a trained mHC concentrates into one
+        # dominant stream, and the model still trains, so nothing in the loss reports it. The only
+        # place every stream is simultaneously visible is the collapse, and a full reduction over
+        # [B, L, n, d] is not free at 16384 — so it is sampled on logging steps, not every step.
+        self.collect = False
+        self.last_rms: Optional[torch.Tensor] = None
+        self.last_cos: Optional[torch.Tensor] = None
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         x = h.float().unsqueeze(-2) if self.mode == "expand" else h.float().unflatten(-1, (self.n, self.d_stream))
         return x * self.scale
 
     def collapse(self, x: torch.Tensor) -> torch.Tensor:
+        if self.collect:
+            with torch.no_grad():
+                xf = x.float()
+                self.last_rms = xf.pow(2).mean(-1).flatten(0, -2).mean(0).sqrt().detach()
+                # Per-stream norm has a compressed range and is the wrong headline: a starved stream
+                # still sits at RMS ~1 because a near-identity H_res carries its initial state
+                # forward, so a maximally starved stack reads only ~1.5x a healthy one. What
+                # 2606.03483 actually reports is REDUNDANCY — the streams stop being distinct — and
+                # that is a cosine, with the full range. Gram matrix rather than a normalised copy of
+                # x: [.., n, n] is kilobytes where a copy of x is 134 MB at 16384.
+                g = torch.einsum("...id,...jd->...ij", xf, xf)
+                dg = torch.diagonal(g, dim1=-2, dim2=-1).clamp_min(1e-12)
+                cos = g / (dg.unsqueeze(-1).sqrt() * dg.unsqueeze(-2).sqrt())
+                n = cos.shape[-1]
+                off = ~torch.eye(n, dtype=torch.bool, device=cos.device)
+                self.last_cos = cos.flatten(0, -3)[:, off].mean().detach()
         if self.mode == "frac":
             return x.flatten(-2)
         return torch.einsum("...nd,n->...d", x.float(), self.read_out.float().softmax(-1))
+
+
+def spine_stats(model) -> Dict[str, Any]:
+    """Diagnostics for the two ways a hyper-connection stack fails quietly.
+
+    STREAM COLLAPSE — the streams stop being distinct and one carries everything. Read from the
+    activation (`stream_rms`, and `stream_spread` = max/min over streams) and from the learned
+    read-out (`read_out_max`: 1/n is a uniform read, 1.0 means only one stream is ever read).
+
+    IDENTITY DEGENERATION — H_res never leaves the identity, so no cross-stream mixing happens and
+    the spine is an expensive plain residual. This is what sHC's spectral sphere exists to prevent
+    and what mHC's non-negativity causes, so it is the diagnostic that decides A3. `h_res_drift` is
+    ||H_res - I||_F of each site's STATIC mixer; `alpha_res` is the gate on the dynamic part, which
+    starts at 0.01 and says whether the per-token generator ever engaged.
+
+    Everything except `stream_rms` is read from parameters, so it costs nothing.
+    """
+    streams = [m for m in model.modules() if isinstance(m, StreamExpand)]
+    spines = [m for m in model.modules() if isinstance(m, Spine)]
+    if not spines:
+        return {}
+    out: Dict[str, Any] = {"spine_sites": len(spines)}
+    if streams:
+        st = streams[0]
+        if st.last_rms is not None:
+            r = st.last_rms.tolist()
+            out["stream_rms"] = [round(v, 5) for v in r]
+            out["stream_spread"] = round(max(r) / max(min(r), 1e-12), 4)
+        if st.last_cos is not None:
+            # 1.0 = every stream carries the same vector, which is the degenerate case HC starts in
+            # and has to train its way out of. Falling is the healthy direction.
+            out["stream_cos"] = round(float(st.last_cos), 5)
+        if st.read_out is not None:
+            w = st.read_out.detach().float().softmax(-1)
+            out["read_out_max"] = round(float(w.max()), 4)
+        sc = st.scale.detach().float()
+        rows = sc.pow(2).mean(-1).sqrt()
+        out["lss_spread"] = round(float(rows.max() / rows.clamp_min(1e-12).min()), 4)
+    drift, alpha = [], []
+    with torch.no_grad():
+        for sp in spines:
+            h = sp.res_mixer(sp.b_res.detach().float())
+            eye = torch.eye(sp.n, device=h.device, dtype=h.dtype)
+            drift.append(float((h - eye).norm()))
+            alpha.append(float(sp.alpha.detach()[2]))
+    out["h_res_drift"] = round(sum(drift) / len(drift), 5)
+    out["h_res_drift_max"] = round(max(drift), 5)
+    out["alpha_res"] = round(sum(alpha) / len(alpha), 5)
+    return out
+
+
+def set_stream_collect(model, on: bool) -> None:
+    """Arm the activation sample for the next forward. The trainer turns it on for logging steps."""
+    for m in model.modules():
+        if isinstance(m, StreamExpand):
+            m.collect = on
+            if not on:
+                m.last_rms = m.last_cos = None
