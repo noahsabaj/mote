@@ -59,6 +59,17 @@ class RoutingModule(nn.Module):
             self.k_proj_layer.weight.copy_(torch.eye(d_model))
         self.q_proj_layer.weight._no_reinit = True
         self.k_proj_layer.weight._no_reinit = True
+        # Bounded routing + the decode threshold. `target_ratio` is the live N (the trainer sets it
+        # every step from the ATDC schedule); `bound_*` come from the config and default to off, so a
+        # model that declares nothing routes exactly as it did before 2026-08-27.
+        self.target_ratio: float = 5.0
+        self.bound_floor: int = 0
+        self.bound_ceiling: Optional[float] = None
+        self.decode_threshold: float = 0.5
+        # Below this many positions a "budget" is not a meaningful quantity — a 3-byte speculative
+        # round would be forced to produce one boundary. Prefill windows are thousands of bytes; the
+        # short continuations (drafts, tool-result injection) fall under it and route unbounded.
+        self.bound_min_len: int = 64
 
     def allocate_inference_cache(self, batch_size: int, device, dtype=None) -> RoutingState:
         return RoutingState(
@@ -85,6 +96,8 @@ class RoutingModule(nn.Module):
         boundary_prob = torch.stack([1 - p, p], dim=-1)
         selected_idx = boundary_prob.argmax(dim=-1)
         boundary_mask = (selected_idx == 1) & mask
+        boundary_mask = self._bound(boundary_mask, p, mask)
+        selected_idx = boundary_mask.long()
         if state is not None:
             has = mask.any(dim=-1)
             state.has_seen_tokens.copy_(has | state.has_seen_tokens)
@@ -94,6 +107,20 @@ class RoutingModule(nn.Module):
             )
         selected_probs = boundary_prob.gather(-1, selected_idx.unsqueeze(-1))
         return RoutingOutput(boundary_prob, boundary_mask, selected_probs)
+
+    def _bound(self, boundary_mask: torch.Tensor, p: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Project the mask onto this router's token budget, when one is configured and the window is
+        long enough for it to mean anything."""
+        if self.bound_ceiling is None and self.bound_floor <= 0:
+            return boundary_mask
+        if boundary_mask.shape[-1] < self.bound_min_len:
+            return boundary_mask
+        valid = mask.sum(dim=-1)
+        target = valid.float() / max(float(self.target_ratio), 1e-6)  # K = tau * L, tau = 1/N
+        k_max = ((target * self.bound_ceiling).ceil().long() if self.bound_ceiling is not None
+                 else torch.full_like(valid, boundary_mask.shape[-1]))
+        k_min = torch.full_like(valid, int(self.bound_floor)).clamp(max=boundary_mask.shape[-1])
+        return project_boundaries(boundary_mask, p, mask, k_min, torch.maximum(k_max, k_min))
 
     def step(self, hidden: torch.Tensor, state: RoutingState) -> RoutingOutput:
         # hidden: [B, 1, D]
@@ -105,7 +132,46 @@ class RoutingModule(nn.Module):
         p = torch.where(state.has_seen_tokens, p, torch.ones_like(p))
         state.has_seen_tokens.fill_(True)
         boundary_prob = torch.stack([1 - p, p], dim=-1)  # [B, 2]
-        return RoutingOutput(boundary_prob, boundary_prob[..., 1] > 0.5, boundary_prob.max(dim=-1).values.unsqueeze(-1))
+        # One byte, no sequence to project over: decode keeps a plain threshold. 0.5 is H-Net's
+        # (cos_sim < 0), and a bounded-routing run calibrates this to the rate its projection
+        # actually produced — see config.py::DCCfg.decode_threshold.
+        sel = boundary_prob[..., 1] > self.decode_threshold
+        return RoutingOutput(boundary_prob, sel, boundary_prob.max(dim=-1).values.unsqueeze(-1))
+
+
+def project_boundaries(boundary_mask: torch.Tensor, p: torch.Tensor, mask: torch.Tensor,
+                       k_min: torch.Tensor, k_max: torch.Tensor) -> torch.Tensor:
+    """Bounded routing (GeneZip 2602.17739 §3.3): flip the fewest boundary decisions, by confidence,
+    to land each row's boundary count inside [k_min, k_max].
+
+    The paper states it as two cases — "if too few boundaries are selected, activate the largest-p
+    inactive positions; if too many, deactivate the smallest-p active positions" — and both collapse
+    into ONE ranking. Score every valid position by p, with a constant offset that puts every active
+    position above every inactive one, then keep the top k where k is the original count clamped to
+    the interval:
+
+        too many   k = k_max   keeps the k_max highest-confidence actives, drops the rest
+        too few    k = k_min   keeps every active (they all outrank inactives) and promotes the
+                               highest-confidence inactives to make up the deficit
+        in range   k = n       the ranking is a no-op and the router's own decision stands
+
+    Mote's first position always carries p = 1.0 (dc.py pads it), so it can never be the one dropped,
+    which is the paper's "the first position in each segment is always kept" for free.
+
+    No gradient flows here and none is lost: `boundary_mask` is a bool tensor with no grad path
+    already (see ratio_loss), and the differentiable half of chunking runs through `boundary_prob`.
+    """
+    b = boundary_mask & mask
+    n = b.sum(dim=-1)
+    k = torch.minimum(torch.maximum(n, k_min), k_max).clamp(min=0)
+    if bool((k == n).all()):
+        return b
+    score = torch.where(b, p + 2.0, p)  # every active outranks every inactive
+    score = torch.where(mask, score, torch.full_like(score, -1e9))
+    order = score.argsort(dim=-1, descending=True, stable=True)
+    rank = torch.empty_like(order)
+    rank.scatter_(-1, order, torch.arange(order.shape[-1], device=order.device).expand_as(order))
+    return (rank < k.unsqueeze(-1)) & mask
 
 
 class ChunkLayer(nn.Module):
@@ -281,15 +347,36 @@ def ratio_loss(boundary_prob: torch.Tensor, boundary_mask: torch.Tensor, mask: t
     return (N / (N - 1.0)) * ((N - 1.0) * Fsel * G + (1.0 - Fsel) * (1.0 - G))
 
 
-def atdc_target_ratio(step: int, total_steps: int, n_init: float, n_final: float, warmup_frac: float) -> float:
-    """Hold N_init for warmup_frac of training, then ramp linearly to N_final (ATDC schedule)."""
+def atdc_target_ratio(step: int, total_steps: int, n_init: float, n_final: float, warmup_frac: float,
+                      loss_window: Optional[float] = None, threshold: Optional[float] = None,
+                      rate: float = 1.05) -> float:
+    """ATDC's compression target at `step` (2605.30080, Alg. 1).
+
+    Lines 4-9 are the schedule: hold N_init for `warmup_frac` of training, then ramp linearly to
+    N_final. Mote shipped only that half until 2026-08-27, so N rose on wall-clock whether or not the
+    model was coping with the compression it already had.
+
+    Lines 10-15 are the trigger this adds: once a window of `adapt_window` steps has filled, N is
+    boosted by `rate` (γ, the paper's 1.05) while the windowed mean LM loss sits under `threshold`
+    (τ). The paper calls τ a "proficiency trigger" and sets it from a baseline run — the loss where
+    the curve begins to plateau — with the warning that too high triggers premature compression and
+    routing instability, too low never fires at all. `threshold=None` disables it, which is what
+    every run before this date did implicitly.
+
+    This moves the TARGET. It does not move the achieved rate by anything like the same amount: the
+    ratio loss has no gradient path to the segmentation rate (see `ratio_loss`), and the paper's own
+    ablation bought 0.57 BPIC for 2.0 of N. `project_boundaries` is the lever with a guarantee."""
     if total_steps <= 0:
         return n_init
     tw = int(total_steps * warmup_frac)
     if step < tw or total_steps <= tw:
-        return n_init
-    rho = min((step - tw) / max(total_steps - tw, 1), 1.0)
-    return n_init + rho * (n_final - n_init)
+        n = n_init
+    else:
+        rho = min((step - tw) / max(total_steps - tw, 1), 1.0)
+        n = n_init + rho * (n_final - n_init)
+    if threshold is not None and loss_window is not None and loss_window < threshold:
+        n *= rate
+    return n
 
 
 def bytes_per_chunk(boundary_mask: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

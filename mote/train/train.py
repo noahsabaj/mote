@@ -14,6 +14,7 @@ sample), JSONL logging, atomic checkpoints every N minutes with auto-resume, and
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 import math
 import os
@@ -257,6 +258,7 @@ def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, 
     model.eval()
     tot_nll, tot_tok, tot_bytes, tot_chunks, mbp_correct, mbp_tot = 0.0, 0, 0, 0, 0, 0
     word_hits, boundary_count = 0, 0
+    bp_all = []
     moe_loads, moe_batches = {}, 0
     for batch, lmask in shard.sequential_batches(batch_size, seq_len, max_batches, spread=spread):
         batch = batch.to(device, non_blocking=True)
@@ -275,6 +277,12 @@ def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, 
         bm = out.routing.boundary_mask
         tot_bytes += bm.numel()
         tot_chunks += bm.sum().item()
+        # The p at which a plain threshold would reproduce this run's own boundary rate. Decode sees
+        # one byte and has no sequence to project over (signed 2026-08-27), so it thresholds; under
+        # bounded routing the projection has already moved the rate away from the p > 0.5 the router
+        # would have picked, and this is the number that puts decode back on the same rate. It equals
+        # 0.5 exactly when nothing bound.
+        bp_all.append(out.routing.boundary_prob[..., 1].detach().float().flatten().cpu())
         # boundary/word alignment (excluding position 0): a boundary is "word-aligned" if its previous byte is a
         # separator (space/newline/punct) OR the boundary byte itself is one (chunks that start with the space).
         def sep(t):
@@ -299,6 +307,10 @@ def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, 
         "target_ratio": target_ratio,
         "boundary_on_separator_frac": word_hits / max(boundary_count, 1),
     }
+    if bp_all:
+        p_all = torch.cat(bp_all)
+        rate = tot_chunks / max(tot_bytes, 1)  # the fraction of positions that ended up boundaries
+        res["val_decode_threshold"] = float(torch.quantile(p_all, max(1.0 - rate, 0.0)))
     if mbp_tot:
         res["mbp_top1_acc"] = mbp_correct / mbp_tot
     if moe_loads:
@@ -465,6 +477,10 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--jepa-weight", type=float, default=0.05, help="weight of the JEPA aux loss")
     ap.add_argument("--no-flash", action="store_true", help="A/B: materialized Relation instead of the Triton kernel")
     ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
+    ap.add_argument("--adapt-threshold", type=float, default=None, help="ATDC's proficiency trigger tau (2605.30080 Alg. 1): raise the target ratio by --adapt-rate while the windowed mean LM loss is below this. Mote shipped the paper's schedule without this trigger until 2026-08-27; None keeps it off")
+    ap.add_argument("--adapt-rate", type=float, default=None, help="ATDC's gamma, the boost applied when the trigger fires (paper: 1.05)")
+    ap.add_argument("--bound-ceiling", type=float, default=None, help="bounded routing (GeneZip 2602.17739): cap boundaries per window at this multiple of the target rate L/N. A GUARDRAIL at loose values (the arena can then never overflow its capacity); tightening it toward 1.0 makes it a compression-rate controller, which is past the paper's evidence and wants its own A/B")
+    ap.add_argument("--bound-floor", type=int, default=None, help="bounded routing: minimum boundaries per window (the paper's K_min=8 keeps the router from collapsing)")
     ap.add_argument("--schedule", default="wsd", choices=["wsd", "trunk", "branch", "constant", "cooldown"], help="wsd: warmup-stable-decay over the budget (lab arms); trunk: warmup then constant, never decays (the flagship trunk); branch: constant for 80%% then decay to --min-lr-ratio (a mid-training branch off a trunk snapshot); constant: the same branch without the decay, the other arm of the 2x2. `cooldown` is a deprecated alias for `branch`. docs/shape.md § mid")
     ap.add_argument("--min-lr-ratio", type=float, default=None, help="where a decay lands, as a fraction of --lr. Default depends on the schedule: 0 for a branch (straight to zero — Bergsma 2502.15938, and 2602.06797's optimal schedules also terminate at 0), 0.1 for wsd, which every lab arm to date was run with and must stay comparable to.")
     ap.add_argument("--snapshot-steps", type=int, default=0, help="also keep a weights-only snap_<step>.pt every N steps (the branch points for the mid-training branches)")
@@ -515,6 +531,14 @@ class Trainer:
             cfg.dc.ratio_loss_weight = args.ratio_weight
         if args.target_ratio is not None:
             cfg.dc.target_ratio_init, cfg.dc.target_ratio_final = args.target_ratio
+        if args.adapt_threshold is not None:
+            cfg.dc.adapt_threshold = args.adapt_threshold
+        if args.adapt_rate is not None:
+            cfg.dc.adapt_rate = args.adapt_rate
+        if args.bound_ceiling is not None:
+            cfg.dc.bound_ceiling = args.bound_ceiling
+        if args.bound_floor is not None:
+            cfg.dc.bound_floor = args.bound_floor
         (out_dir / "run.json").write_text(json.dumps(
             {**vars(args), "determinism": determinism.state(), "code": mote.CODE_VERSION,
              "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
@@ -575,6 +599,8 @@ class Trainer:
         # finished config, so resumes were right and only the file on disk was wrong.
         cfg.save(out_dir / "config.json")
         self.cfg = cfg
+        # ATDC's proficiency trigger (2605.30080 Alg. 1 line 11) averages this window of LM loss
+        self._loss_window: deque = deque(maxlen=max(int(cfg.dc.adapt_window), 1))
         self.model = model = HNetForCausalLM(cfg, device=device)
         if args.ckpt_main:
             model.main_network.grad_checkpoint = True
@@ -881,7 +907,14 @@ class Trainer:
             if args.schedule in BRANCH_SCHEDULES:
                 target_ratio = cfg.dc.target_ratio_final
             else:
-                target_ratio = atdc_target_ratio(sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final, cfg.dc.schedule_warmup_frac)
+                target_ratio = atdc_target_ratio(
+                    sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final,
+                    cfg.dc.schedule_warmup_frac,
+                    loss_window=(sum(self._loss_window) / len(self._loss_window)
+                                 if len(self._loss_window) >= cfg.dc.adapt_window else None),
+                    threshold=cfg.dc.adapt_threshold, rate=cfg.dc.adapt_rate)
+            # the router prices its own budget off the live target (mote/model/dc.py::_bound)
+            self.model.routing_module.target_ratio = target_ratio
             lr = schedule_lr(args.schedule, sched_step, horizon, args.lr, min_ratio=self.min_lr_ratio,
                              decay_frac=args.branch_decay_frac)
             set_lr(self.opt, lr)
@@ -894,6 +927,7 @@ class Trainer:
             if self._spine_stats:
                 spine.set_stream_collect(self.model, (self.step + 1) % args.log_every == 0)
             stats = yield from self._train_step(target_ratio)
+            self._loss_window.append(float(stats["ce"]))  # ATDC's proficiency trigger reads this window
             self.step += 1
             if args.snapshot_steps and self.step // args.snapshot_steps > snap_idx:
                 snap_idx = self.step // args.snapshot_steps
