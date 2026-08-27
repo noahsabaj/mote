@@ -33,6 +33,7 @@ from ..data.loader import ByteShard, MixedShard
 from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.moe import collect_moe, moe_modules
 from ..model import spine
+from .. import determinism
 from .flops import _n as _n_active
 from ..model.hnet import HNetForCausalLM
 from ..tokenizer import OFFSET_ID, ByteTokenizer
@@ -432,6 +433,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--mbp-gamma", type=float, default=None, help="position weighting exp(-offset/\u03b3) on the head loss (0 = off)")
     ap.add_argument("--mbp-transition", action="store_true", help="add the V\u00d7V byte-transition bias to the head (DSpark Markov head)")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--fast", action="store_true", help="give up bitwise reproducibility for ~20 %% throughput. Runs are reproducible by default: cuBLAS pinned to a fixed workspace plus the two-pass Relation backward, which together are the whole story (mote/determinism.py). A `--fast` number and a default number are not comparable, so the mode is recorded in run.json")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--sft", action="store_true", help="train on an SFT shard (assistant-byte loss mask)")
     ap.add_argument("--init-from", default=None, help="checkpoint to initialize weights from (e.g. pretrain -> SFT)")
@@ -489,6 +491,9 @@ class Trainer:
     def __init__(self, argv_or_args=None):
         args = build_argparser().parse_args(argv_or_args) if (argv_or_args is None or isinstance(argv_or_args, list)) else argv_or_args
         self.args = args
+        # Before any CUDA work. In the resident daemon this is process state shared with serving,
+        # so close() puts it back — a --fast job must not leave the next one non-reproducible.
+        determinism.apply(not args.fast)
         torch.manual_seed(args.seed)
         self.device = device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.out_dir = out_dir = Path(args.out)
@@ -508,7 +513,9 @@ class Trainer:
             cfg.dc.ratio_loss_weight = args.ratio_weight
         if args.target_ratio is not None:
             cfg.dc.target_ratio_init, cfg.dc.target_ratio_final = args.target_ratio
-        (out_dir / "run.json").write_text(json.dumps({**vars(args), "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
+        (out_dir / "run.json").write_text(json.dumps(
+            {**vars(args), "determinism": determinism.state(),
+             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
 
         if args.bucket is not None:
             cfg.dc.chunk_bucket = args.bucket
@@ -949,6 +956,7 @@ class Trainer:
 
     def close(self):
         self.log_f.close()
+        determinism.apply(True)  # restore the default for whatever runs next in this process
 
 
 def main(argv=None):
