@@ -49,18 +49,27 @@ def test_the_default_is_bitwise_reproducible():
 
 
 @cuda
-def test_fast_mode_is_not_reproducible_and_that_is_the_trade():
-    """If this ever passes, --fast has stopped costing anything and the default should be revisited.
-    The atomics in the Relation backward are what it is buying back."""
+def test_fast_mode_gives_up_what_the_default_guarantees():
+    """The canary: if --fast ever reproduces reliably, it has stopped costing anything and the
+    default should be revisited.
+
+    Asserted over repeats rather than once, and the asymmetry is the point. The default GUARANTEES
+    identical gradients, so one trial proves it. Fast mode only makes divergence LIKELY — atomics
+    usually collide but are not obliged to on any given pass — so a single trial makes this test
+    flaky, which is exactly how it failed the first time it was run in a full suite."""
     determinism.apply(False)
     try:
-        a, la = _grads()
-        b, lb = _grads()
-        assert la == lb, "the forward is deterministic either way; only the backward is at issue"
-        differing = sum(1 for k in a if not torch.equal(a[k], b[k]))
+        differed = 0
+        for trial in range(3):
+            a, la = _grads(seed=trial)
+            b, lb = _grads(seed=trial)
+            assert la == lb, "the forward is deterministic either way; only the backward is at issue"
+            if any(not torch.equal(a[k], b[k]) for k in a):
+                differed += 1
     finally:
         determinism.apply(True)
-    assert differing > 0, "fast mode reproduced exactly — measure it again before trusting this"
+    assert differed > 0, ("fast mode reproduced exactly in 3 of 3 trials — either the atomics stopped "
+                          "colliding at this size, or --fast is now free and the default is worth revisiting")
 
 
 @cuda
