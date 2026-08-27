@@ -92,7 +92,7 @@ def main(argv=None):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
+    ck = torch.load(args.init_from, map_location="cpu", weights_only=True)
     cfg = MoteConfig.from_dict(ck["config"])
     policy = HNetForCausalLM(cfg, device=device)
     policy.load_state_dict(ck["model"])

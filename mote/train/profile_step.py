@@ -67,7 +67,7 @@ def main(argv=None):
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg, device=device)  # fp32 parameters under autocast, exactly like the trainer
     if args.init_from:
-        ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        ck = torch.load(args.init_from, map_location="cpu", weights_only=True)
         cfg = MoteConfig.from_dict(ck["config"])
         if args.bucket is not None:
             cfg.dc.chunk_bucket = args.bucket

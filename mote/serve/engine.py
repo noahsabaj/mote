@@ -140,7 +140,7 @@ def _sample(logits: torch.Tensor, temperature: float, top_p: float):
 class Engine:
     def __init__(self, ckpt_path: str | Path, device: Optional[str] = None, prefix_cache_mb: Optional[int] = None,
                  released: bool = False):
-        ck = torch.load(Path(ckpt_path), map_location="cpu", weights_only=False)
+        ck = torch.load(Path(ckpt_path), map_location="cpu", weights_only=True)
         cfg = MoteConfig.from_dict(ck["config"])
         model = HNetForCausalLM(cfg)
         model.load_state_dict(ck["model"])

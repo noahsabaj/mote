@@ -83,7 +83,7 @@ def endpoint_elr(run: Path, lr: float) -> Optional[float]:
     ck = Path(run) / "last.pt"
     if not ck.exists():
         return None
-    sd = torch.load(ck, map_location="cpu", weights_only=False)
+    sd = torch.load(ck, map_location="cpu", weights_only=True)
     for k in ("model", "state_dict", "ema", "weights"):
         if isinstance(sd, dict) and k in sd and isinstance(sd[k], dict):
             sd = sd[k]

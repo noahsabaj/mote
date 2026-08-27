@@ -248,7 +248,7 @@ def _checkpoint_row(p: Path) -> dict:
     if hit and hit[0] == key:
         return hit[1]
     try:
-        ck = torch.load(p, map_location="cpu", weights_only=False, mmap=True)
+        ck = torch.load(p, map_location="cpu", weights_only=True, mmap=True)
         step = int(ck.get("step", 0))
     except Exception:
         step = -1

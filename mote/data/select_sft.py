@@ -42,7 +42,7 @@ from .loader import ByteShard
 
 
 def _load(path: str, device) -> HNetForCausalLM:
-    ck = torch.load(path, map_location="cpu", weights_only=False)
+    ck = torch.load(path, map_location="cpu", weights_only=True)
     model = HNetForCausalLM(MoteConfig.from_dict(ck["config"]), device=device)
     model.load_state_dict(ck["model"])
     model.eval()

@@ -193,7 +193,7 @@ class RlvrTrainer:
         (out_dir / "run.json").write_text(json.dumps({**vars(args), "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
         torch.manual_seed(args.seed)
         self.rng = random.Random(args.seed)
-        ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        ck = torch.load(args.init_from, map_location="cpu", weights_only=True)
         self.cfg = MoteConfig.from_dict(ck["config"])
         self.model = HNetForCausalLM(self.cfg, device=device)
         self.model.load_state_dict(ck["model"])

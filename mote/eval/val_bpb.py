@@ -34,7 +34,7 @@ def raw_shard(path: Path) -> ByteShard:
 
 
 def load_model(checkpoint: str | Path, device: torch.device):
-    ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    ck = torch.load(checkpoint, map_location="cpu", weights_only=True)
     cfg = MoteConfig.from_dict(ck["config"])
     model = HNetForCausalLM(cfg, device=device)
     model.load_state_dict(ck["model"])

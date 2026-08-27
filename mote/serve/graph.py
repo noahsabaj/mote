@@ -21,14 +21,19 @@ for models without a multi-byte head (the flagship); the 35M's speculative round
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
 from ..model.arena import ArenaLayer, RelationArena
+
+# Kernel annotations inside a capture: useful when reading a trace, not worth the capture cost
+# on every chunk bucket during normal serving. MOTE_GRAPH_ANNOTATE=1 turns them on.
+ANNOTATE = os.environ.get("MOTE_GRAPH_ANNOTATE") == "1"
 from ..model.hnet import HNetForCausalLM, InferenceState
 from ..model.mamba3 import Mamba3Mixer
 from ..model.relation import FullRelation, _rotate_half
@@ -277,10 +282,38 @@ class GraphDecoder:
                 self._warmup(Cb)
             g = torch.cuda.CUDAGraph()
             g.register_generator_state(self.gen)
-            with torch.cuda.graph(g, pool=self.pool):
+            # enable_annotations (torch 2.12) tags each kernel inside the capture, so a replayed
+            # graph shows up in Perfetto as named kernels instead of an anonymous block. Off by
+            # default: it costs capture time, and every decode path recaptures per chunk bucket.
+            with torch.cuda.graph(g, pool=self.pool, enable_annotations=ANNOTATE):
                 self._body(Cb, capturing=True)
             self.graphs[key] = g
         return g
+
+    def graph_topology(self, Cb: Optional[int] = None) -> Dict[str, Any]:
+        """What is actually inside a capture (torch 2.13's CUDAGraph.get_graph_data).
+
+        Node types, kernel names and dependency edges, with ids remapped to match CUPTI's output —
+        so a captured graph can be lined up against a profile instead of guessed at. This is the
+        readout for the class of bug where a capture silently serialises, or holds a kernel nobody
+        expected: previously that meant reading the trace and inferring.
+        """
+        keys = [k for k in self.graphs if Cb is None or k[0] == Cb]
+        out: Dict[str, Any] = {}
+        for k in keys:
+            try:
+                data = self.graphs[k].get_graph_data()
+            except Exception as e:  # the API is new; never let a debug path break serving
+                out[f"Cb={k[0]}"] = {"error": f"{type(e).__name__}: {e}"}
+                continue
+            nodes = data.get("nodes", data) if isinstance(data, dict) else data
+            kinds: Dict[str, int] = {}
+            for n in (nodes if isinstance(nodes, (list, tuple)) else []):
+                t = (n.get("type") if isinstance(n, dict) else None) or "?"
+                kinds[t] = kinds.get(t, 0) + 1
+            out[f"Cb={k[0]}"] = {"nodes": len(nodes) if hasattr(nodes, "__len__") else None,
+                                 "by_type": kinds, "raw_keys": sorted(data) if isinstance(data, dict) else None}
+        return out
 
     def invalidate(self) -> None:
         """Drop every capture (weights swapped into a rebuilt model, arena reallocated)."""

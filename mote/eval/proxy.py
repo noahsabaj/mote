@@ -266,7 +266,7 @@ def main(argv=None):
         from ..config import MoteConfig  # noqa: F401  (load_model reads it; card needs the param count)
         from ..serve.identity import identity_card
 
-        ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        ck = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
         card = identity_card(sum(v.numel() for v in ck["model"].values()))
     res = run(args.checkpoint, items, dev, card)
     out = Path(args.out) if args.out else Path(args.checkpoint).parent / "proxy.json"

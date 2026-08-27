@@ -178,3 +178,22 @@ def test_engine_graph_path_equals_eager_path(tmp_path, monkeypatch):
     evs2 = run_(eng)
     start = next(e for e in evs2 if e["type"] == "start")
     assert start["prefix"]["reused"] > 0
+
+
+def test_graph_topology_degrades_instead_of_breaking_serving():
+    """CUDAGraph.get_graph_data needs cuda-bindings >= 13.1, which the cu126 stack does not have.
+    A debug readout must never be able to take serving down, so it reports the failure as data."""
+    import torch
+
+    from mote.serve.graph import ANNOTATE, GraphDecoder
+
+    assert ANNOTATE is False, "annotations cost capture time; they are opt-in via MOTE_GRAPH_ANNOTATE"
+    if not torch.cuda.is_available():
+        return
+    d = GraphDecoder.__new__(GraphDecoder)  # no model needed: only the graphs dict is read
+    g = torch.cuda.CUDAGraph()
+    d.graphs = {(64, 0): g}
+    out = d.graph_topology()
+    assert set(out) == {"Cb=64"}
+    row = out["Cb=64"]
+    assert "error" in row or "nodes" in row, f"neither a readout nor a reported failure: {row}"

@@ -331,6 +331,11 @@ def chunk_sample(model: HNetForCausalLM, text: str, device) -> str:
 # --------------------------------------------------------------------------------------
 def save_checkpoint(path: Path, model, opt, step: int, cfg: MoteConfig, extra: Dict):
     tmp = path.with_suffix(".tmp")
+    # Everything here is tensors and plain Python, which is what lets every reader use
+    # torch.load(weights_only=True) — the safe loader, and the default since 2.6. We had been
+    # opting out of it at all twelve load sites for no reason: a .pt is a pickle, and this repo is
+    # public. If a future field ever needs a real class, register it with
+    # torch.serialization.add_safe_globals rather than turning the flag back off.
     torch.save({"model": model.state_dict(), "optimizer": opt.state_dict(), "step": step, "config": cfg.to_dict(), "extra": extra}, tmp)
     os.replace(tmp, path)
 
@@ -378,7 +383,7 @@ def pad_vocab_rows(sd: Dict, model) -> Dict:
 def load_checkpoint(path: Path, model, opt=None, ck: Optional[Dict] = None):
     """`ck`: the checkpoint if the caller already read it (a resume reads it first for its config)."""
     if ck is None:
-        ck = torch.load(path, map_location="cpu", weights_only=False)
+        ck = torch.load(path, map_location="cpu", weights_only=True)
     model.load_state_dict(pad_vocab_rows(ck["model"], model))
     if opt is not None and "optimizer" in ck:
         opt.load_state_dict(ck["optimizer"])
@@ -494,7 +499,7 @@ class Trainer:
             # A resume continues the run as it was built: the checkpoint's own config beats today's preset
             # defaults AND the run's config.json — a resume that failed under a new default had already
             # rewritten config.json with that default (2026-08-24: 264 -> 272 vocab rows, twice).
-            self._resume_ck = torch.load(out_dir / "last.pt", map_location="cpu", weights_only=False)
+            self._resume_ck = torch.load(out_dir / "last.pt", map_location="cpu", weights_only=True)
             cfg = MoteConfig.from_dict(self._resume_ck["config"])
         else:
             cfg = MoteConfig.load(args.config) if args.config else resolve_preset(args.preset)
