@@ -84,7 +84,7 @@ mechanism is reported in ELR, not in nominal lr. And every run carries `--norm-g
 if ‖W‖_F falls while the lr is flat — the `lr_sweep_12e-4` signature, whose norm ended below a 0.67×-lr
 arm's — the run stops gracefully and **the whole queue halts** until `mote train release`.
 
-## Flagship config FROZEN (2026-08-24)
+## Mote-96M config FROZEN (2026-08-24)
 
 All gates read. **Muon** (1.177 vs Muon-SW 1.180 — *reopened 2026-08-26: that gap is inside the ELR
 difference between the two, see above*); **lr 8e-4** (1.716/1.707/1.693/1.935 across
@@ -95,6 +95,35 @@ no window kernel gets built); head off; EMA 0.999; batch 1 x accum 4 @ 16384; fu
 (68.1 KB/s @ 4.31 GB). Data: 10 GB FLAGSHIP mix + per-domain val shards (data/flagship_val/).
 Launch gated on the pre-launch queue (JEPA round 1+2, attention ablation, seed-noise calibration)
 and Noah's word.
+
+## Model names (2026-08-26)
+
+Presets are named by their parameter count: **Mote-1M / Mote-13M / Mote-35M / Mote-96M / Mote-138M**
+(`mote/config.py`). Role names rotted — `local` runs on the L4 too, and `flagship` stopped being the
+flagship the moment Mote-138M existed — so `smoke`/`pilot`/`local`/`flagship` survive only as
+aliases, because ten queued jobs carry them in argv. MoE variants are `Mote-<total>M-A<activated>M`.
+Runs go under `runs/<model>/<experiment>-<arm>`; the existing flat directories stay as dated records.
+
+## The hyper-connection spine (signed 2026-08-26)
+
+One n-stream residual at **byte** resolution, seven sites: the three encoder sublayers, the whole
+chunk stage, the three decoder sublayers. The main network keeps its own plain residual inside —
+different width, different resolution — so the spine is 7 sites deep whatever the main stack does,
+and taking Mote-96M to Mote-138M by depth does not reopen the stability question.
+
+`H_res = J + H_disp` with `‖H_disp‖₂ ≤ 1` (sHC 2603.20896), not the Birkhoff polytope: mHC's
+constraint is an affine part (which conserves the mean, and is what you want) intersected with
+non-negativity (which buys the norm bound, and is what costs you — four groups measure identity
+degeneration, spectral stalling and one dominant stream). `B_n ⊂ S_n`, so nothing is given up.
+`--spine-project` makes every variant in the literature a control arm. `residual_proj` is subsumed
+by the chunk-stage site's `H_post`, which also retires the model's only zero-norm parameter.
+
+Cost at Mote-138M: **frac n=4** +86 K params and **+0 GB**; **expand n=4** +244 K and +0.66 GB
+(~5.70 of 8.0). The risk is not memory — 7 of 42 sublayers leave the fused `rms_norm_fn` path and
+carry 42 % of residual elements, which is what the fused spine kernel is for.
+
+Gate: `scripts/spine_gate.sh`, ELR-matched on shared parameters. Full reading and the three things
+measurement changed: `docs/research/spine-2026-08-26.md`.
 
 ## Training pipeline: pre / mid / post (grilled and signed 2026-08-24)
 
