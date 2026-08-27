@@ -91,3 +91,19 @@ def test_the_trainer_defaults_to_reproducible():
 
     a = build_argparser().parse_args(["--data", "data/local_mix", "--out", "runs/_x"])
     assert a.fast is False, "reproducible is the default; --fast is the opt-out"
+
+
+def test_runs_record_the_commit_the_worker_actually_loaded():
+    """The daemon runs jobs in-process and never reloads modules, so a job executes whatever was
+    imported when the worker started — and service_run respawns the worker on exit, so a crash
+    mid-queue can bring it back on different code with nothing recording it. CODE_VERSION is frozen
+    at import for exactly that reason; reading HEAD at job start would report the wrong number."""
+    import mote
+
+    cv = mote.CODE_VERSION
+    assert cv["version"] == mote.__version__
+    if "commit" in cv:  # absent in a checkout without git, which must not fail a run
+        assert len(cv["commit"]) == 12 and all(c in "0123456789abcdef" for c in cv["commit"])
+        assert isinstance(cv["dirty"], bool)
+    # frozen, not re-read: a second access must not go back to git
+    assert mote.CODE_VERSION is cv

@@ -33,6 +33,8 @@ from ..data.loader import ByteShard, MixedShard
 from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.moe import collect_moe, moe_modules
 from ..model import spine
+import mote
+
 from .. import determinism
 from .flops import _n as _n_active
 from ..model.hnet import HNetForCausalLM
@@ -514,7 +516,7 @@ class Trainer:
         if args.target_ratio is not None:
             cfg.dc.target_ratio_init, cfg.dc.target_ratio_final = args.target_ratio
         (out_dir / "run.json").write_text(json.dumps(
-            {**vars(args), "determinism": determinism.state(),
+            {**vars(args), "determinism": determinism.state(), "code": mote.CODE_VERSION,
              "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
 
         if args.bucket is not None:
