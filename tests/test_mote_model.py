@@ -149,7 +149,7 @@ def test_hnet_forward_backward_and_decode_equivalence():
 
 
 def test_param_count_pilot_and_stage_groups():
-    cfg = MoteConfig.pilot()
+    cfg = MoteConfig.mote_13m()
     model = HNetForCausalLM(cfg)
     n = model.num_params()
     assert 5e6 < n < 30e6, n

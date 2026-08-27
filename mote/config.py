@@ -133,22 +133,15 @@ class MoteConfig:
     def load(cls, path: str | Path) -> "MoteConfig":
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
+
     # --- presets ------------------------------------------------------------------
-    @classmethod
-    def pilot(cls) -> "MoteConfig":
-        """~12M params: the local 4060 Ti gate run (Relation 6L/384/8×48/768 = the paper's 10M setting)."""
-        return cls(
-            d_model_outer=256,
-            encoder_layers=2,
-            decoder_layers=2,
-            main=RelationCfg(n_layers=6, d_model=384, n_heads=8, d_ff=768),
-            mbp=MBPCfg(n_layers=2, n_heads=4, d_ff=768),
-            max_seq_len=2048,
-        )
+    # Named by exact rounded parameter count (2026-08-26). The old role names rotted: `local` runs on
+    # the L4 too, and `flagship` stopped being the flagship the moment Mote-138M existed. A size does
+    # not rot. `PRESET_ALIASES` below keeps the retired names resolving, so queued argv still works.
 
     @classmethod
-    def smoke(cls) -> "MoteConfig":
-        """~2M params: the T1 bug gate (docs/shape.md 2026-08-24). Ten-minute runs that answer
+    def mote_1m(cls) -> "MoteConfig":
+        """1,249,558: the T1 bug gate (docs/shape.md 2026-08-24). Ten-minute runs that answer
         "is this broken" — never "is this better"; tiny scale issues no quality verdicts."""
         return cls(
             d_model_outer=128,
@@ -160,8 +153,20 @@ class MoteConfig:
         )
 
     @classmethod
-    def local(cls) -> "MoteConfig":
-        """~35M params: the largest comfortable overnight run on the 8 GB RTX 4060 Ti (5.9 GB peak at batch 4x2048)."""
+    def mote_13m(cls) -> "MoteConfig":
+        """12,657,246: the local 4060 Ti gate run (Relation 6L/384/8×48/768 = the paper's 10M setting)."""
+        return cls(
+            d_model_outer=256,
+            encoder_layers=2,
+            decoder_layers=2,
+            main=RelationCfg(n_layers=6, d_model=384, n_heads=8, d_ff=768),
+            mbp=MBPCfg(n_layers=2, n_heads=4, d_ff=768),
+            max_seq_len=2048,
+        )
+
+    @classmethod
+    def mote_35m(cls) -> "MoteConfig":
+        """35,356,424: the largest comfortable overnight run on the 8 GB RTX 4060 Ti (5.9 GB peak at batch 4x2048)."""
         return cls(
             d_model_outer=384,
             encoder_layers=2,
@@ -172,13 +177,85 @@ class MoteConfig:
         )
 
     @classmethod
-    def flagship(cls) -> "MoteConfig":
-        """~105M params, 16384-byte window; trains locally on the 4060 Ti (42 KB/s, ~44% MFU at batch 1 in the forced-6-bytes/chunk profile)."""
+    def mote_96m(cls) -> "MoteConfig":
+        """95,924,732, 16384-byte window — the config FROZEN 2026-08-24 (docs/shape.md). Trains locally
+        on the 4060 Ti at 68.1 KB/s, 4.31 GB peak, batch 1 x accum 4."""
         return cls(
             d_model_outer=512,
             encoder_layers=3,
             decoder_layers=3,
             main=RelationCfg(n_layers=12, d_model=768, n_heads=8, d_ff=2048),
-            mbp=MBPCfg(n_layers=2, n_heads=8, d_ff=2048, enabled=False),  # head off for the flagship (decided 2026-08-23: no loss gain under Muon, 8-13% of step time)
+            mbp=MBPCfg(n_layers=2, n_heads=8, d_ff=2048, enabled=False),  # head off for Mote-96M (decided 2026-08-23: no loss gain under Muon, 8-13% of step time)
             max_seq_len=16384,  # decided 2026-08-23 (docs/context.md); profiled at batch 1 + ckpt: 6.34 GB peak on the 4060 Ti
         )
+
+    @classmethod
+    def mote_138m(cls) -> "MoteConfig":
+        """138,401,306 — Mote-96M taken deeper (main 12 → 18 layers); the target for the hyper-connection
+        spine (signed 2026-08-26). n_res 30 → 42, so `_init_weights` shrinks every out-projection's init
+        by 1.18x; that is a transient, because Muon + weight decay drive ‖W‖ to an equilibrium
+        ‖W‖ ∝ lr^0.478 that does not depend on where it started (docs/research/elr-2026-08-26.md)."""
+        return cls(
+            d_model_outer=512,
+            encoder_layers=3,
+            decoder_layers=3,
+            main=RelationCfg(n_layers=18, d_model=768, n_heads=8, d_ff=2048),
+            mbp=MBPCfg(n_layers=2, n_heads=8, d_ff=2048, enabled=False),
+            max_seq_len=16384,
+        )
+
+    # --- retired role names, kept resolving ---------------------------------------
+    @classmethod
+    def smoke(cls) -> "MoteConfig":
+        return cls.mote_1m()
+
+    @classmethod
+    def pilot(cls) -> "MoteConfig":
+        return cls.mote_13m()
+
+    @classmethod
+    def local(cls) -> "MoteConfig":
+        return cls.mote_35m()
+
+    @classmethod
+    def flagship(cls) -> "MoteConfig":
+        return cls.mote_96m()
+
+
+# --- the preset registry ----------------------------------------------------------
+# One source of truth. It used to live in mote/train/profile_step.py and omitted "smoke", while
+# mote/train/train.py hardcoded a different list; the two drifted apart unnoticed.
+PRESETS: Dict[str, Any] = {
+    "mote-1m": MoteConfig.mote_1m,
+    "mote-13m": MoteConfig.mote_13m,
+    "mote-35m": MoteConfig.mote_35m,
+    "mote-96m": MoteConfig.mote_96m,
+    "mote-138m": MoteConfig.mote_138m,
+}
+PRESET_ALIASES: Dict[str, str] = {
+    "smoke": "mote-1m",
+    "pilot": "mote-13m",
+    "local": "mote-35m",
+    "flagship": "mote-96m",
+}
+PRESET_NAMES = tuple(PRESETS) + tuple(PRESET_ALIASES)
+
+
+def normalize_preset(name: str) -> str:
+    """Canonical key for a user-supplied preset name. Accepts `mote-138m`, `mote_138m`, `138m` and the
+    retired role names. Raises ValueError, which argparse renders as a clean `invalid value` message."""
+    key = name.strip().lower().replace("_", "-")
+    key = PRESET_ALIASES.get(key, key)
+    if not key.startswith("mote-"):
+        key = "mote-" + key
+    if key not in PRESETS:
+        raise ValueError(f"unknown preset {name!r}; known: {', '.join(PRESET_NAMES)}")
+    return key
+
+
+normalize_preset.__name__ = "preset"  # argparse prints type.__name__ in its "invalid value" message
+
+
+def resolve_preset(name: str) -> "MoteConfig":
+    """Build a preset by name (see `normalize_preset` for the accepted spellings)."""
+    return PRESETS[normalize_preset(name)]()

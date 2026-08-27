@@ -17,18 +17,15 @@ from pathlib import Path
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from ..config import MoteConfig
+from ..config import PRESETS, MoteConfig, normalize_preset, resolve_preset
 from ..data.loader import ByteShard
 from ..model.hnet import HNetForCausalLM
 from .flops import flops_per_byte, peak_tflops_for
 from .train import compute_losses
 
-PRESETS = {"pilot": MoteConfig.pilot, "local": MoteConfig.local, "flagship": MoteConfig.flagship}
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preset", default="local", choices=PRESETS)
+    ap.add_argument("--preset", default="mote-35m", type=normalize_preset, help=", ".join(PRESETS))
     ap.add_argument("--data", required=True)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--seq-len", type=int, default=2048)
@@ -47,7 +44,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     device = torch.device(args.device)
-    cfg: MoteConfig = PRESETS[args.preset]()
+    cfg: MoteConfig = resolve_preset(args.preset)
     if args.bucket is not None:
         cfg.dc.chunk_bucket = args.bucket
     if args.no_flash:

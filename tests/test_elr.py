@@ -145,7 +145,7 @@ def test_param_lr_keeps_the_batched_launch(monkeypatch):
 def _tiny_model():
     from mote.config import MoteConfig
     from mote.model.hnet import HNetForCausalLM
-    return HNetForCausalLM(MoteConfig.smoke(), device=torch.device("cpu"))
+    return HNetForCausalLM(MoteConfig.mote_1m(), device=torch.device("cpu"))
 
 
 def test_tracker_and_matcher_reproduce_a_reference_elr():
@@ -251,7 +251,7 @@ def test_qk_norm_reaches_the_model_through_the_config():
     from mote.config import MoteConfig
     from mote.model.hnet import HNetForCausalLM
 
-    cfg = MoteConfig.smoke()
+    cfg = MoteConfig.mote_1m()
     cfg.main.qk_norm = True
     m = HNetForCausalLM(cfg, device=torch.device("cpu"))
     assert any("p1_norm" in n for n, _ in m.named_parameters())
@@ -352,3 +352,34 @@ def test_branch_decay_frac_moves_the_window():
     assert at(0.3, 0.85) == pytest.approx(0.5)
     for f in (0.1, 0.2, 0.3):
         assert at(f, 1.0) == pytest.approx(0.0) and at(f, 0.0) == 1.0
+
+
+# --- preset registry (renamed to size names 2026-08-26) --------------------------------------------
+def test_presets_are_named_by_their_actual_parameter_count():
+    """The name is a promise about the size; a preset that drifts must be renamed, not left lying."""
+    import torch
+    from mote.config import PRESETS
+    from mote.model.hnet import HNetForCausalLM
+
+    for name, build in PRESETS.items():
+        with torch.device("meta"):
+            model = HNetForCausalLM(build())
+        seen, total = set(), 0
+        for p in model.parameters():
+            if id(p) not in seen:
+                seen.add(id(p))
+                total += p.numel()
+        claimed = int(name.removeprefix("mote-").removesuffix("m"))
+        assert round(total / 1e6) == claimed, f"{name} is {total:,} params, not ~{claimed}M"
+
+
+def test_retired_role_names_still_resolve():
+    """The queue carries `--preset local` / `--preset flagship` in argv; those jobs must still run."""
+    from mote.config import normalize_preset, resolve_preset
+
+    assert normalize_preset("flagship") == "mote-96m"
+    assert normalize_preset("local") == "mote-35m"
+    assert normalize_preset("mote_138m") == normalize_preset("138m") == "mote-138m"
+    assert resolve_preset("flagship").main.n_layers == 12
+    with pytest.raises(ValueError, match="unknown preset"):
+        normalize_preset("nope")

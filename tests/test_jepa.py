@@ -11,7 +11,7 @@ from mote.train.jepa import JepaAux
 
 def _model():
     torch.manual_seed(0)
-    cfg = MoteConfig.smoke()
+    cfg = MoteConfig.mote_1m()
     cfg.mbp.enabled = False
     return HNetForCausalLM(cfg), cfg
 

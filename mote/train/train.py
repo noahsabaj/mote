@@ -25,7 +25,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 
-from ..config import MoteConfig
+from ..config import PRESETS, MoteConfig, normalize_preset, resolve_preset
 from ..model import triton_lock
 
 triton_lock.install()  # the trainer shares autotuned kernels with serving replies in the daemon
@@ -386,7 +386,8 @@ def load_checkpoint(path: Path, model, opt=None, ck: Optional[Dict] = None):
 
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preset", default="pilot", choices=["smoke", "pilot", "local", "flagship"])
+    ap.add_argument("--preset", default="mote-13m", type=normalize_preset,
+                    help="model size: " + ", ".join(PRESETS) + " (the retired role names still resolve)")
     ap.add_argument("--config", default=None, help="JSON config overriding the preset")
     ap.add_argument("--data", required=True, help="shard prefix, e.g. data/fineweb_edu_pilot")
     ap.add_argument("--out", required=True)
@@ -483,7 +484,7 @@ class Trainer:
             self._resume_ck = torch.load(out_dir / "last.pt", map_location="cpu", weights_only=False)
             cfg = MoteConfig.from_dict(self._resume_ck["config"])
         else:
-            cfg = MoteConfig.load(args.config) if args.config else getattr(MoteConfig, args.preset)()
+            cfg = MoteConfig.load(args.config) if args.config else resolve_preset(args.preset)
         cfg.max_seq_len = max(cfg.max_seq_len, args.seq_len)
         if args.ratio_weight is not None:
             cfg.dc.ratio_loss_weight = args.ratio_weight

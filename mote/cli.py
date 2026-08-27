@@ -418,7 +418,7 @@ TRAIN_START_USAGE = """usage: mote train start [--front] [--serve] -- <args for 
   --front   ahead of everything queued
   --serve   on the air: its EMA answers chats while it runs and its final checkpoint becomes the pin
             (the trunk and the branches; never a screening arm)
-  e.g. mote train start --serve -- --preset flagship --data data/mix_a --out runs/trunk --schedule trunk
+  e.g. mote train start --serve -- --preset mote-96m --data data/mix_a --out runs/mote-96m/trunk --schedule trunk
   trainer flags: python -m mote.train.train --help"""
 
 
