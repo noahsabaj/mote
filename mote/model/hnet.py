@@ -60,17 +60,33 @@ class HNetForCausalLM(nn.Module):
         V = cfg.pad_vocab_to
 
         self.embeddings = nn.Embedding(V, D0, **fk)
-        self.encoder = make_mamba3_stack(cfg.encoder_layers, D0, cfg.mamba3, cfg.norm_eps, 0, **fk, residual_in_fp32=cfg.residual_in_fp32)
+        sp = getattr(cfg, "spine", None)
+        self.spine_on = sp is not None and sp.mode != "off"
+        # Seven sites: the encoder's sublayers, the whole chunk stage, the decoder's sublayers. The
+        # offsets keep HC's rotating read counting across the spine rather than restarting per stack.
+        self.encoder = make_mamba3_stack(cfg.encoder_layers, D0, cfg.mamba3, cfg.norm_eps, 0, **fk, residual_in_fp32=cfg.residual_in_fp32,
+                                         spine_cfg=sp if self.spine_on else None, site_offset=0)
         self.routing_module = RoutingModule(D0, **fk)
         self.chunk_layer = ChunkLayer(bucket=getattr(cfg.dc, "chunk_bucket", 1))
         self.main_network = make_relation_stack(cfg.main, cfg.norm_eps, **fk, residual_in_fp32=cfg.residual_in_fp32)
         self.dechunk_layer = DeChunkLayer(D0, prob_clamp=cfg.dc.prob_clamp)
-        self.residual_proj = nn.Linear(D0, D0, device=device, dtype=torch.float32)
-        nn.init.zeros_(self.residual_proj.weight)
-        nn.init.zeros_(self.residual_proj.bias)
-        self.residual_proj.weight._no_reinit = True
+        if self.spine_on:
+            # The chunk stage's own site subsumes residual_proj: its H_post IS the write path back
+            # onto the byte-level streams. That also retires the one zero-norm parameter in the model,
+            # which was the only case ELRMatcher had to special-case.
+            from .spine import Spine, StreamExpand
+            self.stream = StreamExpand(D0, sp.n, sp.mode, lss=sp.lss, device=device)
+            self.chunk_spine = Spine(D0, sp.n, cfg.encoder_layers, mode=sp.mode, project=sp.project,
+                                     dynamic=sp.dynamic, post_scale=sp.post_scale, eps=cfg.norm_eps, device=device)
+            self.residual_proj = None
+        else:
+            self.residual_proj = nn.Linear(D0, D0, device=device, dtype=torch.float32)
+            nn.init.zeros_(self.residual_proj.weight)
+            nn.init.zeros_(self.residual_proj.bias)
+            self.residual_proj.weight._no_reinit = True
         self.pad_dimension = nn.Parameter(torch.zeros(D1 - D0, **fk)) if D1 > D0 else None
-        self.decoder = make_mamba3_stack(cfg.decoder_layers, D0, cfg.mamba3, cfg.norm_eps, cfg.encoder_layers, **fk, residual_in_fp32=cfg.residual_in_fp32)
+        self.decoder = make_mamba3_stack(cfg.decoder_layers, D0, cfg.mamba3, cfg.norm_eps, cfg.encoder_layers, **fk, residual_in_fp32=cfg.residual_in_fp32,
+                                         spine_cfg=sp if self.spine_on else None, site_offset=cfg.encoder_layers + 1)
         self.lm_head = nn.Linear(D0, V, bias=False, **fk)
         # rows past the vocabulary (272 − 266 spare protocol ids, 2026-08-24) are never targets and never
         # sampled: every logit consumer goes through `head_logits`, which masks them to -inf
@@ -97,7 +113,7 @@ class HNetForCausalLM(nn.Module):
             nn.init.normal_(self.lm_head.weight, mean=0.0, std=std)
         n_res = self.encoder.height + self.decoder.height + self.main_network.height
         for name, m in self.named_modules():
-            if isinstance(m, nn.Linear) and not getattr(m.weight, "_no_reinit", False) and m is not self.lm_head and m is not self.residual_proj:
+            if isinstance(m, nn.Linear) and not getattr(m.weight, "_no_reinit", False) and m is not self.lm_head and m is not self.residual_proj:  # residual_proj is None under the spine
                 if name.endswith("out_proj") or name.endswith("fc2") or name.endswith(".wo") or name.endswith("attn.out"):
                     nn.init.normal_(m.weight, mean=0.0, std=std / (n_res ** 0.5))
                 else:
@@ -124,6 +140,22 @@ class HNetForCausalLM(nn.Module):
                 n += p.numel()
         return n
 
+    # --- the spine bracket around the chunk stage --------------------------------------------
+    # Every byte path (forward, prefill, forward_from_state, step) is the same shape: run the
+    # encoder, cross the chunker, run the decoder. Under the spine the stream tensor takes the place
+    # the zero-init skip used to hold, so these three helpers are all that differs.
+    def _spine_in(self, h: torch.Tensor) -> torch.Tensor:
+        return self.stream(h) if self.spine_on else h
+
+    def _spine_read(self, x: torch.Tensor):
+        """After the encoder's sites: the chunk stage's read, normed for routing and chunking.
+        Reuses the encoder's own final RMSNorm, so parameter counts match the spine-off model."""
+        u, carried = self.chunk_spine.read(x)
+        return self.encoder.rmsnorm(u, prenorm=False), carried
+
+    def _spine_out(self, x: torch.Tensor) -> torch.Tensor:
+        return self.decoder.rmsnorm(self.stream.collapse(x), prenorm=False)
+
     # ------------------------------------------------------------------------------
     def _pad(self, h: torch.Tensor) -> torch.Tensor:
         if self.pad_dimension is None:
@@ -137,16 +169,22 @@ class HNetForCausalLM(nn.Module):
             mask = torch.ones(B, L, dtype=torch.bool, device=input_ids.device)
 
         h = self.embeddings(input_ids)
-        h = self.encoder(h)  # [B, L, D0]
-        residual = self.residual_proj(h.float())
+        x = self.encoder(self._spine_in(h))  # [B, L, D0], or [B, L, n, ·] under the spine
+        if self.spine_on:
+            h, carried = self._spine_read(x)
+        else:
+            h, residual = x, self.residual_proj(x.float())
 
         routing = self.routing_module(h, mask)
         hc, next_mask = self.chunk_layer(h, routing.boundary_mask)  # [B, M, D0]
         zc = self.main_network(self._pad(hc), token_mask=next_mask)[..., :D0]  # [B, M, D0]; the mask keeps pads out of MoE stats
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob)  # [B, L, D0]
 
-        h2 = (z.float() * ste_ones(routing.selected_probs.float()) + residual).to(h.dtype)
-        h3 = self.decoder(h2)
+        y = z.float() * ste_ones(routing.selected_probs.float())
+        if self.spine_on:
+            h3 = self._spine_out(self.decoder(self.chunk_spine.write(x, y, carried)))
+        else:
+            h3 = self.decoder((y + residual).to(h.dtype))
         logits = self.head_logits(h3)
 
         chunk_id = torch.cumsum(routing.boundary_mask.long(), dim=1) - 1
@@ -205,14 +243,20 @@ class HNetForCausalLM(nn.Module):
 
         assert state.main.n == 0, "prefill wants a fresh state; continue a read with forward_from_state"
         h = self.embeddings(input_ids)
-        h, state.encoder = self.encoder(h, caches=None, return_caches=True)
-        residual = self.residual_proj(h.float())
+        x, state.encoder = self.encoder(self._spine_in(h), caches=None, return_caches=True)
+        if self.spine_on:
+            h, carried = self._spine_read(x)
+        else:
+            h, residual = x, self.residual_proj(x.float())
         routing = self.routing_module(h, mask, state.routing)
         hc, _ = self.chunk_layer(h, routing.boundary_mask, exact=True)  # caches must hold only real chunks
         zc = self._run_main(hc, state)
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)
-        h2 = (z.float() + residual).to(h.dtype)
-        h3, state.decoder = self.decoder(h2, caches=None, return_caches=True)
+        if self.spine_on:
+            x, state.decoder = self.decoder(self.chunk_spine.write(x, z.float(), carried), caches=None, return_caches=True)
+            h3 = self._spine_out(x)
+        else:
+            h3, state.decoder = self.decoder((z.float() + residual).to(h.dtype), caches=None, return_caches=True)
         logits = self.head_logits(h3)
 
         chunk_id = torch.cumsum(routing.boundary_mask.long(), dim=1) - 1
@@ -246,8 +290,11 @@ class HNetForCausalLM(nn.Module):
         mask = torch.ones(B, K, dtype=torch.bool, device=input_ids.device)
 
         h = self.embeddings(input_ids)
-        h, state.encoder = self.encoder(h, caches=state.encoder, return_caches=True)
-        residual = self.residual_proj(h.float())
+        x, state.encoder = self.encoder(self._spine_in(h), caches=state.encoder, return_caches=True)
+        if self.spine_on:
+            h, carried = self._spine_read(x)
+        else:
+            h, residual = x, self.residual_proj(x.float())
         routing = self.routing_module(h, mask, state.routing)
         hc, _ = self.chunk_layer(h, routing.boundary_mask, exact=True)
         if hc.shape[1] > 0:
@@ -255,8 +302,11 @@ class HNetForCausalLM(nn.Module):
         else:
             zc = h[:, :0]
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)
-        h2 = (z.float() + residual).to(h.dtype)
-        h3, state.decoder = self.decoder(h2, caches=state.decoder, return_caches=True)
+        if self.spine_on:
+            x, state.decoder = self.decoder(self.chunk_spine.write(x, z.float(), carried), caches=state.decoder, return_caches=True)
+            h3 = self._spine_out(x)
+        else:
+            h3, state.decoder = self.decoder((z.float() + residual).to(h.dtype), caches=state.decoder, return_caches=True)
         logits = self.head_logits(h3)
 
         if self.mbp_head is not None:
@@ -360,8 +410,11 @@ class HNetForCausalLM(nn.Module):
         assert input_ids.shape == (1, 1)
         D0 = self.cfg.d_model_outer
         h = self.embeddings(input_ids)
-        h, state.encoder = self.encoder.step(h, state.encoder)
-        residual = self.residual_proj(h.float())
+        x, state.encoder = self.encoder.step(self._spine_in(h), state.encoder)
+        if self.spine_on:
+            h, carried = self._spine_read(x)
+        else:
+            h, residual = x, self.residual_proj(x.float())
         routing = self.routing_module.step(h, state.routing)
         is_boundary = bool(routing.boundary_mask[0])
         if is_boundary:
@@ -373,8 +426,11 @@ class HNetForCausalLM(nn.Module):
         else:
             zc = h[:0]
         z = self.dechunk_layer.step(zc, routing.boundary_mask, routing.boundary_prob, state.dechunk)
-        h2 = (z.float() + residual).to(h.dtype)
-        h3, state.decoder = self.decoder.step(h2, state.decoder)
+        if self.spine_on:
+            x, state.decoder = self.decoder.step(self.chunk_spine.write(x, z.float(), carried), state.decoder)
+            h3 = self._spine_out(x)
+        else:
+            h3, state.decoder = self.decoder.step((z.float() + residual).to(h.dtype), state.decoder)
         logits = self.head_logits(h3)
 
         mbp_logits = None

@@ -94,6 +94,21 @@ def _make(cls, d: dict):
 
 
 @dataclass
+class SpineCfg:
+    """The hyper-connection spine: one multi-stream residual at byte resolution (mote/model/spine.py).
+
+    Seven sites — the three encoder sublayers, the whole chunk stage, the three decoder sublayers.
+    The main network keeps its own plain residual inside: different width, different resolution."""
+
+    mode: str = "off"                    # off | expand (n copies, memory x n) | frac (n slices, free)
+    n: int = 4                           # every paper's recommended expansion; HC's own ablation peaks here
+    project: str = "spectral_sphere"     # sHC. see spine.py for why not the Birkhoff polytope
+    dynamic: bool = True                 # input-dependent coefficients (HC measures DHC > SHC at n=4)
+    post_scale: float = 2.0              # Motif 3 (2608.09119) anneals this to 1 against outlier growth
+    lss: bool = True                     # Learned Stream Scaling: streams start close but never identical
+
+
+@dataclass
 class MoteConfig:
     vocab_size: int = VOCAB_SIZE
     pad_vocab_to: int = 272  # embedding rows (16-aligned); logits for ids >= vocab_size are masked to -inf by the head
@@ -105,6 +120,7 @@ class MoteConfig:
     mbp: MBPCfg = field(default_factory=MBPCfg)
     dc: DCCfg = field(default_factory=DCCfg)
     mamba3: Mamba3Cfg = field(default_factory=Mamba3Cfg)
+    spine: SpineCfg = field(default_factory=SpineCfg)
     max_seq_len: int = 2048  # bytes
     tie_embeddings: bool = True
     norm_eps: float = 1e-5
@@ -123,6 +139,7 @@ class MoteConfig:
             mbp=_make(MBPCfg, d.pop("mbp", {})),
             dc=_make(DCCfg, d.pop("dc", {})),
             mamba3=_make(Mamba3Cfg, d.pop("mamba3", {})),
+            spine=_make(SpineCfg, d.pop("spine", {})),
             **d,
         )
 

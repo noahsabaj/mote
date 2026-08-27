@@ -199,6 +199,7 @@ class Spine(nn.Module):
         if mode == "frac" and d_model % n:
             raise ValueError(f"frac needs n | d_model; {d_model} % {n} = {d_model % n}")
         self.n, self.mode, self.dynamic, self.post_scale = n, mode, dynamic, post_scale
+        self.site_idx = site_idx  # global across the spine: the rotating read is the symmetry break
         self.d_stream = d_model if mode == "expand" else d_model // n
         flat = n * self.d_stream  # n·d for expand, d for frac — frac's generator is n× cheaper to read
 

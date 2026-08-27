@@ -431,6 +431,16 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--bf16-residual", action="store_true", help="A/B: keep the residual stream in bf16 instead of fp32")
     ap.add_argument("--relation-window", type=int, default=None, help="A/B: each chunk sees at most the last N chunks (materialized path)")
     ap.add_argument("--attention-main", action="store_true", help="ablation: parameter-matched causal attention instead of Relation in the main network")
+    # --- hyper-connection spine (signed 2026-08-26, docs/research/spine-2026-08-26.md) -------------
+    ap.add_argument("--spine", default=None, choices=["off", "expand", "frac"],
+                    help="multi-stream residual at byte resolution: expand = n copies (memory x n), frac = n slices (free)")
+    ap.add_argument("--spine-n", type=int, default=None, help="streams (expand) or slices (frac); every paper's optimum is 4")
+    ap.add_argument("--spine-project", default=None,
+                    choices=["spectral_sphere", "orthogonal", "sinkhorn", "perm_convex", "diag", "none"],
+                    help="manifold for H_res; the non-default values are the literature's control arms")
+    ap.add_argument("--spine-post-scale", type=float, default=None, help="H_post multiplier (mHC's 2.0; Motif 3 anneals it to 1.0)")
+    ap.add_argument("--no-spine-lss", action="store_true", help="ablation: replicate streams exactly, so they start in the symmetry's fixed subspace")
+    ap.add_argument("--no-spine-dynamic", action="store_true", help="ablation: static hyper-connections (HC measures DHC > SHC at n=4)")
     ap.add_argument("--moe", type=int, default=None, metavar="E", help="mixture of experts in the main-network FFNs: E experts (signed 2026-08-24, docs/shape.md \"MoE\")")
     ap.add_argument("--moe-topk", type=int, default=2, help="active experts per chunk")
     ap.add_argument("--moe-ff", type=int, default=None, help="expert hidden width (default d_ff // topk: active FLOPs match the dense FFN)")
@@ -521,6 +531,18 @@ class Trainer:
                 cfg.main.moe_bias_gamma = args.moe_gamma
             if args.moe_gate_scale is not None:
                 cfg.main.moe_gate_scale = args.moe_gate_scale
+        if args.spine is not None:
+            cfg.spine.mode = args.spine
+        if args.spine_n is not None:
+            cfg.spine.n = args.spine_n
+        if args.spine_project is not None:
+            cfg.spine.project = args.spine_project
+        if args.spine_post_scale is not None:
+            cfg.spine.post_scale = args.spine_post_scale
+        if args.no_spine_lss:
+            cfg.spine.lss = False
+        if args.no_spine_dynamic:
+            cfg.spine.dynamic = False
         if args.qk_norm:
             cfg.main.qk_norm = True
         if args.tau_s is not None:

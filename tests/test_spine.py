@@ -217,3 +217,78 @@ def test_generator_columns_match_the_published_parameter_counts():
     assert n_cols("sinkhorn", 4) == 16
     assert n_cols("perm_convex", 4) == 24         # n! — mHC-lite's factorial cost
     assert n_cols("spectral_sphere", 2) == 1      # identity ↔ swap, and everything between
+
+
+# --- wired into the model -------------------------------------------------------------------------
+import dataclasses  # noqa: E402
+
+from mote.config import MoteConfig, SpineCfg  # noqa: E402
+from mote.model.hnet import HNetForCausalLM  # noqa: E402
+
+
+def _model(mode="off", n=4, project="spectral_sphere", preset="mote_1m", seed=3, **kw):
+    cfg = dataclasses.replace(getattr(MoteConfig, preset)(), spine=SpineCfg(mode=mode, n=n, project=project, **kw))
+    torch.manual_seed(seed)
+    return cfg, HNetForCausalLM(cfg).eval()
+
+
+def test_the_spine_is_off_by_default_and_leaves_the_model_exactly_as_it_was():
+    cfg, model = _model("off")
+    assert cfg.spine.mode == "off" and not model.spine_on
+    assert model.residual_proj is not None                    # the zero-init skip is still the skip
+    assert model.encoder.spines is None and model.decoder.spines is None
+    assert not hasattr(model, "stream") and not hasattr(model, "chunk_spine")
+
+
+@pytest.mark.parametrize("mode", ["expand", "frac"])
+def test_the_spine_has_seven_sites_and_subsumes_the_zero_init_skip(mode):
+    cfg, model = _model(mode, preset="mote_96m")
+    assert model.residual_proj is None, "the chunk stage's H_post is the write path now"
+    sites = len(model.encoder.spines) + 1 + len(model.decoder.spines)
+    assert sites == cfg.encoder_layers + 1 + cfg.decoder_layers == 7
+    # HC's rotating read only breaks the stream symmetry if it counts across the whole spine
+    idx = [s.site_idx for s in model.encoder.spines] + [model.chunk_spine.site_idx] + [s.site_idx for s in model.decoder.spines]
+    assert idx == list(range(7)), idx
+
+
+@pytest.mark.parametrize("mode,project", [
+    ("off", "spectral_sphere"), ("expand", "spectral_sphere"), ("frac", "spectral_sphere"),
+    ("expand", "orthogonal"), ("expand", "sinkhorn"), ("expand", "perm_convex"),
+    ("expand", "diag"), ("expand", "none"),
+])
+def test_prefill_and_step_agree_with_forward(mode, project):
+    """Four separate byte paths now branch on the spine; a divergence here is a serving bug that
+    would only ever show up as a model that trains fine and generates garbage."""
+    _, model = _model(mode, project=project)
+    ids = torch.randint(0, 200, (1, 80))
+    with torch.no_grad():
+        full = model(ids)
+        state = model.allocate_inference_state(torch.device("cpu"))
+        pre = model.prefill(ids[:, :64], state)
+        stepped = torch.cat([model.step(ids[:, t:t + 1], state)[0] for t in range(64, 80)], 1)
+    # subtract first, then drop the padded rows: the head masks ids >= vocab_size to -inf, and
+    # (-inf) - (-inf) is nan, so selecting before subtracting would compare nothing at all.
+    finite = torch.isfinite(full.logits)
+    assert (pre.logits - full.logits[:, :64])[finite[:, :64]].abs().max() < 3e-4
+    assert (stepped - full.logits[:, 64:])[finite[:, 64:]].abs().max() < 3e-4
+
+
+@pytest.mark.parametrize("mode", ["expand", "frac"])
+def test_a_spine_model_trains_end_to_end(mode):
+    _, model = _model(mode)
+    model.train()
+    out = model(torch.randint(0, 200, (2, 96)))
+    (out.logits[torch.isfinite(out.logits)].square().mean()).backward()
+    for name, p in model.named_parameters():
+        if p.requires_grad and ("spine" in name or "stream" in name):
+            if name.endswith(("alpha", "gen_norm.weight")):
+                continue  # gated by the zero-initialised generator until it moves
+            assert p.grad is not None and torch.isfinite(p.grad).all(), name
+
+
+def test_the_spine_survives_a_config_round_trip(tmp_path):
+    cfg, _ = _model("frac", n=2, project="orthogonal")
+    cfg.save(tmp_path / "config.json")
+    back = MoteConfig.load(tmp_path / "config.json")
+    assert back.spine == cfg.spine
+    assert HNetForCausalLM(back).spine_on
