@@ -43,12 +43,17 @@ mkdir -p "$OUT" docs/results
 # OOM'd with the spine OFF. With --ckpt-main it is 5.18 GB (off) and 5.74 GB (frac). That flag is
 # not a tuning knob at this shape; without it none of the three arms below can start.
 echo "== 0/3  profile Mote-138M — does the shape fit, and what does the spine cost in throughput? =="
-for SPINE in off frac expand; do
-  python -m mote.train.profile_step --preset mote-138m --data "$DATA" \
+for SPINE in off frac; do
+  python -m mote.train.profile_step --preset mote-138m --data "$DATA" --ckpt-main \
       --batch-size 1 --seq-len 16384 --chunk-bytes 6 --spine "$SPINE" \
       --out "docs/results/$(date +%F)-spine-profile-$SPINE.json" || {
-        echo "profile failed for --spine $SPINE; fix that before spending 12 GPU-hours"; exit 1; }
+        echo "profile failed for --spine $SPINE; fix that before spending 8 GPU-hours"; exit 1; }
 done
+# `expand` is not in that loop on purpose: it OOMs here, and an expected failure that aborts the
+# script is worse than no check at all. It is profiled only when A2 is unblocked.
+[ "${FORCE_EXPAND:-0}" = "1" ] && python -m mote.train.profile_step --preset mote-138m --data "$DATA" \
+      --ckpt-main --batch-size 1 --seq-len 16384 --chunk-bytes 6 --spine expand \
+      --out "docs/results/$(date +%F)-spine-profile-expand.json"
 
 common=(--preset mote-138m --data "$DATA" --optimizer muon --lr "$LR" --ckpt-main
         --batch-size 1 --grad-accum 4 --seq-len 16384 --bucket 64
