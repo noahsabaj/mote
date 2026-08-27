@@ -8,9 +8,17 @@
 # topology is ours and the arms are the only evidence there will be.
 #
 # Two arms, not one, because the memory question and the loss question come apart:
-#   frac    n slices of the same 512-wide state   +0 GB      ~half of HC's gain in the literature
-#   expand  n copies of it                        +0.66 GB   the form every paper actually measures
+#   frac    n slices of the same 512-wide state   +0.56 GB   ~half of HC's gain in the literature
+#   expand  n copies of it                        does not fit   the form every paper measures
 # If frac lands within noise of expand, the expanded form never has to be paid for.
+#
+# Both memory figures above were ESTIMATES when this was signed and both were wrong; the numbers
+# now shown are measured (docs/results/2026-08-26-spine-profile.md). frac is not free — the
+# residual is the same width, but the spine's own byte-resolution intermediates at seven sites are
+# not covered by --ckpt-main, which checkpoints the Relation blocks. And n=4 expanded does not fit
+# on the 4060 Ti at 16384 at all, so arm A2 below is BLOCKED pending a call on what to do about
+# it: drop to 8192 (everything fits, but that is not the frozen flagship context), run off+frac
+# only at 16384, try n=2, or rent the card.
 #
 # ELR-MATCHED on the shared parameters. The spine arm carries ~244 K parameters the control does not,
 # so matched nominal lr is not matched ELR — the exact confound that reopened the Muon vs Muon-SW
@@ -30,8 +38,10 @@ LR="${LR:-8e-4}"
 DATA="${DATA:-data/local_mix}"
 mkdir -p "$OUT" docs/results
 
-# Before anything else: nothing has ever run at this shape. 138M at 16384 is estimated at ~5.04 GB
-# from Mote-96M's measured 4.31 GB, and an estimate is not a measurement.
+# Before anything else: nothing has ever run at this shape. 138M at 16384 was estimated at ~5.04 GB
+# from Mote-96M's measured 4.31 GB, and an estimate is not a measurement — it needed >7.65 GiB and
+# OOM'd with the spine OFF. With --ckpt-main it is 5.18 GB (off) and 5.74 GB (frac). That flag is
+# not a tuning knob at this shape; without it none of the three arms below can start.
 echo "== 0/3  profile Mote-138M — does the shape fit, and what does the spine cost in throughput? =="
 for SPINE in off frac expand; do
   python -m mote.train.profile_step --preset mote-138m --data "$DATA" \
@@ -40,7 +50,7 @@ for SPINE in off frac expand; do
         echo "profile failed for --spine $SPINE; fix that before spending 12 GPU-hours"; exit 1; }
 done
 
-common=(--preset mote-138m --data "$DATA" --optimizer muon --lr "$LR"
+common=(--preset mote-138m --data "$DATA" --optimizer muon --lr "$LR" --ckpt-main
         --batch-size 1 --grad-accum 4 --seq-len 16384 --bucket 64
         --max-minutes "$MIN" --eval-every 2000 --eval-batches 16 --eval-spread
         --log-every 100 --ckpt-minutes 15 --no-mbp --seed 42)
@@ -53,9 +63,13 @@ echo "== 2/3  A1 frac: n=4 slices, no extra memory, ELR matched to A0 =="
 python -m mote.cli train start -- "${common[@]}" \
     --spine frac --spine-n 4 --elr-match "$OUT/spine-ctl/elr_trace.json" --out "$OUT/spine-frac-n4"
 
-echo "== 3/3  A2 expand: n=4 copies, +0.66 GB, ELR matched to A0 =="
-python -m mote.cli train start -- "${common[@]}" \
-    --spine expand --spine-n 4 --elr-match "$OUT/spine-ctl/elr_trace.json" --out "$OUT/spine-expand-n4"
+echo "== 3/3  A2 expand: n=4 copies, ELR matched to A0 — BLOCKED, does not fit at 16384 =="
+echo "   measured 2026-08-26: OOM at 16384 even with --ckpt-main (off 5.18 GB, frac 5.74 GB)."
+echo "   Fits at 8192 (4.74 GB). Not queued: see the header for the four ways out."
+if [ "${FORCE_EXPAND:-0}" = "1" ]; then
+  python -m mote.cli train start -- "${common[@]}" \
+      --spine expand --spine-n 4 --elr-match "$OUT/spine-ctl/elr_trace.json" --out "$OUT/spine-expand-n4"
+fi
 
 python -m mote.cli train queue
 cat <<'NEXT'
