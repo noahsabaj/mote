@@ -129,19 +129,32 @@ class PrefixStore:
         return hit
 
     # ---- arena <-> pages ----------------------------------------------------------------
-    def _new_page(self, arena: RelationArena) -> torch.Tensor:
-        shape = (arena.n_layers, 2, arena.n_heads, PAGE, arena.d_head)
+    def _new_page(self, arena: RelationArena, rows: int = PAGE) -> torch.Tensor:
+        shape = (arena.n_layers, 2, arena.n_heads, int(rows), arena.d_head)
         return torch.empty(shape, dtype=arena.dtype, device="cpu", pin_memory=self.pin and arena.device.type == "cuda")
 
     def _store_rows(self, b: Branch, arena: RelationArena, c0: int, c1: int) -> None:
-        """Copy arena rows [c0, c1) into the branch's pages (c0 == b.n_chunks: append)."""
+        """Copy arena rows [c0, c1) into the branch's pages (c0 == b.n_chunks: append).
+
+        Full pages are exactly PAGE rows — that is what makes them shareable between forks by
+        reference. The TAIL page is sized to what the branch actually holds and reallocated as it
+        grows. Before 2026-08-27 every page was allocated full, so a branch holding one chunk cost a
+        whole page: 27 MiB at the flagship in fp32, 256x what it needed, and with a 1 GiB budget that
+        capped the store at ~38 conversations however short they were. This memory is page-locked
+        (see `_new_page`), which the host allocator caches rather than returning, so over-allocating
+        it is not a cost the OS takes back."""
         assert c0 == b.n_chunks, (c0, b.n_chunks)
         c = c0
         while c < c1:
             pi, off = divmod(c, PAGE)
-            if pi == len(b.pages):
-                b.pages.append(self._new_page(arena))
             take = min(PAGE - off, c1 - c)
+            need = off + take
+            if pi == len(b.pages):
+                b.pages.append(self._new_page(arena, need))
+            elif b.pages[pi].shape[3] < need:  # tail page outgrown: one bounded copy, at most PAGE rows
+                grown = self._new_page(arena, need)
+                grown[:, :, :, :off].copy_(b.pages[pi][:, :, :, :off])
+                b.pages[pi] = grown
             b.pages[pi][:, :, :, off : off + take].copy_(arena.rows(c, c + take))
             c += take
         b.n_chunks = c1
@@ -169,7 +182,7 @@ class PrefixStore:
         full, rem = divmod(at_chunks, PAGE)
         nb.pages = list(parent.pages[:full])
         if rem:
-            nb.pages.append(parent.pages[full].clone())
+            nb.pages.append(parent.pages[full][:, :, :, :rem].clone())  # only the rows the fork inherits
         nb.n_chunks = at_chunks
         return nb
 
@@ -223,12 +236,31 @@ class PrefixStore:
             anchors += sum(a.nbytes for a in b.anchors)
         return sum(seen.values()) + anchors
 
+    def _exclusive_pages(self, b: Branch) -> int:
+        """Page bytes only `b` holds — what dropping it would actually give back."""
+        shared = {id(p) for other in self.branches if other is not b for p in other.pages}
+        pages = {id(p): p.numel() * p.element_size() for p in b.pages}
+        return sum(n for i, n in pages.items() if i not in shared)
+
     def _evict(self) -> None:
+        """Drop branches until the store is under budget, least useful first.
+
+        Order by what a drop FREES, then by recency. `_fork` gives a child the parent's full pages by
+        reference, so a branch whose pages are all shared with a live fork returns nothing but its
+        anchors — a few MB against the hundreds the pages weigh. Evicting it first was the worst of
+        both: the hot branch keeps the memory, the cold branch's cached states are gone anyway, and
+        the loop, seeing the budget unmet, went on to take the fork as well. Measured 2026-08-27 on
+        two branches sharing every page: both evicted, store emptied. Now a wholly-shared branch is
+        the last resort, so eviction spends itself on branches that actually release pages.
+
+        This is still a hard cap: if the only way under budget is to drop everything, it drops
+        everything. What changed is which branch goes first."""
         while self.used_bytes() > self.budget:
             victims = [b for b in self.branches if not b.pinned]
             if not victims:
                 break
-            oldest = min(victims, key=lambda b: b.last_used)
+            # (frees no pages, then oldest): branches holding pages of their own go first
+            oldest = min(victims, key=lambda b: (self._exclusive_pages(b) <= 0, b.last_used))
             self.branches.remove(oldest)
 
     def clear(self) -> None:

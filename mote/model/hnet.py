@@ -67,6 +67,10 @@ class HNetForCausalLM(nn.Module):
         self.encoder = make_mamba3_stack(cfg.encoder_layers, D0, cfg.mamba3, cfg.norm_eps, 0, **fk, residual_in_fp32=cfg.residual_in_fp32,
                                          spine_cfg=sp if self.spine_on else None, site_offset=0)
         self.routing_module = RoutingModule(D0, **fk)
+        r = self.routing_module
+        r.target_ratio = cfg.dc.target_ratio_init
+        r.bound_floor, r.bound_ceiling = cfg.dc.bound_floor, cfg.dc.bound_ceiling
+        r.decode_threshold = cfg.dc.decode_threshold
         self.chunk_layer = ChunkLayer(bucket=getattr(cfg.dc, "chunk_bucket", 1))
         self.main_network = make_relation_stack(cfg.main, cfg.norm_eps, **fk, residual_in_fp32=cfg.residual_in_fp32)
         self.dechunk_layer = DeChunkLayer(D0, prob_clamp=cfg.dc.prob_clamp)
@@ -99,10 +103,16 @@ class HNetForCausalLM(nn.Module):
         self.init_weights()
 
     def head_logits(self, h: torch.Tensor) -> torch.Tensor:
-        """lm_head with the padding rows masked to -inf (a no-op when pad_vocab_to == vocab_size)."""
+        """lm_head with the padding rows masked to -inf (a no-op when pad_vocab_to == vocab_size).
+
+        The mask is one row wide at Mote's vocab (271 -> 272) and the out-of-place add cost a full
+        second copy of the logits — 17 MiB at [1, 16384, 272] fp32. Under no_grad the add goes in
+        place on the matmul's own output, which nothing else holds; with autograd on it stays
+        out-of-place, where the copy is a rounding error against the activations already saved."""
         logits = self.lm_head(h)
         if self.cfg.pad_vocab_to > self.cfg.vocab_size:
-            logits = logits + self.logit_mask.to(logits.dtype)
+            mask = self.logit_mask.to(logits.dtype)
+            logits = logits.add_(mask) if not torch.is_grad_enabled() else logits + mask
         return logits
 
     # ------------------------------------------------------------------------------
@@ -205,12 +215,27 @@ class HNetForCausalLM(nn.Module):
         return HNetOutput(logits, mbp_logits, routing, chunk_id, offset)
 
     # ------------------------------------------------------------------------------
-    def new_arena(self, device, capacity: Optional[int] = None) -> RelationArena:
-        """A decode arena for this model: rows for `capacity` chunks (default max_seq_len/4 — ~4 bytes a
-        chunk covers every measured router; `RelationArena.ensure` grows it if a context needs more)."""
+    def new_arena(self, device, capacity: Optional[int] = None, bpic: Optional[float] = None,
+                  dtype=None) -> RelationArena:
+        """A decode arena for this model: rows for `capacity` chunks.
+
+        `bpic` is the run's own measured bytes-per-chunk (mote.runinfo.measured_bpic) and is the way
+        to size this. The old default of max_seq_len // 4 assumed 4 bytes a chunk on the strength of
+        a comment; three trained runs measured 3.2-3.45, which needs 1.2x more rows than that at
+        16384 and made `ensure` fire — a 1296 MiB peak and a full graph recapture — partway through
+        every long conversation. With no measurement to go on it still falls back to that default,
+        because a wrong guess that grows is better than a wrong guess that asserts.
+
+        `dtype` overrides the parameter dtype: the arena has to match whatever dtype the Relation
+        kernel sees, which is the autocast dtype at serving time, not necessarily the weights'."""
         m = self.cfg.main
-        cap = int(capacity) if capacity else max(self.cfg.max_seq_len // 4, 16)
-        dtype = next(self.main_network.parameters()).dtype
+        if capacity:
+            cap = int(capacity)
+        elif bpic:
+            cap = RelationArena.capacity_for(self.cfg.max_seq_len, bpic)
+        else:
+            cap = max(self.cfg.max_seq_len // 4, 16)
+        dtype = dtype if dtype is not None else next(self.main_network.parameters()).dtype
         return RelationArena(m.n_layers, m.n_heads, cap, m.d_model // m.n_heads, device, dtype)
 
     @torch.no_grad()
@@ -234,8 +259,13 @@ class HNetForCausalLM(nn.Module):
         return zc[..., : self.cfg.d_model_outer]
 
     @torch.no_grad()
-    def prefill(self, input_ids: torch.Tensor, state: InferenceState) -> HNetOutput:
-        """Batch-1 prefill: same math as forward, but every recurrent/cached state is kept in `state`."""
+    def prefill(self, input_ids: torch.Tensor, state: InferenceState, last_logits_only: bool = False) -> HNetOutput:
+        """Batch-1 prefill: same math as forward, but every recurrent/cached state is kept in `state`.
+
+        `last_logits_only` returns logits for the final position alone. Every serving caller of this
+        reads `out.logits[0, -1]` and nothing else, and the head over all L positions is a matmul and
+        a [1, L, V] tensor it then throws away — 17 MiB and 4.6 GFLOP at 16384. Off by default: the
+        tests and anything comparing whole-sequence logits want the full thing."""
         assert input_ids.shape[0] == 1
         B, L = input_ids.shape
         D0 = self.cfg.d_model_outer
@@ -257,7 +287,7 @@ class HNetForCausalLM(nn.Module):
             h3 = self._spine_out(x)
         else:
             h3, state.decoder = self.decoder((z.float() + residual).to(h.dtype), caches=None, return_caches=True)
-        logits = self.head_logits(h3)
+        logits = self.head_logits(h3[:, -1:] if last_logits_only else h3)
 
         chunk_id = torch.cumsum(routing.boundary_mask.long(), dim=1) - 1
         pos = torch.arange(L, device=input_ids.device)[None, :]
@@ -280,10 +310,14 @@ class HNetForCausalLM(nn.Module):
         return HNetOutput(logits, None, routing, chunk_id, offset)
 
     @torch.no_grad()
-    def forward_from_state(self, input_ids: torch.Tensor, state: InferenceState):
+    def forward_from_state(self, input_ids: torch.Tensor, state: InferenceState, last_logits_only: bool = False):
         """Continue a batch-1 sequence from `state` over k new bytes in one pass (the same math as k calls
         of `step`, used to verify speculative drafts). Mutates `state`. Returns
-        (logits [1,k,V], boundary_mask [k] bool, boundary_prob [k] float)."""
+        (logits [1,k,V], boundary_mask [k] bool, boundary_prob [k] float).
+
+        `last_logits_only` narrows the returned logits to the final position — what reading a prompt
+        wants. A speculative round needs every row (it scores each drafted byte), so this stays off
+        by default and the engine passes it only on the prompt-reading calls."""
         assert input_ids.shape[0] == 1
         B, K = input_ids.shape
         D0 = self.cfg.d_model_outer
@@ -307,7 +341,7 @@ class HNetForCausalLM(nn.Module):
             h3 = self._spine_out(x)
         else:
             h3, state.decoder = self.decoder((z.float() + residual).to(h.dtype), caches=state.decoder, return_caches=True)
-        logits = self.head_logits(h3)
+        logits = self.head_logits(h3[:, -1:] if last_logits_only else h3)
 
         if self.mbp_head is not None:
             bm = routing.boundary_mask[0]

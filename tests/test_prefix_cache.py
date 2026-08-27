@@ -106,7 +106,13 @@ def test_store_branches_anchors_pages_and_budget():
     # budget: shared pages are counted once; eviction drops whole unpinned branches, never the card
     page_bytes = conv.pages[0].numel() * conv.pages[0].element_size()
     assert store.used_bytes() < 5 * page_bytes + 6 * state_nbytes(st()) + 6 * 16
-    store.budget = page_bytes + 4096
+    # A full page is PAGE rows — that is what makes it shareable — but a branch's TAIL page holds
+    # only the rows it has, so the card's 10 chunks cost 10 rows and not 256 (2026-08-27: allocating
+    # every page full meant a one-chunk branch cost 27 MiB at the flagship). Budget the eviction at
+    # exactly what the card weighs, so nothing but the card can fit.
+    assert card.pages[0].shape[3] == 10 and conv.pages[0].shape[3] == PAGE and conv.pages[1].shape[3] == 400 - PAGE
+    card_bytes = sum(p.numel() * p.element_size() for p in card.pages) + sum(a.nbytes for a in card.anchors)
+    store.budget = card_bytes
     store._evict()
     assert card in store.branches and all(b.pinned for b in store.branches)
     assert PrefixStore(0).commit(None, 0, "card", [1], st(), lg, 1, arena) is None

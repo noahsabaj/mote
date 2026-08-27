@@ -13,8 +13,11 @@ static tensor `[n_layers, 2, H, capacity, dh]`:
 * the arena is what the decode CUDA graph reads at static addresses, so it stays allocated for the life of
   the engine and its contents stay hot between turns of the same conversation.
 
-Rows at or beyond `n` are scratch: a speculative round or a stopped reply may leave garbage there, and
-nothing reads past `n` (the graph masks them out explicitly).
+Rows at or beyond `n` are scratch in the sense that their CONTENT is meaningless: a speculative round
+or a stopped reply may leave stale values there, and nothing reads past `n` for its answer. They must
+still be finite. The decode graph reads a whole bucket width and masks rows past `S` by driving their
+softmax weight to zero — but the weights are then multiplied into the rows, and 0 x NaN is NaN. So the
+buffer is allocated zeroed and grows zeroed; only *stale* values are allowed past `n`, never garbage.
 """
 
 from __future__ import annotations
@@ -32,6 +35,12 @@ class RelationArena:
         self.capacity = int(capacity)
         self.device = torch.device(device)
         self.dtype = dtype
+        # `zeros`, and it is load-bearing — see the "scratch" note in the module docstring, which is
+        # true of the EAGER path only. The decode graph reads a fixed bucket width and masks rows at
+        # or past `S` by setting their softmax weight to zero, but it still multiplies those weights
+        # into the rows: 0 x NaN is NaN, so uninitialised garbage past `n` poisons the output. Tried
+        # `empty` on 2026-08-27 to save the memset (4 ms at the flagship);
+        # tests/test_graph_decode.py::test_graph_stops_exactly_on_stop_id_and_max_bytes caught it.
         self.buf = torch.zeros(n_layers, 2, n_heads, self.capacity, d_head, device=self.device, dtype=dtype)
         # Which prefix-store branch owns rows [0, n_valid) — the engine's "hot arena" bookkeeping.
         self.owner: Optional[int] = None
@@ -40,6 +49,17 @@ class RelationArena:
         # The engine's serving MemPool (long-lived allocations only: this buffer and the decode graphs).
         # Growth allocates inside it so a bigger arena never fragments the trainer's pool.
         self.pool = None
+
+    @staticmethod
+    def capacity_for(seq_len: int, bpic: float, bucket: int = 256, margin: float = 1.25) -> int:
+        """Rows a `seq_len`-byte context needs at a measured compression of `bpic` bytes per chunk.
+
+        `margin` is headroom over the mean: bpic is an average over a validation set and a single
+        prompt can chunk finer than it (code, markup, and non-Latin scripts all do). 1.25 covers the
+        spread measured on the 35M without paying for a doubling. `bucket` matches the decode
+        graph's capture width so a full context does not straddle one more bucket than it needs."""
+        need = int(seq_len / max(float(bpic), 1e-6) * float(margin)) + 1
+        return max(-(-need // bucket) * bucket, bucket)
 
     @property
     def bytes_per_chunk(self) -> int:
@@ -60,19 +80,36 @@ class RelationArena:
 
     def ensure(self, n_chunks: int) -> bool:
         """Grow (×2, at least n_chunks) when a context needs more rows than the arena holds. Returns True
-        when a reallocation happened — the engine then recaptures its graphs and the CPU pages re-sync."""
+        when a reallocation happened — the engine then recaptures its graphs and the CPU pages re-sync.
+
+        Growth is expensive twice over: the old and new buffers are live together while the rows are
+        copied, and every captured decode graph is dropped and recaptured (~4.5 s for the first). At
+        Mote-138M/16384 that measured a 1296 MiB peak on a ONE-chunk overflow (432 old + 864 new).
+        Two things keep it off the hot path. `new_arena` sizes capacity from the checkpoint's own
+        measured bytes-per-chunk, so a full context fits without ever calling this. And when nothing
+        valid is stored — a fresh conversation, or right after `invalidate()` — there is nothing to
+        preserve, so the old buffer is released BEFORE the new one is allocated and the peak is the
+        new size alone rather than the sum. Zeroed, not `empty` — the decode graph multiplies masked
+        (zero) weights into rows past `n`, so garbage there becomes NaN in the output."""
         if n_chunks <= self.capacity:
             return False
         new_cap = self.capacity
         while new_cap < n_chunks:
             new_cap *= 2
-        old = self.buf
         import contextlib
 
         ctx = torch.cuda.use_mem_pool(self.pool) if (self.pool is not None and self.device.type == "cuda") else contextlib.nullcontext()
+        keep = self.n_valid if self.owner is not None else 0
+        old = self.buf
+        if keep == 0:  # nothing to carry over: hand the old rows back before asking for the new ones
+            self.buf = old = None
         with ctx:
-            self.buf = torch.zeros(self.n_layers, 2, self.n_heads, new_cap, self.d_head, device=self.device, dtype=self.dtype)
-        self.buf[:, :, :, : self.capacity].copy_(old)
+            buf = torch.zeros(self.n_layers, 2, self.n_heads, new_cap, self.d_head, device=self.device, dtype=self.dtype)
+        if old is not None:
+            buf[:, :, :, :keep].copy_(old[:, :, :, :keep])
+        else:
+            self.owner, self.n_valid = None, 0
+        self.buf = buf
         self.capacity = new_cap
         self.generation += 1
         return True

@@ -1,0 +1,56 @@
+{
+ "measured": "2026-08-27",
+ "what": "boundary flips and last-position logit drift of an incremental prompt read vs a cold one-shot read",
+ "ckpt": "runs/t3l_dense_8e-4/last.pt",
+ "seq_len": 2048,
+ "samples_per_window": 24,
+ "by_window": {
+  "256": {
+   "seams": 7,
+   "chunks_total": 15035,
+   "windowed": {
+    "samples_with_a_flip": 5,
+    "flips": 5,
+    "max_logit_diff": 0.17954102158546448
+   },
+   "warm_continuation": {
+    "samples_with_a_flip": 5,
+    "flips": 6,
+    "max_logit_diff": 0.3920438289642334
+   }
+  },
+  "512": {
+   "seams": 3,
+   "chunks_total": 15035,
+   "windowed": {
+    "samples_with_a_flip": 4,
+    "flips": 4,
+    "max_logit_diff": 0.16734862327575684
+   },
+   "warm_continuation": {
+    "samples_with_a_flip": 5,
+    "flips": 6,
+    "max_logit_diff": 0.4051957130432129
+   }
+  },
+  "1024": {
+   "seams": 1,
+   "chunks_total": 15037,
+   "windowed": {
+    "samples_with_a_flip": 4,
+    "flips": 5,
+    "max_logit_diff": 0.16973185539245605
+   },
+   "warm_continuation": {
+    "samples_with_a_flip": 4,
+    "flips": 5,
+    "max_logit_diff": 0.17414706945419312
+   }
+  }
+ },
+ "findings": [
+  "The flip rate does not scale with the number of window seams: 7 seams gives 5 flips, 1 seam gives 5. Flips are float accumulation in the recurrent state, not an artefact of splitting the read.",
+  "Windowed prefill flips no more often than the warm-continuation path already in production at every window size tested (4-5 vs 5-6 samples of 24), and its logit drift is the same magnitude or smaller.",
+  "About 5 flips per 15,000 chunks, i.e. one boundary in ~3,000. The signed zero-flip bar is not met by windowing - and is not met by the read path already shipping either. No incremental read achieves it."
+ ]
+}

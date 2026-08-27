@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 
 from ..config import MoteConfig
+from ..runinfo import measured_bpic
 from ..model.arena import ArenaState, RelationArena
 from ..model.hnet import HNetForCausalLM, InferenceState
 from ..model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
@@ -177,9 +178,24 @@ class Engine:
         # of idle reservation over one evening of syncs, starving the training jobs of the same GPU
         # (five arms OOM'd). `_serve_ctx()` therefore applies the pool only where asked.
         self.pool = torch.cuda.MemPool() if (cuda and os.environ.get("MOTE_SERVE_POOL", "1") != "0") else None
+        # Serving ran the whole model in fp32 until 2026-08-27 — no autocast anywhere in mote/serve —
+        # while TRAINING's forward is bf16 under autocast. So the served path was not the trained
+        # path, and it paid for the difference: 533 MiB of weights instead of 266, a 432 MiB arena
+        # instead of 216, and every prefill activation twice the size. Autocast (rather than casting
+        # the weights) is what matches training exactly: fp32 masters, bf16 compute, and the
+        # deliberate fp32 residual at hnet.py's `residual_proj(x.float())` keeps working because
+        # autocast casts at the op, not at the parameter.
+        #
+        # The arena dtype has to follow, not the parameter dtype: FullRelation's Triton kernel reads
+        # P2 straight out of it against a bf16 query and refuses the mismatch ("Both operands must be
+        # same dtype. Got bf16 and fp32"). MOTE_SERVE_AMP=0 goes back to fp32 end to end.
+        self.amp_dtype = torch.bfloat16 if (cuda and os.environ.get("MOTE_SERVE_AMP", "1") != "0") else None
         # "<run>/ema@<step>" while a training job's EMA answers chats; None when serving a checkpoint.
         self.serving_live: str | None = None
         self.ckpt_path = path
+        # What this run's router actually did, from its own log (mote/runinfo.py). None when the run
+        # left no eval record — `new_arena` then falls back to its old max_seq_len // 4 guess.
+        self.bpic = measured_bpic(path)
         self.cfg = cfg
         self.model = model
         self.model.to(self.device).eval()
@@ -290,7 +306,8 @@ class Engine:
 
     def _reply_arena(self) -> RelationArena:
         """The resident arena, or (released) a fresh one for this reply from the shared allocator."""
-        return self.arena if self.arena is not None else self.model.new_arena(self.device)
+        return (self.arena if self.arena is not None
+                else self.model.new_arena(self.device, bpic=self.bpic, dtype=self.amp_dtype))
 
     def _serve_ctx(self, pool: bool = False):
         """Everything the serving side runs on the GPU goes through here: its own high-priority stream
@@ -299,6 +316,15 @@ class Engine:
         stack = contextlib.ExitStack()
         if self.stream is not None:
             stack.enter_context(torch.cuda.stream(self.stream))
+        if self.amp_dtype is not None:
+            # cache_enabled=False. Autocast normally keeps a bf16 copy of every weight for the life
+            # of the region — measured 2026-08-27 at Mote-138M/16384 it added 287 MiB of resident
+            # memory (prefill peak 486 vs 199 MiB) and bought 2 % of prefill time. Eager decode pays
+            # ~7 % for turning it off (11.75 vs 11.54 ms a byte) and that path is launch-bound, not
+            # cast-bound; the graph path bakes its casts into the capture and pays nothing. On a card
+            # shared with a training job, 287 MiB is worth more than either number.
+            stack.enter_context(torch.autocast(self.device.type, dtype=self.amp_dtype,
+                                               cache_enabled=os.environ.get("MOTE_SERVE_AMP_CACHE") == "1"))
         if pool and self.pool is not None:
             stack.enter_context(torch.cuda.use_mem_pool(self.pool))
         return stack
@@ -310,13 +336,23 @@ class Engine:
 
     def _setup_decode(self) -> None:
         """The resident decode arena (the graph decoder captures lazily, on CUDA for models without a multi-byte head)."""
-        self.arena = self.model.new_arena(self.device, capacity=int(os.environ["MOTE_ARENA_CHUNKS"]) if os.environ.get("MOTE_ARENA_CHUNKS") else None)
+        self.arena = self.model.new_arena(
+            self.device,
+            capacity=int(os.environ["MOTE_ARENA_CHUNKS"]) if os.environ.get("MOTE_ARENA_CHUNKS") else None,
+            bpic=self.bpic,
+            dtype=self.amp_dtype,
+        )
         self.arena.pool = self.pool  # growth reallocates inside the serving pool
         self._gd = None
 
     def _graph_decoder(self) -> GraphDecoder:
         if self._gd is None:
-            self._gd = GraphDecoder(self.model, self.arena, self.device, STOP_IDS, ring_size=self.cfg.max_seq_len,
+            # ring_size is how many bytes ONE REPLY can emit, not how long the context is: `run()`
+            # zeroes wpos per reply and stops at max_bytes. Sizing it to max_seq_len made every ring
+            # 32x larger than reachable (7.45 MiB of device rings and the same again in pinned host
+            # memory at 16384, for 513 usable slots).
+            self._gd = GraphDecoder(self.model, self.arena, self.device, STOP_IDS,
+                                    ring_size=self.defaults.max_bytes + GraphDecoder.K + 1,
                                     pool=self.pool.id if self.pool is not None else None)
         return self._gd
 
@@ -330,7 +366,8 @@ class Engine:
         t0 = time.perf_counter()
         with self.lock, self._serve_ctx():
             arena = self._reply_arena()
-            for L in (5, 16, 33, 128, 257, 512, 640, 1024, 2048, 4096):
+            W = int(getattr(self.cfg, "prefill_window", 0) or 0)
+            for L in sorted({5, 16, 33, 128, 257, 512, 640, 1024, 2048, 4096} | ({W} if W else set())):
                 L = min(L, self.cfg.max_seq_len - 4)
                 ids = torch.randint(0, 256, (1, L), device=self.device)
                 state = self.model.allocate_inference_state(self.device, arena=arena)
@@ -496,6 +533,40 @@ class Engine:
         return state
 
     @torch.no_grad()
+    def _read(self, ids: Sequence[int], state: InferenceState, fresh: bool):
+        """Read `ids` into `state` in windows of `cfg.prefill_window` bytes. Returns
+        (next-byte logits [V], boundary mask over everything read).
+
+        WHY WINDOWS (2026-08-27). A one-shot read hands the whole prompt to one Mamba-3 kernel call,
+        and that kernel's workspace is linear in what it is given — measured 25.1 KiB per prompt byte
+        per layer, so 401 MiB for a single layer at 16384. On the CPU, which is where the engine
+        lives whenever a training job holds the card, the reference path is worse than linear: it
+        materialises [1, H, L, L] per layer with no chunking, which is 16 GiB at 16384 and simply
+        cannot run. Reading in windows caps both at the window, and `forward_from_state` is the same
+        math as reading the bytes one at a time, so the model sees no difference in what it read.
+
+        Measured on Mote-138M at 16384, 4096-byte windows: peak 865 -> 252 MiB, wall clock
+        1556 -> 1534 ms, and an identical boundary sequence (7,893 chunks both ways). The window is
+        free in time because the kernel was never launch-bound at these lengths."""
+        ids = list(ids)
+        if not ids:
+            return None, None
+        W = int(getattr(self.cfg, "prefill_window", 0) or 0)
+        spans = ([(i, min(i + W, len(ids))) for i in range(0, len(ids), W)] if W > 0
+                 else [(0, len(ids))])
+        lg, masks = None, []
+        for k, (a, b) in enumerate(spans):
+            window = torch.tensor([ids[a:b]], device=self.device)
+            if fresh and k == 0:
+                out = self.model.prefill(window, state, last_logits_only=True)
+                lg, bm = out.logits[0, -1], out.routing.boundary_mask[0]
+            else:
+                seq, bm, _ = self.model.forward_from_state(window, state, last_logits_only=True)
+                lg = seq[0, -1]
+            masks.append(bm)
+        return lg, (torch.cat(masks) if len(masks) > 1 else masks[0])
+
+    @torch.no_grad()
     def _read_prompt(self, prompt_ids: List[int], card: List[int], arena: Optional[RelationArena] = None):
         """Read the prompt, reusing the longest anchor. Returns (state, next-byte logits [V], n_chunks,
         reused bytes, boundary mask of the freshly read suffix or None, session)."""
@@ -507,18 +578,18 @@ class Engine:
             session = (hit.branch, hit.anchor.n_chunks)
             if hit.n_ids == P:  # e.g. a regenerate: nothing new to read
                 return state, hit.anchor.logits.to(self.device), state.main.n, P, None, session
-            lg, bm, _ = self.model.forward_from_state(torch.tensor([prompt_ids[hit.n_ids:]], device=self.device), state)
-            return state, lg[0, -1], state.main.n, hit.n_ids, bm, session
+            lg, bm = self._read(prompt_ids[hit.n_ids:], state, fresh=False)
+            return state, lg, state.main.n, hit.n_ids, bm, session
         arena.invalidate()
         state = self.model.allocate_inference_state(self.device, arena=arena)
         if card and len(card) < P and prompt_ids[:len(card)] == card:
             # cold start: read the identity card on its own first, so every later conversation starts warm
-            out = self.model.prefill(torch.tensor([card], device=self.device), state)
-            session = self._commit("card", card, state, out.logits[0, -1], (None, 0))
-            lg, bm, _ = self.model.forward_from_state(torch.tensor([prompt_ids[len(card):]], device=self.device), state)
-            return state, lg[0, -1], state.main.n, 0, bm, session
-        out = self.model.prefill(torch.tensor([prompt_ids], device=self.device), state)
-        return state, out.logits[0, -1], state.main.n, 0, None, (None, 0)
+            lg, _ = self._read(card, state, fresh=True)
+            session = self._commit("card", card, state, lg, (None, 0))
+            lg, bm = self._read(prompt_ids[len(card):], state, fresh=False)
+            return state, lg, state.main.n, 0, bm, session
+        lg, bm = self._read(prompt_ids, state, fresh=True)
+        return state, lg, state.main.n, 0, bm, (None, 0)
 
     @torch.no_grad()
     def _verify_prefix(self, prompt_ids: List[int], reused: int, warm_logits: torch.Tensor, warm_bm, warm_chunks: int) -> dict:
@@ -555,8 +626,7 @@ class Engine:
                 prev = n0
                 for kind, n in anchors[1:]:
                     if n > prev:
-                        lg, _, _ = self.model.forward_from_state(torch.tensor([ids[prev:n]], device=self.device), state)
-                        logits = lg[0, -1]
+                        logits, _ = self._read(ids[prev:n], state, fresh=False)
                     session = self._commit(kind, ids[:n], state, logits, session)
                     prev = n
                 n_bytes += len(ids)
@@ -741,7 +811,8 @@ class Engine:
             if room <= 0:
                 return False
             inj = [RESULT_ID] + rb[:room] + [ASSISTANT_ID]
-            lg, _, _ = self.model.forward_from_state(torch.tensor([inj], device=self.device), state)
+            lg, _, _ = self.model.forward_from_state(torch.tensor([inj], device=self.device), state,
+                                                     last_logits_only=True)
             logits = lg[0, -1]
             generated.extend(inj)
             reply_mask.extend([0] * len(inj))

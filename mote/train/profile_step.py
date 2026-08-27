@@ -39,7 +39,7 @@ def main(argv=None):
     ap.add_argument("--bucket", type=int, default=None, help="override chunk-count bucket (1 = off)")
     ap.add_argument("--trace", default=None, help="write a Chrome trace json here")
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--chunk-bytes", type=float, default=None, help="profiling only: force a boundary every N bytes (trained routers land near 5-6), so a preset with no checkpoint is profiled at a realistic chunk count")
+    ap.add_argument("--chunk-bytes", type=float, default=None, help="profiling only: force a boundary every N bytes, so a preset with no checkpoint is profiled at a realistic chunk count. With --init-from this DEFAULTS to the checkpoint's own measured val_bpic (mote/runinfo.py) — every profile in the repo used to pass a literal 6, which is ATDC's target and not any router's behaviour; three trained runs measured 3.2-3.45, and at Mote-138M/16384 that is 2.21x the FLOPs per byte")
     ap.add_argument("--spine", default=None, choices=["off", "expand", "frac"], help="hyper-connection spine mode (mote/model/spine.py)")
     ap.add_argument("--spine-n", type=int, default=None, help="streams (expand) or slices (frac)")
     ap.add_argument("--out", default=None, help="also write the result json here")
@@ -75,6 +75,14 @@ def main(argv=None):
             cfg.mbp.enabled = False
         model = HNetForCausalLM(cfg, device=device)
         model.load_state_dict(ck["model"], strict=False)
+    if args.chunk_bytes is None and args.init_from:
+        # The chunk rate is an observable of a trained router, not a setting. If the checkpoint's run
+        # measured one, profile at that rather than at a number somebody typed.
+        from ..runinfo import measured_bpic
+
+        args.chunk_bytes = measured_bpic(args.init_from)
+        if args.chunk_bytes:
+            print(f"[profile] --chunk-bytes {args.chunk_bytes:.2f} from {args.init_from}'s measured val_bpic", flush=True)
     if args.chunk_bytes:
         # The router's own p still flows (its parameters get gradients as in training); only the
         # selection is forced to a fixed period, which is what sets the main-network and dechunk cost.
@@ -157,6 +165,7 @@ def main(argv=None):
         "block_local_mbp": not args.dense_mbp, "mbp": not args.no_mbp,
         "sec_per_step": round(sec, 4), "bytes_per_sec": round(bytes_per_step / sec), "bytes_per_chunk": round(bpic, 2),
         "flops_per_byte_M": round(fl / 1e6, 1), "tflops": round(tflops, 2), "mfu": round(tflops / peak, 3) if peak else None,
+        "chunk_bytes_forced": args.chunk_bytes,  # what the chunk rate was pinned to, so a profile is readable later
         "peak_mem_GB": round(torch.cuda.max_memory_allocated() / 1e9, 2) if device.type == "cuda" else None,
     }
     print(json.dumps(result, indent=1), flush=True)

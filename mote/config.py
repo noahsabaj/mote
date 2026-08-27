@@ -86,6 +86,39 @@ class DCCfg:
     prob_clamp: float = 1e-4  # p clamped to [ε, 1-ε] before the EMA
     chunk_bucket: int = 64  # pad the chunk count to a multiple of this so shapes repeat (1 = exact); bit-neutral
 
+    # --- ATDC's metric-based adaptation: 2605.30080 Alg. 1 lines 10-15 --------------------------
+    # PROVENANCE (2026-08-27). Every constant above came from that paper — N_init 5.0, N_fnl 6.5,
+    # T_w 60 % are its §V-C-1 verbatim — but Mote shipped only its eq. (7) linear ramp, so N rose on
+    # wall-clock whether or not the model was ready for it. These three restore the other half: N is
+    # boosted by `adapt_rate` only while the windowed mean LM loss sits below `adapt_threshold`.
+    #
+    # Do not read `target_ratio_*` as a bytes-per-chunk setting. It is not one, and never was. The
+    # ratio loss (see dc.py::ratio_loss) has NO gradient path to the achieved segmentation rate — its
+    # only lever is the mean boundary probability — so the target is a soft pull the model is free to
+    # ignore, which the paper says outright ("a soft constraint ... allowing the model to deviate").
+    # Its own numbers: fixed N of 7.0 / 8.0 / 9.0 produced BPIC 5.11 / 5.42 / 5.68 (Table III), i.e.
+    # 2.0 of target bought 0.57 of BPIC. Measured on Mote 2026-08-27 across three runs, N ramping
+    # 5.0 -> 6.5 moved val_bpic 3.20 -> 3.32. The achieved rate is an OBSERVABLE (log.jsonl's
+    # val_bpic); anything that needs the number reads it from there, never from these fields.
+    adapt_window: int = 100  # W: steps of LM loss averaged before the trigger may fire
+    adapt_threshold: float | None = None  # τ: boost N only while the windowed loss is under this (None = no trigger)
+    adapt_rate: float = 1.05  # γ: multiplicative boost applied to N_sched when the trigger fires
+
+    # --- bounded routing: GeneZip 2602.17739 §3.3 ----------------------------------------------
+    # A projection, not a loss. After thresholding gives a provisional mask, flip the fewest
+    # decisions (by p-confidence) needed to land the boundary count inside [floor, ceiling]. The
+    # paper uses it as an OOM guardrail — absolute K_min=8, and K_max only on the model that OOM'd
+    # without it — so the defaults here are a guardrail too: the ceiling exists to stop the serving
+    # arena overflowing its capacity mid-conversation, not to force a compression rate. Tightening
+    # `bound_ceiling` toward 1.0 turns it into a rate controller, which is beyond the paper's
+    # evidence and gets its own A/B before it is used that way.
+    bound_floor: int = 0  # K_min, absolute boundaries per sequence (0 = no floor)
+    bound_ceiling: float | None = None  # ρ_max: ceiling as a multiple of the target rate L/N (None = unbounded)
+    # Decode sees one byte and has no sequence to project over, so it keeps a plain threshold. 0.5 is
+    # H-Net's (cos_sim < 0 — consecutive states more than 90° apart); a bounded-routing run calibrates
+    # this to the rate its projection actually produces and logs it beside val_bpic.
+    decode_threshold: float = 0.5
+
 
 
 def _make(cls, d: dict):
@@ -122,6 +155,12 @@ class MoteConfig:
     mamba3: Mamba3Cfg = field(default_factory=Mamba3Cfg)
     spine: SpineCfg = field(default_factory=SpineCfg)
     max_seq_len: int = 2048  # bytes
+    # Serving reads a prompt in windows of this many bytes instead of one pass. The Mamba-3 prefill
+    # workspace is linear in the window (measured 2026-08-27: 25.1 KiB per prompt byte per layer, so
+    # 401 MiB for one layer at 16384), and the CPU reference path is QUADRATIC in it, so the window
+    # is what caps both. 4096 measured on Mote-138M at 16384: peak 865 -> 252 MiB, wall clock
+    # 1556 -> 1534 ms, identical boundary sequence. 0 disables windowing (one-shot prefill).
+    prefill_window: int = 4096
     tie_embeddings: bool = True
     norm_eps: float = 1e-5
     initializer_range: float = 0.02
