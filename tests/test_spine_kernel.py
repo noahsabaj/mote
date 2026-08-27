@@ -26,7 +26,7 @@ CASES = [
 ]
 
 
-def _inputs(n_in, n_out, D, has_p, y_per_i, device, seed=0):
+def _inputs(n_in, n_out, D, has_p, y_per_i, device, seed=0, y_dtype=torch.float32):
     torch.manual_seed(seed)
     B, L = 2, 129  # a token count that is not a multiple of anything
     x = torch.randn(B, L, n_in, D, device=device, requires_grad=True)
@@ -35,8 +35,21 @@ def _inputs(n_in, n_out, D, has_p, y_per_i, device, seed=0):
     y = None
     if has_p:
         shape = (B, L, n_out, D) if y_per_i else (B, L, D)
-        y = torch.randn(*shape, device=device, requires_grad=True)
+        y = torch.randn(*shape, device=device, dtype=y_dtype, requires_grad=True)
     return x, h, p, y
+
+
+def _close(got, want, name):
+    """Tolerance from the tensor's own dtype. A bf16 result is a single rounding of an fp32 value,
+    and the kernel's accumulation order differs from the reference's by ~1e-7 — enough to land on
+    the other side of a bf16 boundary, so bf16 tensors are allowed two ulp and fp32 tensors are
+    held to fp32 rounding."""
+    g, w = got.float(), want.float()
+    mag = max(w.abs().max().item(), 1e-6)
+    ulp = 2.0 ** -8 if want.dtype is torch.bfloat16 else 2.0 ** -23
+    tol = 2 * ulp * mag
+    err = (g - w).abs().max().item()
+    assert err <= tol, f"{name}: {err:.3e} > {tol:.3e} ({want.dtype}, |max| {mag:.3f})"
 
 
 @cuda
@@ -48,7 +61,7 @@ def test_fused_matches_the_materialised_function(n_in, n_out, D, has_p, y_per_i)
     out_k = spine_mix(a[0], a[1], a[2], a[3], n_out=n_out, y_per_i=y_per_i)
     out_r = spine_mix_reference(b[0], b[1], b[2], b[3], y_per_i=y_per_i)
     assert out_k.shape == out_r.shape
-    assert (out_k - out_r).abs().max().item() < 1e-5
+    _close(out_k, out_r, "forward")
 
     g = torch.randn_like(out_r)
     out_k.backward(g)
@@ -57,7 +70,7 @@ def test_fused_matches_the_materialised_function(n_in, n_out, D, has_p, y_per_i)
         if ta is None:
             continue
         assert ta.grad is not None, f"no gradient reached {name}"
-        assert (ta.grad - tb.grad).abs().max().item() < 1e-4, f"{name} gradient disagrees"
+        _close(ta.grad, tb.grad, f"{name} gradient")
 
 
 @cuda
@@ -134,3 +147,44 @@ def test_the_cpu_path_is_the_reference():
     got = spine_mix(x, h, p, y, n_out=4)
     want = spine_mix_reference(x, h, p, y)
     assert torch.equal(got, want)
+
+
+@cuda
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16], ids=["out-fp32", "out-bf16"])
+@pytest.mark.parametrize("y_per_i", [False, True], ids=["y-shared", "y-per-stream"])
+def test_it_reads_and_writes_native_dtypes(out_dtype, y_per_i):
+    """The point of the dtype plumbing: `y` arrives bf16 under autocast and `u` leaves bf16, and
+    neither is materialised as an fp32 copy on the way. X, H and P stay fp32 — X is the residual.
+    Gradients come back in each input's own dtype, which is what autograd requires."""
+    D = 128 if y_per_i else 512
+    a = _inputs(4, 4, D, True, y_per_i, "cuda", y_dtype=torch.bfloat16)
+    b = tuple(None if t is None else t.detach().clone().requires_grad_() for t in a)
+
+    out_k = spine_mix(a[0], a[1], a[2], a[3], n_out=4, y_per_i=y_per_i, out_dtype=out_dtype)
+    out_r = spine_mix_reference(b[0], b[1], b[2], b[3], y_per_i=y_per_i, out_dtype=out_dtype)
+    assert out_k.dtype is out_dtype
+    assert a[3].dtype is torch.bfloat16, "y must not have been promoted"
+    _close(out_k, out_r, "forward")
+
+    g = torch.randn_like(out_r)
+    out_k.backward(g)
+    out_r.backward(g)
+    assert a[0].grad.dtype is torch.float32, "dx must stay fp32 — X is the residual"
+    assert a[1].grad.dtype is torch.float32 and a[2].grad.dtype is torch.float32
+    assert a[3].grad.dtype is torch.bfloat16, "dy must match y's dtype"
+    for name, ta, tb in zip(("x", "h", "p", "y"), a, b):
+        _close(ta.grad, tb.grad, f"{name} gradient")
+
+
+@cuda
+def test_read_asks_the_kernel_for_its_output_dtype():
+    """`read` used to cast `u` down after the fact, which is a full copy of [B,L,d] at every site.
+    It now hands the dtype to the kernel, so the conversion happens in registers."""
+    from mote.model.spine import Spine
+
+    s = Spine(512, 4, site_idx=0, mode="expand").cuda()
+    x = torch.randn(2, 16, 4, 512, device="cuda")
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        u, _ = s.read(x)
+    assert u.dtype is torch.bfloat16
+    assert s.read(x)[0].dtype is torch.float32

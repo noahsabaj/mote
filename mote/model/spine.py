@@ -256,16 +256,17 @@ class Spine(nn.Module):
     def read(self, x: torch.Tensor):
         """[..., n, d_stream] → (u [..., d_model], carried coefficients for `write`)."""
         h_pre, h_post, h_res = self.coefficients(x)
-        if self.mode == "expand":
-            u = spine_mix(x, h_pre.unsqueeze(-2), n_out=1).squeeze(-2)
-        else:
-            u = spine_mix(x, h_pre).flatten(-2)
         # X is carried in fp32; the sublayer that consumes `u` runs in the autocast dtype. The
         # einsum this replaced was on autocast's lower-precision list, so it did this cast
         # implicitly — an fp32 `u` reaches the Relation kernel as an fp32 `p1` against a bf16
-        # `info` and fails its tl.dot at compile time. State the boundary rather than inherit it.
-        if torch.is_autocast_enabled(u.device.type):
-            u = u.to(torch.get_autocast_dtype(u.device.type))
+        # `info` and fails its tl.dot at compile time. State the boundary rather than inherit it,
+        # and hand it to the kernel so the cast happens in registers instead of as a copy.
+        dev = x.device.type
+        dt = torch.get_autocast_dtype(dev) if torch.is_autocast_enabled(dev) else x.dtype
+        if self.mode == "expand":
+            u = spine_mix(x, h_pre.unsqueeze(-2), n_out=1, out_dtype=dt).squeeze(-2)
+        else:
+            u = spine_mix(x, h_pre, out_dtype=dt).flatten(-2)
         return u, (h_post, h_res)
 
     def write(self, x: torch.Tensor, y: torch.Tensor, carried) -> torch.Tensor:

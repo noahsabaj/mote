@@ -71,9 +71,11 @@ if HAS_TRITON:
             if HAS_P:
                 p = tl.load(P + t * spt + i).to(tl.float32)
                 yo = i * D if Y_PER_I else 0
+                # Y arrives in whatever the autocast dtype is; it is promoted in registers, so the
+                # fp32 copy the wrapper used to materialise at every site never happens.
                 y = tl.load(Y + t * syt + yo + d, mask=m_d, other=0.0).to(tl.float32)
                 acc += p * y
-            tl.store(OUT + t * sot + i * D + d, acc, mask=m_d)
+            tl.store(OUT + t * sot + i * D + d, acc.to(OUT.dtype.element_ty), mask=m_d)
 
     @triton.jit
     def _mix_bwd_kernel(
@@ -95,6 +97,7 @@ if HAS_TRITON:
                 h = tl.load(H + t * sht + i * N_IN + m).to(tl.float32)
                 dx += h * do
                 tl.store(DH + t * sht + i * N_IN + m, tl.sum(do * x, axis=0))
+            # dx, dh and dp stay fp32: X is the residual and H/P are the spine's own coefficients.
             tl.store(DX + t * sxt + m * D + d, dx, mask=m_d)
         if HAS_P:
             dy_shared = tl.zeros([BLOCK_D], dtype=tl.float32)
@@ -105,11 +108,11 @@ if HAS_TRITON:
                 y = tl.load(Y + t * syt + yo + d, mask=m_d, other=0.0).to(tl.float32)
                 tl.store(DP + t * spt + i, tl.sum(do * y, axis=0))
                 if Y_PER_I:
-                    tl.store(DY + t * syt + i * D + d, p * do, mask=m_d)
+                    tl.store(DY + t * syt + i * D + d, (p * do).to(DY.dtype.element_ty), mask=m_d)
                 else:
                     dy_shared += p * do
             if not Y_PER_I:
-                tl.store(DY + t * syt + d, dy_shared, mask=m_d)
+                tl.store(DY + t * syt + d, dy_shared.to(DY.dtype.element_ty), mask=m_d)
 
 
 def _flat(t: Optional[torch.Tensor], nd: int) -> Optional[torch.Tensor]:
@@ -119,13 +122,13 @@ def _flat(t: Optional[torch.Tensor], nd: int) -> Optional[torch.Tensor]:
     return t.contiguous().reshape(-1, *t.shape[len(t.shape) - nd:])
 
 
-def _launch_fwd(x, h, p, y, n_out: int, y_per_i: bool):
+def _launch_fwd(x, h, p, y, n_out: int, y_per_i: bool, out_dtype: torch.dtype):
     xf = _flat(x, 2)                      # [T, N_IN, D]
     T, n_in, D = xf.shape
     hf = _flat(h, 2)                      # [T, N_OUT, N_IN]
     pf = _flat(p, 1) if p is not None else None
     yf = _flat(y, 2 if y_per_i else 1) if y is not None else None
-    out = torch.empty(T, n_out, D, device=xf.device, dtype=torch.float32)
+    out = torch.empty(T, n_out, D, device=xf.device, dtype=out_dtype)
     _mix_fwd_kernel[(T,)](
         xf, hf, pf if pf is not None else xf, yf if yf is not None else xf, out,
         D, n_in * D, n_out * n_in, n_out if pf is not None else 0,
@@ -165,12 +168,13 @@ if HAS_TRITON:
 
     @torch.library.custom_op("mote::spine_mix_fwd", mutates_args=())
     def _spine_mix_fwd(x: torch.Tensor, h: torch.Tensor, p: Optional[torch.Tensor],
-                       y: Optional[torch.Tensor], n_out: int, y_per_i: bool) -> torch.Tensor:
-        return _launch_fwd(x, h, p, y, n_out, y_per_i)
+                       y: Optional[torch.Tensor], n_out: int, y_per_i: bool,
+                       out_dtype: torch.dtype) -> torch.Tensor:
+        return _launch_fwd(x, h, p, y, n_out, y_per_i, out_dtype)
 
     @_spine_mix_fwd.register_fake
-    def _spine_mix_fwd_fake(x, h, p, y, n_out, y_per_i):
-        return x.new_empty((*x.shape[:-2], n_out, x.shape[-1]), dtype=torch.float32)
+    def _spine_mix_fwd_fake(x, h, p, y, n_out, y_per_i, out_dtype):
+        return x.new_empty((*x.shape[:-2], n_out, x.shape[-1]), dtype=out_dtype)
 
     @torch.library.custom_op("mote::spine_mix_bwd", mutates_args=())
     def _spine_mix_bwd(x: torch.Tensor, h: torch.Tensor, p: Optional[torch.Tensor],
@@ -185,12 +189,13 @@ if HAS_TRITON:
 
     @_spine_mix_bwd.register_fake
     def _spine_mix_bwd_fake(x, h, p, y, dout, n_out, y_per_i):
+        # dy carries y's own dtype: autograd requires each gradient to match its input.
         return (x.new_empty(x.shape, dtype=torch.float32), h.new_empty(h.shape, dtype=torch.float32),
                 p.new_empty(p.shape, dtype=torch.float32) if p is not None else x.new_zeros(()),
-                y.new_empty(y.shape, dtype=torch.float32) if y is not None else x.new_zeros(()))
+                y.new_empty(y.shape) if y is not None else x.new_zeros(()))
 
     def _setup_context(ctx, inputs, output):
-        x, h, p, y, n_out, y_per_i = inputs
+        x, h, p, y, n_out, y_per_i, _out_dtype = inputs
         ctx.save_for_backward(x, h, p, y)
         ctx.n_out, ctx.y_per_i = n_out, y_per_i
         ctx.has_p, ctx.has_y = p is not None, y is not None
@@ -198,30 +203,37 @@ if HAS_TRITON:
     def _backward(ctx, dout):
         x, h, p, y = ctx.saved_tensors
         dx, dh, dp, dy = _spine_mix_bwd(x, h, p, y, dout.contiguous(), ctx.n_out, ctx.y_per_i)
-        return dx, dh, dp if ctx.has_p else None, dy if ctx.has_y else None, None, None
+        return dx, dh, dp if ctx.has_p else None, dy if ctx.has_y else None, None, None, None
 
     _spine_mix_fwd.register_autograd(_backward, setup_context=_setup_context)
 
 
 def spine_mix(x: torch.Tensor, h: torch.Tensor, p: Optional[torch.Tensor] = None,
               y: Optional[torch.Tensor] = None, n_out: Optional[int] = None,
-              y_per_i: bool = False) -> torch.Tensor:
-    """out[..., i, d] = sum_m h[..., i, m] * x[..., m, d] + p[..., i] * y[..., (i,) d]."""
+              y_per_i: bool = False, out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    """out[..., i, d] = sum_m h[..., i, m] * x[..., m, d] + p[..., i] * y[..., (i,) d].
+
+    X, H and P are fp32 — X is the residual and H/P are the spine's own coefficients. `y` and the
+    result carry whatever dtype the caller asks for: `write` returns the fp32 residual, `read`
+    returns `u` in the sublayer's compute dtype. Both conversions happen in registers, so the
+    fp32 round trip this used to force at every site is gone.
+    """
     if n_out is None:
         n_out = h.shape[-2]
+    if out_dtype is None:
+        out_dtype = torch.float32
     if not HAS_TRITON or not (x.is_cuda or os.environ.get("TRITON_INTERPRET") == "1"):
-        return spine_mix_reference(x, h, p, y, y_per_i)
-    # The spine's state is fp32 by construction and `y` arrives bf16 under autocast. Promote at the
-    # boundary rather than inside the kernel: one dtype through the whole op is what makes the
-    # kernel and `spine_mix_reference` the same function, which is what the tests check.
+        return spine_mix_reference(x, h, p, y, y_per_i, out_dtype)
     f = lambda t: None if t is None else t.float().contiguous()
-    return _spine_mix_fwd(f(x), f(h), f(p), f(y), int(n_out), bool(y_per_i))
+    yc = None if y is None else y.contiguous()
+    return _spine_mix_fwd(f(x), f(h), f(p), yc, int(n_out), bool(y_per_i), out_dtype)
 
 
-def spine_mix_reference(x, h, p=None, y=None, y_per_i: bool = False) -> torch.Tensor:
+def spine_mix_reference(x, h, p=None, y=None, y_per_i: bool = False,
+                        out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
     """The materialised fp32 function the kernel implements (tests, and the CPU path)."""
     out = torch.einsum("...im,...md->...id", h.float(), x.float())
     if p is not None and y is not None:
         yf = y.float() if y_per_i else y.float().unsqueeze(-2)
         out = out + p.float().unsqueeze(-1) * yf
-    return out
+    return out if out_dtype is None else out.to(out_dtype)
