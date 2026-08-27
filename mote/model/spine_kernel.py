@@ -237,3 +237,103 @@ def spine_mix_reference(x, h, p=None, y=None, y_per_i: bool = False,
         yf = y.float() if y_per_i else y.float().unsqueeze(-2)
         out = out + p.float().unsqueeze(-1) * yf
     return out if out_dtype is None else out.to(out_dtype)
+
+
+# ---- the coefficient generator: RMSNorm over the flattened streams, then the phi projection -----
+#
+# `coefficients` reads the whole stream state to produce ~17 numbers per token. The RMSNorm writes
+# a normalised [T, F] copy and the projection reads it straight back — at 16384 with n=4 expand,
+# F is 2048 and that intermediate is 134 MB written and 134 MB read at each of seven sites, about
+# 1.9 GB of traffic per forward for a result that is kilobytes. Fusing them means x is read once
+# and the intermediate never exists.
+#
+# Only the forward is a kernel. The backward needs two reductions over the TOKEN axis (dphi and the
+# norm's dw), which across programs would mean atomics and a non-deterministic result; instead it
+# recomputes `normed` from x and the saved per-token rms — one pass — and lets cuBLAS do those two
+# as ordinary GEMMs. Determinism is kept, and the memory that was saved is saved where it counts:
+# forward no longer holds seven of those intermediates alive at once.
+
+
+if HAS_TRITON:
+
+    @triton.jit
+    def _gen_proj_kernel(
+        X, W, PHI, G, RMS,
+        F, C, sxt, sgt,
+        BLOCK_F: tl.constexpr, EPS: tl.constexpr,
+    ):
+        t = tl.program_id(0)
+        f = tl.arange(0, BLOCK_F)
+        m_f = f < F
+        x = tl.load(X + t * sxt + f, mask=m_f, other=0.0).to(tl.float32)
+        r = tl.rsqrt(tl.sum(x * x, axis=0) / F + EPS)
+        tl.store(RMS + t, r)
+        w = tl.load(W + f, mask=m_f, other=0.0).to(tl.float32)
+        normed = x * r * w                      # never leaves registers
+        for c in range(C):
+            pw = tl.load(PHI + c * F + f, mask=m_f, other=0.0).to(tl.float32)
+            tl.store(G + t * sgt + c, tl.sum(normed * pw, axis=0))
+
+
+def _launch_gen_proj(x_flat, weight, phi_w, eps: float):
+    T, F = x_flat.shape
+    C = phi_w.shape[0]
+    g = torch.empty(T, C, device=x_flat.device, dtype=torch.float32)
+    rms = torch.empty(T, device=x_flat.device, dtype=torch.float32)
+    _gen_proj_kernel[(T,)](x_flat, weight, phi_w, g, rms, F, C, F, C,
+                           BLOCK_F=_next_pow2(F), EPS=eps)
+    return g, rms
+
+
+if HAS_TRITON:
+
+    @torch.library.custom_op("mote::spine_gen_proj", mutates_args=())
+    def _spine_gen_proj(x_flat: torch.Tensor, weight: torch.Tensor, phi_w: torch.Tensor,
+                        eps: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        return _launch_gen_proj(x_flat, weight, phi_w, eps)
+
+    @_spine_gen_proj.register_fake
+    def _spine_gen_proj_fake(x_flat, weight, phi_w, eps):
+        T = x_flat.shape[0]
+        return (x_flat.new_empty((T, phi_w.shape[0]), dtype=torch.float32),
+                x_flat.new_empty((T,), dtype=torch.float32))
+
+    def _gp_setup(ctx, inputs, output):
+        x_flat, weight, phi_w, eps = inputs
+        ctx.save_for_backward(x_flat, weight, phi_w, output[1])
+        ctx.eps = eps
+
+    def _gp_backward(ctx, dg, _drms):
+        x, w, phi_w, rms = ctx.saved_tensors
+        F = x.shape[-1]
+        dg = dg.contiguous().float()
+        xr = x * rms.unsqueeze(-1)                       # x_hat, recomputed rather than stored
+        normed = xr * w
+        dphi_w = dg.transpose(0, 1) @ normed             # cuBLAS: deterministic, no atomics
+        dnormed = dg @ phi_w
+        dw = (dnormed * xr).sum(0)
+        dxhat = dnormed * w
+        # d/dx of x * rsqrt(mean(x^2) + eps), with the mean's own dependence on x
+        dx = rms.unsqueeze(-1) * (dxhat - xr * (dxhat * xr).mean(-1, keepdim=True))
+        return dx.to(x.dtype), dw.to(w.dtype), dphi_w.to(phi_w.dtype), None
+
+    _spine_gen_proj.register_autograd(_gp_backward, setup_context=_gp_setup)
+
+
+def gen_proj(x_flat: torch.Tensor, weight: torch.Tensor, phi_w: torch.Tensor,
+             eps: float) -> torch.Tensor:
+    """RMSNorm(x_flat) @ phi_w.T, without ever materialising the normalised intermediate."""
+    if not HAS_TRITON or not (x_flat.is_cuda or os.environ.get("TRITON_INTERPRET") == "1"):
+        return gen_proj_reference(x_flat, weight, phi_w, eps)
+    lead, F = x_flat.shape[:-1], x_flat.shape[-1]
+    g, _rms = _spine_gen_proj(x_flat.contiguous().reshape(-1, F).float(),
+                              weight.float(), phi_w.float(), float(eps))
+    return g.reshape(*lead, phi_w.shape[0])
+
+
+def gen_proj_reference(x_flat: torch.Tensor, weight: torch.Tensor, phi_w: torch.Tensor,
+                       eps: float) -> torch.Tensor:
+    """The materialised function: what RMSNorm followed by nn.Linear(bias=False) computes."""
+    xf = x_flat.float()
+    y = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
+    return (y * weight.float()) @ phi_w.float().transpose(0, 1)

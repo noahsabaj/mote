@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -52,7 +53,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .norm import RMSNorm
-from .spine_kernel import spine_mix
+from .spine_kernel import gen_proj, spine_mix
+
+_FUSED_GEN = os.environ.get("MOTE_NO_FUSED_SPINE_GEN") != "1"  # kill switch, as the fused norm has
 
 PRE_BIAS = 2.0    # the read's rotating one-hot: site k prefers stream k mod n by e^4 ≈ 7.4 : 1
 POST_BIAS = 0.0   # 2·σ(0) = 1 exactly, so at init every stream receives the update with weight 1 (HC's B = 1)
@@ -238,12 +241,19 @@ class Spine(nn.Module):
     def coefficients(self, x: torch.Tensor):
         """x: [..., n, d_stream] → (H_pre, H_post, H_res), all in fp32."""
         xf = x.float()
-        flat = self.gen_norm(xf.flatten(-2))
-        if self.phi is not None:
-            g_pre, g_post, g_res = self.phi(flat).split(self.splits, dim=-1)
-        else:
-            z = flat.new_zeros(*flat.shape[:-1], sum(self.splits))
+        if self.phi is None:
+            # a static hyper-connection: nothing reads the norm, so do not pay for it
+            z = xf.new_zeros(*xf.shape[:-2], sum(self.splits))
             g_pre, g_post, g_res = z.split(self.splits, dim=-1)
+        elif _FUSED_GEN:
+            # RMSNorm and the projection in one pass: the normalised [T, n*d] intermediate is
+            # 134 MB at 16384 with n=4 and exists only to be read straight back by a matmul whose
+            # result is kilobytes. Seven sites, written and read: ~1.9 GB of traffic per forward.
+            g = gen_proj(xf.flatten(-2), self.gen_norm.weight, self.phi.weight, self.gen_norm.eps)
+            g_pre, g_post, g_res = g.split(self.splits, dim=-1)
+        else:
+            flat = self.gen_norm(xf.flatten(-2))
+            g_pre, g_post, g_res = self.phi(flat).split(self.splits, dim=-1)
         a = self.alpha.float()
         h_post = self.post_scale * torch.sigmoid(a[1] * g_post + self.b_post)
         h_res = self.res_mixer(a[2] * g_res + self.b_res)

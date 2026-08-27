@@ -301,3 +301,69 @@ def test_stats_are_empty_without_a_spine():
 
     m, _ = _spine_model(mode="off")
     assert spine_stats(m) == {}
+
+
+# ---- the coefficient generator ------------------------------------------------------------------
+
+@cuda
+@pytest.mark.parametrize("F,C", [(2048, 17), (512, 29), (2048, 4), (96, 9)],
+                         ids=["expand-n4", "frac-n4", "no-mixer", "narrow"])
+def test_fused_generator_matches_rmsnorm_then_linear(F, C):
+    """One pass instead of two. The normalised [T, F] intermediate exists only to be read straight
+    back by a projection whose result is kilobytes — 134 MB written and read at each of seven sites
+    at 16384 with n=4."""
+    from mote.model.spine_kernel import gen_proj, gen_proj_reference
+
+    torch.manual_seed(0)
+    T = 257
+    mk = lambda *s: torch.randn(*s, device="cuda", requires_grad=True)
+    x, w, phi = mk(T, F), mk(F), mk(C, F)
+    cl = lambda t: t.detach().clone().requires_grad_()
+    xr, wr, phir = cl(x), cl(w), cl(phi)
+
+    a = gen_proj(x, w, phi, 1e-5)
+    b = gen_proj_reference(xr, wr, phir, 1e-5)
+    _close(a, b, "forward")
+    g = torch.randn_like(b)
+    a.backward(g)
+    b.backward(g)
+    for name, ta, tb in (("x", x, xr), ("weight", w, wr), ("phi", phi, phir)):
+        _close(ta.grad, tb.grad, f"{name} gradient")
+
+
+@cuda
+def test_the_generator_backward_is_deterministic():
+    """The two token-axis reductions (dphi and the norm's dw) would need atomics if they were done
+    across programs. They are cuBLAS GEMMs on a recomputed `normed` instead, so a rerun is
+    bit-identical and the memory is still saved where it counts — forward holds no intermediate."""
+    from mote.model.spine_kernel import gen_proj
+
+    torch.manual_seed(0)
+    x = torch.randn(257, 2048, device="cuda", requires_grad=True)
+    w = torch.randn(2048, device="cuda", requires_grad=True)
+    phi = torch.randn(17, 2048, device="cuda", requires_grad=True)
+    outs = []
+    for _ in range(3):
+        for t in (x, w, phi):
+            t.grad = None
+        o = gen_proj(x, w, phi, 1e-5)
+        o.backward(torch.ones_like(o))
+        outs.append((o.detach().clone(), x.grad.clone(), phi.grad.clone()))
+    for o, dx, dphi in outs[1:]:
+        assert torch.equal(o, outs[0][0])
+        assert torch.equal(dx, outs[0][1])
+        assert torch.equal(dphi, outs[0][2])
+
+
+@cuda
+def test_a_static_spine_never_touches_the_generator():
+    """With --no-spine-dynamic there is no phi, so the coefficients are the biases alone and the
+    RMSNorm has no reader. The old path computed it anyway and used the result only for a shape."""
+    from mote.model.spine import Spine
+
+    s = Spine(512, 4, site_idx=0, mode="expand", dynamic=False).cuda()
+    assert s.phi is None
+    x = torch.randn(2, 16, 4, 512, device="cuda")
+    h_pre, h_post, h_res = s.coefficients(x)
+    assert h_pre.shape[-1] == 4 and h_res.shape[-2:] == (4, 4)
+    assert torch.allclose(h_post, torch.full_like(h_post, 2.0 * torch.sigmoid(torch.zeros(1)).item()))
