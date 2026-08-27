@@ -52,6 +52,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .norm import RMSNorm
+from .spine_kernel import spine_mix
 
 PRE_BIAS = 2.0    # the read's rotating one-hot: site k prefers stream k mod n by e^4 ≈ 7.4 : 1
 POST_BIAS = 0.0   # 2·σ(0) = 1 exactly, so at init every stream receives the update with weight 1 (HC's B = 1)
@@ -256,21 +257,23 @@ class Spine(nn.Module):
         """[..., n, d_stream] → (u [..., d_model], carried coefficients for `write`)."""
         h_pre, h_post, h_res = self.coefficients(x)
         if self.mode == "expand":
-            u = torch.einsum("...nd,...n->...d", x.float(), h_pre)
+            u = spine_mix(x, h_pre.unsqueeze(-2), n_out=1).squeeze(-2)
         else:
-            u = torch.einsum("...nm,...md->...nd", h_pre, x.float()).flatten(-2)
+            u = spine_mix(x, h_pre).flatten(-2)
+        # X is carried in fp32; the sublayer that consumes `u` runs in the autocast dtype. The
+        # einsum this replaced was on autocast's lower-precision list, so it did this cast
+        # implicitly — an fp32 `u` reaches the Relation kernel as an fp32 `p1` against a bf16
+        # `info` and fails its tl.dot at compile time. State the boundary rather than inherit it.
+        if torch.is_autocast_enabled(u.device.type):
+            u = u.to(torch.get_autocast_dtype(u.device.type))
         return u, (h_post, h_res)
 
     def write(self, x: torch.Tensor, y: torch.Tensor, carried) -> torch.Tensor:
         """X ← H_res·X + H_postᵀ·y. `y` is the site's output at d_model; X stays fp32."""
         h_post, h_res = carried
-        yf = y.float()
         if self.mode == "frac":
-            yf = yf.unflatten(-1, (self.n, self.d_stream))
-            update = h_post.unsqueeze(-1) * yf
-        else:
-            update = h_post.unsqueeze(-1) * yf.unsqueeze(-2)
-        return torch.einsum("...nm,...md->...nd", h_res, x.float()) + update
+            return spine_mix(x, h_res, h_post, y.unflatten(-1, (self.n, self.d_stream)), y_per_i=True)
+        return spine_mix(x, h_res, h_post, y, y_per_i=False)
 
 
 class StreamExpand(nn.Module):

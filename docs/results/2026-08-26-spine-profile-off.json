@@ -1,0 +1,21 @@
+{
+ "preset": "mote-138m",
+ "spine": "off",
+ "spine_n": 4,
+ "params": 138401306,
+ "batch": 1,
+ "seq_len": 16384,
+ "grad_accum": 8,
+ "bucket": 64,
+ "flash": true,
+ "ckpt_main": true,
+ "block_local_mbp": true,
+ "mbp": true,
+ "sec_per_step": 2.185,
+ "bytes_per_sec": 59986,
+ "bytes_per_chunk": 6.0,
+ "flops_per_byte_M": 268.8,
+ "tflops": 16.12,
+ "mfu": 0.366,
+ "peak_mem_GB": 5.18
+}
