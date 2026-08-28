@@ -566,6 +566,44 @@ option only if the grid finds a region above the gate (it needs a 2-row decode g
 at layers > d, and serial prefill); the looped-main arm (2608.18222) is unchanged — the paper's cleanest
 result is that looping and recirculation are different principles and looping has no training-free gain.
 
+## Reading 2026-08-28 (2608.08888, Full-bandwidth transformer)
+
+Wang, …, Langford (JHU/Princeton/Microsoft): widen the inter-step channel of a decoder by feeding the
+previous position's **top-layer state** back into the next input through a GLU — `u_t = W_U h_{t−1} ⊙
+σ(W_G e_t)` — the state on the value path, the sampled token only as the gate (an additive fusion leaves a
+shortcut that ignores the state; the gate makes reading it mandatory). Two D×D matmuls per token, KV
+cache and stack untouched, prefill single-pass ("Soft") or one extra fused parallel pass ("Fused").
+Trained in parallel by **multi-pass teacher forcing**: pass 1 standard, pass k shifts pass k−1's top
+states right by one position, fuses, re-runs the stack, NTP loss on every pass (λ = 1, no detach);
+schedule 75 % 1-pass / 22 % 2-pass / 3 % 3-pass introduced mid-training from a standard checkpoint —
+and the 3 % three-pass batches are load-bearing (2-pass-only diverges past its trained horizon, with them
+the map is a contraction stable to 1000 passes). Prefix mixin (random plain prefix per fused pass),
+depth-scaled O(1) top-state norm, RMSNorm on the fused input, tied embeddings, jitter σ = 0.02. 1B / 24
+layers, Phi-4 mix, NorMuon: 200B-token FBT ≈ 400B standard on val loss and 5-shot LM-eval at 1.28×
+token-equivalent compute; Soft > Standard on every generation task with the same weights (Math500
+0.27 → 0.37), Fused best on code; carries through instruction tuning (GSM8K 64.5 → 67.9); shorter traces on
+base models; layer-0 linear probes of global state 99.6–100 % vs chance. Caveats: 1B only, schedule
+heuristic, decodability ≠ use, and Soft decoding is incompatible with exact parallel draft verification
+(the fused input at t needs h_{t−1}) — their vLLM path does not speculate.
+
+**Where it lands.** This is the trained version of what 2608.17981 hypothesised, and it fits a
+from-scratch run in a way recirculation cannot: prefill and training stay parallel. Mote's byte level has
+exactly the narrow channel (only the sampled byte returns to the encoder; the Mamba-3 decoder state carries
+z forward but never back into the encoder or the main network), and the trunk is **data-repeating** (2.8
+passes over mix A in 7 days) — the regime the paper is built for. The fusion point exists already:
+`step()` holds the decoder's normalised top state `h3` before `head_logits`, tied embeddings are on, and the
+decode graph can carry `h3_{t−1}` in a static buffer as their vLLM note does. Byte-level twist worth
+testing first: with the fused input feeding the encoder, the **router** sees the fully processed past
+when it decides boundaries. The paper's own schedule says where it goes: **not in the frozen trunk** —
+a pre-registered pair on the trunk snapshot (standard continuation vs latent-feedback continuation at the
+75/22/3 mix, equal wall-clock and matched bytes), read by fused-prefill val_bpb at k = 0/1/2 (parallel,
+cheap) and the serving bench under Soft decoding, with the ±0.005 gate on both k = 1 and the k = 0
+regression; mid-training starts from the winner. Unmeasured risk: a 2-pass batch keeps pass-1
+activations (no detach) — the flagship's byte-level outer stacks at 16384 may not fit the 6.2 GB ceiling;
+`profile_step` with a 2-pass step decides that before the pair is queued. Build: GLU fusion + input
+RMSNorm, the multi-pass loop with prefix mixin and jitter in the trainer, Soft/Fused in the engine and
+graph, a k-pass eval. Nothing here reopens the mid 2×2 protocol.
+
 ## Out of scope until the above
 
 Looped main network, test-time-training memory layers instead of a window, any change to the
