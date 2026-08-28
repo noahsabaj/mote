@@ -227,7 +227,7 @@ every prompt scored full marks. Before any stage runs, **Round A** bakes off DPO
 new negative-class and tie pairs) off a shared 30-min SFT from `t3l_dense_8e-4`, with a second SFT at
 `--neutral-frac 0.15` as its own arm — 70% of the false firing is in the SFT checkpoint before DPO ever runs, so
 the SFT half is measured too. **Round B** runs the winner and runner-up on the 20k sim pairs against the real
-gate. SFT-1 additionally gets difficulty selection (`mote.data.select_sft`, ~4 GPU-min on the 4060 Ti — not free,
+gate. SFT-1 additionally gets difficulty selection (`mote.data.select_sft`, ~4 GPU-min on the 4060 Ti — not free; a mid-run re-selection (`--reselect-every`, trajectory rule) was built 2026-08-28 and is A/B-gated before it becomes the default — docs/research/curriculum-2026-08-28.md, which also holds RLVR-1's signed PATH-style sampler spec —
 the earlier "CPU only" estimate was wrong) and On-Policy Replay between stages (`mote.data.replay`), which turns
 the no-regression guards from detectors into a mechanism.
 1. **SFT-1** (format): init = the flagship base; `sft_local` + identity 5 % + sim QA ~10 %. The

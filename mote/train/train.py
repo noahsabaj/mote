@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -455,6 +456,16 @@ def build_argparser() -> argparse.ArgumentParser:
                          "back on its own, and a flagship at 16384 on the CPU reference path took 23.5 GB — the kernel "
                          "OOM-killer took the whole daemon, three times")
     ap.add_argument("--sft", action="store_true", help="train on an SFT shard (assistant-byte loss mask)")
+    ap.add_argument("--keep", default=None, metavar="NPY",
+                    help="window starts from mote.data.select_sft: the main shard is sampled from these only (SFT-1's signed one-shot difficulty selection)")
+    ap.add_argument("--reselect-every", type=float, default=0.0, metavar="FRAC",
+                    help="re-select the SFT windows every FRAC of the budget with the live model (the trajectory rule, "
+                         "docs/research/curriculum-2026-08-28.md): pass 0 at the start fixes tau_m = the shard's 20th-percentile "
+                         "loss, later passes drop what is mastered (a floor share stays) and what has not moved. 0 = off. "
+                         "Signed 2026-08-28 as A/B-gated: it becomes SFT-1's default only if the static-vs-dynamic pair passes")
+    ap.add_argument("--reselect-windows", type=int, default=0, help="score an evenly spread sample of this many windows per pass (0 = all; ~4 GPU-min per 127 MB at 2048)")
+    ap.add_argument("--reselect-floor", type=float, default=0.1, help="share of mastered windows kept in the mix (forgetting)")
+    ap.add_argument("--reselect-eps", type=float, default=0.02, help="a window whose loss moved less than this since the last pass is stuck")
     ap.add_argument("--init-from", default=None, help="checkpoint to initialize weights from (e.g. pretrain -> SFT)")
     ap.add_argument("--ratio-weight", type=float, default=None, help="override dc.ratio_loss_weight (\u03b1)")
     ap.add_argument("--bf16-residual", action="store_true", help="A/B: keep the residual stream in bf16 instead of fp32")
@@ -656,9 +667,15 @@ class Trainer:
             self.jepa_opt = torch.optim.AdamW(self.jepa.parameters(), lr=args.lr, betas=(0.9, args.beta2), weight_decay=0.0)
             print(f"jepa aux: {args.jepa}, weight {args.jepa_weight}, {sum(q.numel() for q in self.jepa.parameters())/1e6:.2f}M aux params", flush=True)
 
+        if args.reselect_every > 0 and not args.sft:
+            raise ValueError("--reselect-every selects assistant-byte windows: it needs --sft")
         aug = {"noise": args.aug_noise, "r2l": args.aug_r2l, "offset_max": args.aug_offset}
-        train_shard = ByteShard(args.data, "train", sft=args.sft, seed=args.seed, **aug)
+        train_shard = ByteShard(args.data, "train", sft=args.sft, seed=args.seed, keep=args.keep, **aug)
+        self._main_shard = train_shard  # the shard --keep / --reselect-every select from (the mix wraps it)
         self.val_shard = ByteShard(args.data, "val", sft=args.sft)
+        self._reselect_next = 0.0 if args.reselect_every > 0 else None  # pass 0 at the start, then every FRAC
+        self._reselect_prev = None  # the previous pass's per-window losses
+        self._reselect_tau = None  # tau_m, fixed by pass 0
         if args.mix:
             extras = []
             for spec in args.mix:
@@ -859,6 +876,32 @@ class Trainer:
             out["ce_mbp"] = agg["ce_mbp_sum"] / total_n
         return out
 
+    def _reselect(self):
+        """One re-selection pass with the live model (docs/research/curriculum-2026-08-28.md). A generator: the
+        GPU gate is released between scoring batches, so replies slot in as they do between training slices."""
+        from ..data.select_sft import trajectory_keep, window_losses, window_starts
+
+        args = self.args
+        shard = self._main_shard
+        starts = window_starts(shard, args.seq_len, args.reselect_windows)
+        losses = np.full(len(starts), np.nan, dtype=np.float64)
+        self.model.eval()
+        try:
+            for i in range(0, len(starts), args.batch_size):
+                chunk = starts[i : i + args.batch_size]
+                losses[i : i + len(chunk)] = window_losses(self.model, shard, chunk, args.seq_len, args.batch_size, self.device)
+                yield ("slice", None)
+        finally:
+            self.model.train()
+        keep, rep = trajectory_keep(starts, losses, self._reselect_prev, self._reselect_tau, args.reselect_eps,
+                                    args.reselect_floor, seed=args.seed + self.step)
+        if self._reselect_tau is None:
+            self._reselect_tau = rep["tau_m"]
+        self._reselect_prev = losses
+        shard.keep = keep
+        self._reselect_next += args.reselect_every
+        self.log({"reselect": rep, "step": self.step, "progress": round(self._progress(), 3)})
+
     def _progress(self) -> float:
         if self.time_driven:
             return min((time.time() - self.t_start) / self.budget_sec, 1.0)
@@ -883,6 +926,8 @@ class Trainer:
         """The whole run. Drain it (`for _ in t.run(): pass`) for the old behaviour."""
         args, cfg, device = self.args, self.cfg, self.device
         self.model.train()
+        if self._reselect_next is not None and self.step == 0:
+            yield from self._reselect()  # pass 0: tau_m and the first keep, before any training
 
         if self.total_steps == 0:
             probe_steps = 5
@@ -978,6 +1023,8 @@ class Trainer:
                 ev = yield from self._evaluate(target_ratio)
                 ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
                 self.log({"eval": ev})
+            if self._reselect_next is not None and self._reselect_next < 1.0 and self._progress() >= self._reselect_next:
+                yield from self._reselect()
             if (time.time() - last_ckpt) / 60 >= args.ckpt_minutes:
                 self.save()
                 last_ckpt = time.time()
