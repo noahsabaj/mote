@@ -85,7 +85,8 @@ def test_same_seed_same_trajectory(tmp_path, monkeypatch):
     cfg_path, prefix = _fixture(tmp_path)
     finals = []
     for name in ("a", "b"):
-        t = Trainer(_argv(cfg_path, prefix, tmp_path / name, ["--max-steps", "3"]))
+        # the CPU on purpose, said so: since 2026-08-28 the trainer refuses to fall back to it silently
+        t = Trainer(_argv(cfg_path, prefix, tmp_path / name, ["--max-steps", "3", "--device", "cpu"]))
         for _ in t.run():
             pass
         t.close()

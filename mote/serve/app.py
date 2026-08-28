@@ -11,6 +11,9 @@ import json
 import mimetypes
 import os
 import secrets
+import signal
+import subprocess
+import sys
 import threading
 import traceback
 import time
@@ -41,6 +44,8 @@ app = FastAPI(title="Mote Studio")
 STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "token": None,
                "challenger": None, "challenger_loading": False,  # challenger: a second Engine for blind A/B (docs/prefs.md)
                "jobs": None, "gate": None,  # the training job queue and the GPU gate it shares with serving (docs/shape.md)
+               "parked": False,  # a person moved the engine to the CPU (POST /api/engine/device) and it stays there
+               "cuda_missing": None,  # launched --device cuda but CUDA never came up: serving on the CPU, queue paused
                "config_file": ROOT / ".mote" / "config.json"}  # where the pin (the boot checkpoint) lives
 
 
@@ -63,9 +68,63 @@ def _serve_device() -> str:
     """Where the studio's engine belongs right now: the CPU while any job runs or is about to, the configured
     device (the GPU) when the queue idles (signed 2026-08-25: training gets the whole card, replies never wait
     for it; ~45 B/s on the CPU vs 85–190 on the GPU, a cold 4.6 KB read is 10 s)."""
+    if STATE.get("cuda_missing") or STATE.get("parked"):
+        return "cpu"
     jobs = STATE["jobs"]
     busy = jobs is not None and (jobs.current() is not None or jobs.has_runnable())
     return "cpu" if busy else (STATE.get("device") or "cpu")
+
+
+CUDA_WAIT_S = float(os.environ.get("MOTE_CUDA_WAIT", 180.0))
+CUDA_REPROBE_S = float(os.environ.get("MOTE_CUDA_REPROBE", 30.0))
+
+
+def cuda_probe(timeout: float = 60.0) -> tuple:
+    """(usable, reason) — asked of a fresh interpreter. In-process `torch.cuda.is_available()` caches its first
+    answer for the life of the process, so a daemon that asked before the driver loaded could never see it
+    arrive; a subprocess asks anew every time."""
+    code = "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)"
+    try:
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=timeout)
+    except Exception as ex:  # a hung driver call, a missing interpreter
+        return False, repr(ex)
+    if p.returncode == 0:
+        return True, "ok"
+    lines = [ln for ln in p.stderr.strip().splitlines() if ln.strip()]
+    return False, (lines[-1] if lines else "torch.cuda.is_available() is False")[:200]
+
+
+def wait_for_cuda(timeout: float, probe=cuda_probe, interval: float = 5.0, clock=time.monotonic, sleep=time.sleep):
+    """Block until `probe` says CUDA is usable or `timeout` seconds pass; None when ready, else the last reason.
+
+    2026-08-28: a kernel update put the nvidia module 57 s after boot and this daemon was up at 13 s. Its
+    trainer fell back to the CPU, a flagship at 16384 on the CPU reference path took 23.5 GB, and the kernel
+    OOM-killer took the daemon — three times in 45 s. Waiting here, before anything in this process touches
+    torch.cuda, is the only place the wait can live: after the first in-process check the answer is fixed.
+    """
+    t0 = clock()
+    while True:
+        ok, why = probe()
+        if ok:
+            return None
+        waited = clock() - t0
+        if waited >= timeout:
+            return why
+        print(f"waiting for CUDA ({waited:.0f} s): {why}", flush=True)
+        sleep(min(interval, max(timeout - waited, 0.0)))
+
+
+def _self_heal() -> None:
+    """Without CUDA the daemon serves on the CPU with the queue paused; every `CUDA_REPROBE_S` a fresh interpreter
+    asks again, and the first yes restarts this process — SIGTERM is the graceful path systemd uses, the
+    supervisor relaunches, and the new process sees the device from the start."""
+    while STATE.get("cuda_missing"):
+        time.sleep(CUDA_REPROBE_S)
+        ok, _why = cuda_probe()
+        if ok:
+            print("CUDA is available now: restarting to use it", flush=True)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
 
 
 def _move_engine(device: str, warm: bool) -> None:
@@ -93,8 +152,9 @@ def _job_started(rec) -> None:
 
 
 def _queue_idle() -> None:
-    """Nothing runnable is queued: serving comes back to the GPU with its arena + graphs (one warm-up)."""
-    _move_engine(STATE.get("device") or "cpu", warm=True)
+    """Nothing runnable is queued: serving comes back to the GPU with its arena + graphs (one warm-up) —
+    unless a person parked it on the CPU, or there is no GPU to come back to."""
+    _move_engine(_serve_device(), warm=True)
 
 
 def _pin_path() -> Optional[str]:
@@ -380,10 +440,36 @@ def training_release():
     return {"released": was, **jobs.status()}
 
 
+class EngineDeviceBody(BaseModel):
+    device: str
+
+
+@app.post("/api/engine/device")
+def engine_device(body: EngineDeviceBody):
+    """Park the studio's engine on the CPU, or bring it back: the move the queue makes around a job, on request,
+    so a standalone measurement (a profile_step sweep) can have the whole card while the studio stays up.
+    Parked stays parked across idle signals until "cuda" is asked for."""
+    if body.device not in ("cpu", "cuda"):
+        raise HTTPException(400, "device must be cpu or cuda")
+    if STATE["engine"] is None:
+        raise HTTPException(503, "no engine")
+    jobs = STATE["jobs"]
+    if body.device == "cuda":
+        if STATE.get("cuda_missing"):
+            raise HTTPException(409, f"CUDA is not available: {STATE['cuda_missing']}")
+        if jobs is not None and jobs.current() is not None:
+            raise HTTPException(409, "a job owns the GPU; the engine comes back when the queue idles")
+        STATE["parked"] = False
+    else:
+        STATE["parked"] = True
+    _move_engine(body.device, warm=(body.device == "cuda"))
+    return {"parked": bool(STATE["parked"]), **STATE["engine"].info()}
+
+
 @app.get("/api/training/queue")
 def training_queue():
     jobs = STATE["jobs"]
-    return jobs.status() if jobs is not None else {"current": None, "queued": [], "recent": [], "halted": None}
+    return jobs.status() if jobs is not None else {"current": None, "queued": [], "recent": [], "halted": None, "paused": None}
 
 
 @app.get("/api/training/runs")
@@ -717,6 +803,12 @@ def main(argv=None):
     ck = Path(args.checkpoint) if args.checkpoint else (discover_checkpoints(ROOT) or [None])[0]
     if ck is None:
         raise SystemExit("no checkpoint found; train one first or pass --checkpoint")
+    if args.device == "cuda":  # before anything here asks torch.cuda: the first answer is the process's forever
+        missing = wait_for_cuda(CUDA_WAIT_S)
+        if missing:
+            STATE["cuda_missing"] = missing
+            print(f"CUDA not available after {CUDA_WAIT_S:.0f} s ({missing}): serving on the CPU with the queue "
+                  f"paused; re-probing every {CUDA_REPROBE_S:.0f} s and restarting when it appears", flush=True)
     print(f"loading {ck} ...", flush=True)
     STATE["device"] = args.device
     gate = threading.Lock()
@@ -724,6 +816,8 @@ def main(argv=None):
     jobs = JobQueue(ROOT / ".mote" / "jobs.json", gate, on_serve_sync=_serve_sync, on_finished=_job_finished,
                     on_started=_job_started, on_idle=_queue_idle)
     STATE["jobs"] = jobs
+    if STATE["cuda_missing"]:
+        jobs.pause(f"waiting for CUDA: {STATE['cuda_missing']}")
     # A queued job starts right away and owns the GPU: serving starts on the CPU and moves to the GPU when the
     # queue idles (signed 2026-08-25). No warm-up on the CPU: there is nothing to JIT there.
     device = _serve_device()
@@ -735,13 +829,13 @@ def main(argv=None):
         print(f"training queued: serving on the {device} until the queue idles", flush=True)
     STATE["engine"] = eng
     jobs.start()
+    if STATE["cuda_missing"]:
+        threading.Thread(target=_self_heal, name="mote-cuda-probe", daemon=True).start()
     print(json.dumps(eng.info(), indent=1), flush=True)
     # uvicorn captures SIGTERM/SIGINT for its graceful shutdown, then restores the handlers it found and
     # re-raises the signal — with the default handlers that killed the process (exit -15) before the hook
     # below ever ran (2026-08-24 night, three restarts from step 0). Swallow the re-raised signal instead:
     # uvicorn's own handler still drives the shutdown, and `run()` returns here afterwards.
-    import signal
-
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda signum, frame: None)
     uvicorn.run(app, host=args.host, port=args.port)

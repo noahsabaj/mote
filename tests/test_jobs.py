@@ -343,3 +343,121 @@ def test_ema_math_and_engine_hot_swap(tmp_path):
     p_oth = dict(other.named_parameters())
     k = next(iter(p_oth))
     assert torch.allclose(p_eng[k], p_oth[k])
+
+
+# ---- the boot-time breaker, usable memory, the fit rule, pause (2026-08-28) --------------------
+# A kernel update put the nvidia module 57 s after boot; the daemon was up at 13 s, started a flagship job
+# on the CPU, and the kernel OOM-killer took the whole process — three times, because the job came straight
+# back to the front each time. These pin what the queue does about that on its own.
+def _boot(state: Path, jobs: list):
+    state.write_text(json.dumps({"jobs": jobs}))
+    return JobQueue(state, threading.Lock())  # boot-time load only
+
+
+def test_a_job_that_died_before_logging_a_step_gets_one_free_retry(tmp_path):
+    q = _boot(tmp_path / "jobs.json", [{"id": "dead0000", "argv": _argv(tmp_path, tmp_path / "runC"), "state": "running"}])
+    copy = q.status()["queued"][0]
+    assert copy["deaths"] == 1 and copy["resumed"] and q.halted is None  # a reboot can land right after a start
+
+
+def test_a_second_death_before_the_first_step_holds_the_job_and_halts_the_queue(tmp_path):
+    q = _boot(tmp_path / "jobs.json", [
+        {"id": "dead0000", "argv": _argv(tmp_path, tmp_path / "runC"), "state": "running", "deaths": 1},
+        {"id": "othr0000", "argv": _argv(tmp_path, tmp_path / "runD"), "state": "queued"}])
+    st = q.status()
+    held = next(r for r in st["recent"] if r["state"] == "held")
+    assert held["deaths"] == 2 and "before logging a step" in held["error"]
+    assert q.halted and q.halted.startswith(held["id"])
+    assert q._next_queued()[0] is None  # nothing starts — not even the unrelated job — until a person releases
+    q.release()
+    assert q._next_queued()[0].id == "othr0000"
+    assert not any(r.state == "queued" and r.resumed for r in q.jobs)  # the held one does not come back on its own
+
+
+def test_progress_since_the_start_resets_the_death_count(tmp_path):
+    out = tmp_path / "runC"
+    out.mkdir()
+    (out / "log.jsonl").write_text(json.dumps({"step": 700, "ce": 1.0}) + "\n")
+    q = _boot(tmp_path / "jobs.json", [{"id": "dead0000", "argv": _argv(tmp_path, out), "state": "running",
+                                        "deaths": 1, "start_step": 500}])
+    copy = q.status()["queued"][0]
+    assert copy["deaths"] == 0 and q.halted is None  # it trained past its start: a power cut, not a crash loop
+
+
+def test_the_start_step_is_recorded_when_a_job_starts(tmp_path, monkeypatch):
+    q = _fake_queue(tmp_path, monkeypatch)
+    out = tmp_path / "runA"
+    out.mkdir()
+    (out / "log.jsonl").write_text(json.dumps({"step": 42}) + "\n" + "not json\n")
+    q.start()
+    r = q.submit(_argv(tmp_path, out))
+    assert _wait(lambda: _by_id(q)[r.id].state == "done")
+    assert _by_id(q)[r.id].start_step == 42
+    q.shutdown()
+
+
+def test_usable_memory_counts_the_whole_reservation_and_is_zero_without_cuda(monkeypatch):
+    import mote.serve.jobs as J
+    monkeypatch.setattr(J.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(J.torch.cuda, "mem_get_info", lambda: (4 << 30, 8 << 30))
+    monkeypatch.setattr(J.torch.cuda, "memory_reserved", lambda: 2 << 30)
+    monkeypatch.setattr(J.torch.cuda, "memory_allocated", lambda: int(1.5 * 2**30))
+    assert J.gpu_usable_bytes() == float(6 << 30)  # free + everything of ours: the engine leaves when a job starts
+    assert J.gpu_total_bytes() == 8 << 30
+    monkeypatch.setattr(J.torch.cuda, "is_available", lambda: False)
+    assert J.gpu_usable_bytes() == 0.0 and J.gpu_total_bytes() == 0  # never `inf`: that started jobs with no GPU
+
+
+def test_an_oom_retry_that_cannot_fit_the_card_is_held_with_a_reason(tmp_path, monkeypatch):
+    import mote.serve.jobs as J
+    q = _fake_queue(tmp_path, monkeypatch, delays=(0.1,))
+    monkeypatch.setattr(J, "gpu_peak_bytes", lambda: 7 << 30)  # peaked at 7 GB...
+    monkeypatch.setattr(J, "gpu_total_bytes", lambda: int(7.25 * 2**30))  # ...on a 7.25 GB card: 7 + 0.375 > 7.25
+    a, b = tmp_path / "runA", tmp_path / "runB"
+    _FakeTrainer.plans[str(a)] = ["oom"]
+    q.start()
+    ra = q.submit(_argv(tmp_path, a))
+    rb = q.submit(_argv(tmp_path, b))
+    assert _wait(lambda: _by_id(q)[rb.id].state == "done")
+    held = next(r for r in q.jobs if r.retry_of == ra.id)
+    assert held.state == "held" and "cannot fit" in held.error and q.halted is None  # visible; the queue flowed on
+    assert _FakeTrainer.attempts[str(a)] == 1
+    q.shutdown()
+
+
+def test_status_says_why_a_queued_job_is_waiting(tmp_path, monkeypatch):
+    import mote.serve.jobs as J
+    monkeypatch.setattr(J, "gpu_usable_bytes", lambda: float(5 << 30))
+    q = _boot(tmp_path / "jobs.json", [
+        {"id": "mem00000", "argv": _argv(tmp_path, tmp_path / "runA"), "state": "queued", "needs_bytes": 6 << 30},
+        {"id": "time0000", "argv": _argv(tmp_path, tmp_path / "runB"), "state": "queued", "not_before": time.time() + 600},
+        {"id": "free0000", "argv": _argv(tmp_path, tmp_path / "runC"), "state": "queued"}])
+    why = {r["id"]: r["waiting"] for r in q.status()["queued"]}
+    assert "6.00 GB" in why["mem00000"] and "5.00 usable" in why["mem00000"]
+    assert why["time0000"].startswith("retry in") and why["free0000"] is None
+
+
+def test_pause_starts_nothing_until_resume(tmp_path, monkeypatch):
+    q = _fake_queue(tmp_path, monkeypatch)
+    q.pause("waiting for CUDA")
+    q.start()
+    r = q.submit(_argv(tmp_path, tmp_path / "runA"))
+    time.sleep(0.6)
+    assert _by_id(q)[r.id].state == "queued" and not q.has_runnable() and q.status()["paused"] == "waiting for CUDA"
+    q.resume()
+    assert _wait(lambda: _by_id(q)[r.id].state == "done")
+    q.shutdown()
+
+
+def test_the_trainer_refuses_to_fall_back_to_the_cpu(tmp_path, monkeypatch):
+    """`--device cuda` is the default and there is no silent fallback: the job that melted the box on
+    2026-08-28 would have failed in a millisecond with this message instead of taking 23.5 GB."""
+    import pytest
+    from mote.train.train import Trainer
+    tmp = _fixture(tmp_path)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="CUDA is not available"):
+        Trainer(_argv(tmp, tmp / "runX"))
+    t = Trainer(_argv(tmp, tmp / "runY") + ["--device", "cpu"])  # asked for on purpose: fine
+    assert t.device.type == "cpu"
+    t.close()

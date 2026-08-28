@@ -387,7 +387,9 @@ churn cannot fragment them; the service unit sets `PYTORCH_CUDA_ALLOC_CONF=expan
 The decode graph's conditional nodes move to `torch.cond` capture (torch 2.12) if the per-byte replay time
 holds. Gates: reply equality with today's path; under a running training slice, first byte < 1 s (the
 existing contract) and p95 per-byte decode ≤ 2× idle; trainer + serving peak ≤ 7.2 GB on the flagship
-preset (8.2 GB − the desktop's 0.7 − margin), measured in an idle window. Lands before launch if it passes,
+preset (8.2 GB − the desktop's 0.7 − margin), measured in an idle window — *superseded the same evening: the
+desktop measures 1.5–1.9 GB (docs/results/2026-08-24-evening-gates.md), so the ceiling is **6.2 GB with the
+screen locked**; the 2026-08-28 chunk-rate sweep (`scripts/gate_sweep.py`) reads against that*. Lands before launch if it passes,
 else at the first swap restart (a daemon restart; the trunk auto-resumes).
 
 **Released serving (grilled and signed 2026-08-24 night, root; built the same night).** The desktop measured
@@ -404,6 +406,24 @@ front once free + cached memory covers the failed run's peak (jobs.py), and `mot
 queue. Hard isolation (green contexts) stays a measured later option. A green-context SM partition
 (`torch.cuda.GreenContext`, works on cu126, even SM counts on Ada, no forward-progress guarantee) stays a
 measured later option (`--serve-sms k`) — hard isolation at a permanent k/34 training cost.
+
+**Boot without a GPU (grilled and signed 2026-08-28; built the same day).** A kernel update put the nvidia
+module 57 s after boot; the daemon was up at 13 s. `gpu_usable_bytes()` said `inf` without CUDA, the queue
+started the front job, `Trainer` fell back to the CPU on its own, and a flagship at 16384 on the CPU reference
+path took 23.5 GB — the kernel OOM-killer took the whole daemon, serving included, three times in 45 s,
+because the job came straight back to the front each time. Now, in dependency order: the daemon launched
+`--device cuda` **waits for CUDA before anything in the process asks torch for it** (`app.py wait_for_cuda`,
+up to 180 s, a fresh interpreter per probe — the in-process answer is cached for the process's life); past
+that it **serves on the CPU with the queue paused**, re-probes every 30 s, and restarts itself the moment the
+device appears. `Trainer` takes `--device` (default `cuda`) and **refuses to fall back**. A job whose process
+dies twice before it logs a step is **held and the queue halts**, norm-guard style (`jobs.py
+DEATHS_BEFORE_HALT`; one free retry covers a reboot landing right after a start). Usable memory is free + the
+**whole** reservation, since the engine leaves the card when a job starts — counting only the unused cache
+had parked two 6.5 GB retries behind a 1.3 GB engine for a day — and a retry the card could never satisfy is
+held with the reason instead of parking. `GET /api/training/queue` says why each queued job is waiting.
+`POST /api/engine/device` parks the engine on the CPU for standalone measurements (`mote engine park`).
+The CPU reference path itself is O(L²) in memory — the flagship reads one 4096-byte window at +6.2 GB and
+18.6 s (measured 2026-08-28) — which is why the trunk's CPU serving gets the chunked scan (finding 8) before launch.
 
 **Serving policy and device (grilled and signed 2026-08-25 after the web QA; built the same night).** Two things
 the released mode left open. *Policy (root):* the served model is the **pin** (`.mote/config.json`'s `checkpoint`)

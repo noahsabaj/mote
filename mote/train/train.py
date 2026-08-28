@@ -449,6 +449,11 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--fast", action="store_true", help="give up bitwise reproducibility for ~20 %% throughput. Runs are reproducible by default: cuBLAS pinned to a fixed workspace plus the two-pass Relation backward, which together are the whole story (mote/determinism.py). A `--fast` number and a default number are not comparable, so the mode is recorded in run.json")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"],
+                    help="cuda (default) or cpu. There is no silent fallback: a job that asked for the GPU and cannot "
+                         "have it fails at once. 2026-08-28: the daemon started before the driver, the trainer fell "
+                         "back on its own, and a flagship at 16384 on the CPU reference path took 23.5 GB — the kernel "
+                         "OOM-killer took the whole daemon, three times")
     ap.add_argument("--sft", action="store_true", help="train on an SFT shard (assistant-byte loss mask)")
     ap.add_argument("--init-from", default=None, help="checkpoint to initialize weights from (e.g. pretrain -> SFT)")
     ap.add_argument("--ratio-weight", type=float, default=None, help="override dc.ratio_loss_weight (\u03b1)")
@@ -509,11 +514,15 @@ class Trainer:
     def __init__(self, argv_or_args=None):
         args = build_argparser().parse_args(argv_or_args) if (argv_or_args is None or isinstance(argv_or_args, list)) else argv_or_args
         self.args = args
+        if args.device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available and this job asked for it (--device cuda is the default). "
+                               "Pass --device cpu to train on the CPU on purpose; nothing falls back to it silently "
+                               "(2026-08-28: a flagship at 16384 on the CPU took 23.5 GB and the kernel OOM-killer took the daemon)")
         # Before any CUDA work. In the resident daemon this is process state shared with serving,
         # so close() puts it back — a --fast job must not leave the next one non-reproducible.
         determinism.apply(not args.fast)
         torch.manual_seed(args.seed)
-        self.device = device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device = torch.device(args.device)
         self.out_dir = out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
 

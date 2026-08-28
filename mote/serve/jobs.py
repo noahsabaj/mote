@@ -16,7 +16,19 @@ A CUDA out-of-memory failure is retried (2026-08-24: the desktop took 1.8 GB of 
 flagship arms died in a row): the failed record stays `failed`, a `--resume` copy goes to the front of the
 queue with a growing delay, and it only starts once free + cached GPU memory covers the failed run's
 tracked peak plus a margin — a structurally too-big job waits visibly instead of burning attempts, while
-the rest of the queue keeps flowing around it. Three retries per lineage.
+the rest of the queue keeps flowing around it. Three retries per lineage. A retry the card could never
+satisfy (peak + margin above its capacity) is `held` with the reason instead of parking forever.
+
+Three things learned on 2026-08-28, when a kernel update put the nvidia module 57 s after boot and the
+daemon was up at 13 s: (1) `gpu_usable_bytes` returned `inf` without CUDA, so the queue started a
+flagship/16384 job whose trainer fell back to the CPU and took 23.5 GB — the kernel OOM-killer took the
+whole daemon, three times in 45 s, because (2) a job that was `running` when the process died came
+straight back to the front, with nothing counting how often that had happened; and (3) "usable" counted
+only the allocator's unused cache, not the engine that leaves the card when a job starts, which had parked
+two 6.5 GB retries behind a 1.3 GB engine for a day. Now: nothing is usable without CUDA (the daemon pauses
+the queue until the device is there — app.py `wait_for_cuda`); a job whose process dies twice before it
+logs a step is held and the queue halts, norm-guard style (`DEATHS_BEFORE_HALT`); and usable memory is
+free + the whole reservation.
 """
 
 from __future__ import annotations
@@ -64,6 +76,7 @@ STATES = ("queued", "running", "done", "failed", "cancelled", "interrupted", "he
 OOM_RETRIES = 3                          # retries per job lineage after CUDA out-of-memory
 OOM_RETRY_DELAYS = (120.0, 600.0, 1800.0)  # seconds before the 1st/2nd/3rd retry may start
 OOM_MARGIN = 384 << 20                   # headroom over the failed run's tracked peak before a retry starts
+DEATHS_BEFORE_HALT = 2                   # process deaths before a job's first logged step that hold it and halt the queue
 
 
 def is_oom(exc: BaseException) -> bool:
@@ -81,12 +94,52 @@ def gpu_peak_bytes() -> int:
     return 0
 
 
+def gpu_total_bytes() -> int:
+    """The card's capacity — the most a job could ever be given — or 0 without CUDA."""
+    if not torch.cuda.is_available():
+        return 0
+    try:
+        _free, total = torch.cuda.mem_get_info()
+        return int(total)
+    except Exception:
+        return 0
+
+
 def gpu_usable_bytes() -> float:
-    """What a new job could get: free device memory plus our cached-but-unused reservation."""
-    if not (torch.cuda.is_available() and torch.cuda.is_initialized()):
-        return float("inf")
+    """What a new job could get: free device memory plus our whole reservation.
+
+    The reservation counts in full, not just its unused cache: serving leaves the card when a job starts
+    (app.py `_job_started`), so everything the engine holds is the job's the moment it runs. Counting only
+    the cache parked two flagship retries for a day (2026-08-28): 6.5 GB needed, 6.4 "usable", 1.3 GB of
+    engine in between. Without CUDA nothing is usable — `inf` here is what started three flagship jobs on
+    the CPU at boot, before the driver was up.
+    """
+    if not torch.cuda.is_available():
+        return 0.0
     free, _total = torch.cuda.mem_get_info()
-    return float(free + torch.cuda.memory_reserved() - torch.cuda.memory_allocated())
+    return float(free + torch.cuda.memory_reserved())
+
+
+def last_logged_step(out_dir: Optional[str]) -> int:
+    """The last `step` in `<out>/log.jsonl` (its tail), 0 when the run has not logged one yet."""
+    if not out_dir:
+        return 0
+    try:
+        with open(Path(out_dir) / "log.jsonl", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(f.tell() - 65536, 0))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return 0
+    step = 0
+    for line in tail.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and isinstance(rec.get("step"), int):
+            step = max(step, rec["step"])
+    return step
 
 
 @dataclass
@@ -107,6 +160,8 @@ class JobRecord:
     retry_of: Optional[str] = None
     not_before: float = 0.0  # a retry waits at least until then...
     needs_bytes: int = 0  # ...and until `gpu_usable_bytes()` covers the failed run's peak + margin
+    deaths: int = 0  # consecutive process deaths (crash, OOM-kill, power) before this lineage logged a step
+    start_step: int = 0  # the run's last logged step when this attempt started: progress = the log moved past it
 
     @property
     def out_dir(self) -> Optional[str]:
@@ -141,6 +196,9 @@ class Ema:
 class JobQueue:
     """Sequential training jobs driven slice-by-slice under the GPU gate."""
 
+    paused: Optional[str] = None  # class default too: tests build partial queues with __new__
+    halted: Optional[str] = None
+
     def __init__(self, state_file: Path, gate: threading.Lock,
                  on_serve_sync: Optional[Callable[[dict, Dict[str, torch.Tensor], str, int], None]] = None,
                  on_finished: Optional[Callable[[JobRecord], None]] = None,
@@ -166,6 +224,7 @@ class JobQueue:
         self._shutdown = False
         self.jobs: List[JobRecord] = []
         self.halted: Optional[str] = None  # a norm-guard trip; survives a daemon restart, cleared by release()
+        self.paused: Optional[str] = None  # the daemon's reason for starting nothing (no CUDA yet); not persisted
         self._load()
 
     # ---- persistence ---------------------------------------------------------------------
@@ -178,11 +237,21 @@ class JobQueue:
                 self.halted = raw.get("halted") or None
             except Exception:
                 self.jobs = []
-        # a job that was running when the process died resumes in front of the queue
+        # a job that was running when the process died resumes in front of the queue — once for free (a
+        # reboot can land right after a start); a second death before it logs a step holds it and halts the
+        # queue, because the next job is usually the same shape and each death also took serving down
         for r in list(self.jobs):
             if r.state == "running":
                 r.state = "interrupted"
-                self._insert_front(self._resume_copy(r))
+                progressed = last_logged_step(r.out_dir) > r.start_step
+                copy = self._resume_copy(r, deaths=0 if progressed else r.deaths + 1)
+                if copy.deaths >= DEATHS_BEFORE_HALT:
+                    copy.state = "held"
+                    copy.error = (f"the process died {copy.deaths}x before logging a step (last attempt {r.id}); "
+                                  f"held, and the queue is halted: `mote train release` once the cause is fixed, then resubmit")
+                    self.halted = f"{copy.id}: {copy.error}"
+                    print(f"QUEUE HALTED — {self.halted}", flush=True)
+                self._insert_front(copy)
         self._save()
 
     def _save(self) -> None:
@@ -267,15 +336,37 @@ class JobQueue:
         return rec
 
     def status(self) -> dict:
+        now = time.time()
         with self._lock:
             cur = next((asdict(r) for r in self.jobs if r.state == "running"), None)
+            queued = [r for r in self.jobs if r.state == "queued"]
+            usable = gpu_usable_bytes() if any(r.needs_bytes for r in queued) else None
             return {
                 "current": cur,
                 "phase": self.phase() if cur else None,
-                "queued": [asdict(r) for r in self.jobs if r.state == "queued"],
+                "queued": [{**asdict(r), "waiting": self._waiting(r, now, usable)} for r in queued],
                 "recent": [asdict(r) for r in reversed(self.jobs) if r.state in ("done", "failed", "cancelled", "interrupted", "held")][:10],
                 "halted": self.halted,
+                "paused": self.paused,
             }
+
+    @staticmethod
+    def _waiting(r: JobRecord, now: float, usable: Optional[float]) -> Optional[str]:
+        """Why a queued job is not starting, in words — the two silent waits took a day to notice (2026-08-27)."""
+        if r.not_before > now:
+            return f"retry in {r.not_before - now:.0f} s"
+        if r.needs_bytes and usable is not None and usable < r.needs_bytes:
+            return f"needs {r.needs_bytes / 2**30:.2f} GB, {usable / 2**30:.2f} usable"
+        return None
+
+    def pause(self, reason: str) -> None:
+        """Start nothing until `resume()` — the daemon's call while its device is missing."""
+        self.paused = reason
+        print(f"queue paused: {reason}", flush=True)
+
+    def resume(self) -> None:
+        self.paused = None
+        self._wake.set()
 
     def release(self) -> Optional[str]:
         """Clear a norm-guard halt and let the queue flow again; returns what it had been halted on."""
@@ -305,8 +396,8 @@ class JobQueue:
         """(next runnable record or None, seconds until a deferred retry may become runnable)."""
         now = time.time()
         with self._lock:
-            if self.halted:
-                return None, 5.0  # the queue is stopped at a norm-guard trip; release() restarts it
+            if self.halted or self.paused:
+                return None, 5.0  # halted: a norm-guard trip or the breaker, release() restarts it; paused: no CUDA yet
             queued = [r for r in self.jobs if r.state == "queued"]
         usable = None
         wait = 5.0
@@ -343,6 +434,7 @@ class JobQueue:
             with self._lock:
                 rec.state = "running"
                 rec.started_at = time.time()
+                rec.start_step = last_logged_step(rec.out_dir)  # the breaker's baseline for "made progress"
                 self._save()
             self._idle_signalled = False
             self._call(self.on_started, rec)
@@ -369,9 +461,15 @@ class JobQueue:
                     rec.error = traceback.format_exc(limit=8)
                     if is_oom(exc) and rec.retries < OOM_RETRIES:
                         delay = OOM_RETRY_DELAYS[min(rec.retries, len(OOM_RETRY_DELAYS) - 1)]
-                        self._insert_front(self._resume_copy(
-                            rec, retries=rec.retries + 1, retry_of=rec.id, not_before=time.time() + delay,
-                            needs_bytes=gpu_peak_bytes() + OOM_MARGIN))
+                        need, total = gpu_peak_bytes() + OOM_MARGIN, gpu_total_bytes()
+                        copy = self._resume_copy(rec, retries=rec.retries + 1, retry_of=rec.id,
+                                                 not_before=time.time() + delay, needs_bytes=need)
+                        if total and need > total:  # no amount of waiting makes the card bigger
+                            copy.state = "held"
+                            copy.error = (f"needs {need / 2**30:.2f} GB with the retry margin and the card has "
+                                          f"{total / 2**30:.2f} GB: it cannot fit as configured (held; the queue flows on)")
+                            print(f"job {copy.id} held: {copy.error}", flush=True)
+                        self._insert_front(copy)
             finally:
                 with self._lock:
                     rec.ended_at = time.time()

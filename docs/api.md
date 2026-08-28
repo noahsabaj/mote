@@ -91,9 +91,19 @@ takes them; malformed args are rejected at submit time (400). `front` puts it ah
 puts it on the air (above). `POST /api/training/stop` body `{ "id": null }`
 stops the running job at its next step boundary (final eval + checkpoint still happen) or cancels a queued one
 by id. `POST /api/training/serve` body `{ "id": null, "on": true }` puts the running (`id: null`) or a queued job on
-the air, or takes it off. `GET /api/training/queue` → `{ "current", "phase", "queued": [...], "recent": [...] }` —
+the air, or takes it off. `GET /api/training/queue` → `{ "current", "phase", "queued": [...], "recent": [...], "halted", "paused" }` —
 `phase` is what the running job is doing (`"train"`, `"eval 3/16"`, `"eval ema 3/16"`, `"checkpoint"`) and each
 job carries `"serve": bool`. Training yields to each reply at the next accumulation slice (or eval window).
+Each queued job carries `"waiting": null | "retry in 540 s" | "needs 6.50 GB, 5.80 usable"` — why it is not
+starting; `"deaths"` counts process deaths before its first logged step (two hold the job and halt the queue,
+`POST /api/training/release` clears the halt); `"paused"` is the daemon's reason for starting nothing at all
+(launched `--device cuda` with no CUDA: it serves on the CPU and restarts itself when the device appears).
+
+### `POST /api/engine/device`  body `{ "device": "cpu" | "cuda" }`
+Park the studio's engine on the CPU — the move the queue makes around a job, on request — so a standalone
+measurement can have the whole card while the studio stays up; `"cuda"` brings it back with its arena and
+graphs. Parked stays parked across idle signals. 409 while a job owns the GPU or when CUDA is missing.
+`mote engine park` / `mote engine restore`.
 
 ### `GET /api/training/runs`
 `[{ "id": "pilot_1h", "steps": 3100, "last_val_bpb": 1.63, "running": false, "started_at": "..." }]`

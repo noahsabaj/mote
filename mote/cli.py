@@ -6,6 +6,7 @@
     mote pair                open the pairing page (QR + code) in the browser
     mote logs [-n 80]        tail the studio log
     mote config [--checkpoint PATH] [--device cpu|cuda] [--port N]
+    mote engine park|restore  move the studio's engine off the card (and back) for a standalone measurement
 
 State lives in <repo>/.mote/: token (the access token), config.json, studio.log, *.pid.
 The supervisor (`service run`) launches the server, restarts it if it dies, and re-reads config.json
@@ -479,6 +480,8 @@ def main(argv=None) -> int:
                     help="start: put the job on the air — its EMA answers chats while it runs and its final checkpoint becomes the pin (the trunk and the branches; never an arm)")
     tr.add_argument("--off", action="store_true", help="serve: take the job off the air instead")
     tr.add_argument("train_args", nargs=argparse.REMAINDER, help="after `--`: args for python -m mote.train.train")
+    en = sub.add_parser("engine", help="park the studio's engine on the CPU so a measurement can have the whole card, or restore it")
+    en.add_argument("action", choices=["park", "restore"])
     args = ap.parse_args(argv)
     if getattr(args, "cmd", None) == "train":
         # options typed after the action land in the REMAINDER (`train stop --id X` once cancelled the RUNNING
@@ -518,6 +521,10 @@ def main(argv=None) -> int:
         return prefs_cmd(args)
     if args.cmd == "train":
         return train_cmd(args)
+    if args.cmd == "engine":  # POST /api/engine/device (docs/api.md): the queue's own move around a job, on request
+        out = _api("POST", "/api/engine/device", {"device": "cpu" if args.action == "park" else "cuda"})
+        print(json.dumps({k: out.get(k) for k in ("parked", "serving_device", "device", "arena")}, indent=1))
+        return 0
     return 1
 
 
