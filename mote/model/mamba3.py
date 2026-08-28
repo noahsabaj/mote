@@ -4,7 +4,9 @@ Parameter names and shapes match ``mamba_ssm.modules.mamba3.Mamba3`` (SISO, no o
 exactly, so checkpoints are interchangeable with the upstream module. Three execution paths:
 
 * training / prefill on CUDA with Triton available  -> upstream fused kernel ``mamba3_siso_combined``
-* anywhere else (Windows-native, CPU, tests)         -> pure-PyTorch port of upstream's reference
+* anywhere else (Windows-native, CPU, tests)         -> pure-PyTorch port of upstream's reference, run in
+  windows of REF_CHUNK positions with the recurrent state carried between them (2026-08-28: the whole-
+  sequence reference is O(L²) in memory — +6.2 GB and 18.6 s for one 4096-byte window of the flagship)
 * decode (one byte at a time)                         -> pure-PyTorch recurrent step
 
 Upstream's own ``step`` needs the CuTe ``mamba3_step_fn`` ("only tested on H100"), which is why
@@ -14,6 +16,7 @@ the recurrent step is reimplemented here. State tuple = (angle, ssm, k, v), see 
 from __future__ import annotations
 
 import math
+import os
 from typing import NamedTuple, Optional, Tuple
 
 import torch
@@ -29,6 +32,12 @@ except Exception:  # pragma: no cover
     HAS_MAMBA3_KERNEL = False
 
 from .norm import RMSNorm
+
+
+# The CPU reference path materialises [B,H,L,L] four times over (`_segsum` twice, the masked QK and its
+# exp): 16 GiB per tensor at 16384. Windowing it at this many positions makes that L×REF_CHUNK — 256 keeps
+# the per-window matmuls large enough to be cheap and the transient under ~50 MB at the flagship's width.
+REF_CHUNK = int(os.environ.get("MOTE_MAMBA3_REF_CHUNK", 256))
 
 
 class Mamba3State(NamedTuple):
@@ -186,12 +195,35 @@ class Mamba3Mixer(nn.Module):
             else:
                 y, state = out, None
         else:
-            y, state = self._reference_forward(Cn, Bn, x, ADT, DT, trap, angles, z, initial_states)
+            y, state = self._reference_forward_chunked(Cn, Bn, x, ADT, DT, trap, angles, z, initial_states)
         y = y.reshape(u.shape[0], u.shape[1], self.d_inner)
         out = self.out_proj(y.to(u.dtype))
         return (out, state) if return_final_states else out
 
     # --- pure PyTorch (port of upstream mamba3_siso_fwd_ref, batch mode) ----------------
+    def _reference_forward_chunked(self, Q, K, V, ADT, DT, Trap, Angles, Z, initial: Optional[Mamba3State],
+                                   chunk: Optional[int] = None):
+        """`_reference_forward` in windows of `chunk` positions, the recurrent state carried between them.
+
+        Exact algebra: a window that starts from the previous window's final state is the reference's own
+        resume (the trapezoid's previous-input term rides in `state.k/state.v`, the rotation phase in
+        `state.angle`), so the L×L work becomes L×chunk with the same result. Floating point is not bitwise —
+        each window exponentiates its own partial sums — and the tests pin the difference to fp32 rounding;
+        a sequence that fits one window takes exactly the old path. Measured 2026-08-28 before this: the
+        flagship read one 4096-byte window on the CPU at +6.2 GB and 18.6 s, the path the trunk serves from.
+        """
+        L = Q.shape[1]
+        C = chunk or REF_CHUNK
+        if C <= 0 or L <= C:
+            return self._reference_forward(Q, K, V, ADT, DT, Trap, Angles, Z, initial)
+        ys, state = [], initial
+        for a in range(0, L, C):
+            b = min(a + C, L)
+            y, state = self._reference_forward(Q[:, a:b], K[:, a:b], V[:, a:b], ADT[:, :, a:b], DT[:, :, a:b],
+                                               Trap[:, :, a:b], Angles[:, a:b], Z[:, a:b], state)
+            ys.append(y)
+        return torch.cat(ys, dim=1), state
+
     def _reference_forward(self, Q, K, V, ADT, DT, Trap, Angles, Z, initial: Optional[Mamba3State]):
         dtype = torch.float32
         Q = self._expand_groups(Q).to(dtype)

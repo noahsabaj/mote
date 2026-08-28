@@ -48,3 +48,74 @@ def test_kernel_resume_matches_reference_resume():
     y_ref, _ = m._reference_forward(Cn, Bn, x, ADT, DT, trap, angles, z, s1)
     y_ref = m.out_proj(y_ref.reshape(1, 56, -1).to(u.dtype))
     assert (y_kernel.float() - y_ref.float()).abs().max() < 5e-2
+
+
+# ---- the windowed CPU reference (finding 8 of the serving audit, built 2026-08-28) ----------------
+def _cpu_mixer(seed=0):
+    torch.manual_seed(seed)
+    return Mamba3Mixer(d_model=64, d_state=16, headdim=16, expand=2, layer_idx=0, device="cpu").eval()
+
+
+def _parts(m, u):
+    z, x, Bn, Cn, ADT, DT, trap, angles = m._preprocess(u)
+    return Cn, Bn, x, ADT, DT, trap, angles, z
+
+
+def _slice(parts, a, b):
+    Cn, Bn, x, ADT, DT, trap, angles, z = parts
+    return Cn[:, a:b], Bn[:, a:b], x[:, a:b], ADT[:, :, a:b], DT[:, :, a:b], trap[:, :, a:b], angles[:, a:b], z[:, a:b]
+
+
+@torch.no_grad()
+def test_windowed_reference_matches_the_whole_sequence_reference():
+    """Windows on and off the sequence's own boundaries, with and without an initial state: the same numbers
+    to fp32 rounding. What used to be four [B,H,L,L] tensors is now four [B,H,chunk,chunk]."""
+    m = _cpu_mixer()
+    torch.manual_seed(3)
+    parts = _parts(m, torch.randn(2, 300, 64))
+    y_ref, s_ref = m._reference_forward(*parts, None)
+    for C in (64, 100, 256):
+        y_c, s_c = m._reference_forward_chunked(*parts, None, chunk=C)
+        assert (y_c - y_ref).abs().max() < 1e-4, C
+        assert (s_c.ssm - s_ref.ssm).abs().max() < 1e-4, C
+        assert (torch.cos(s_c.angle) - torch.cos(s_ref.angle)).abs().max() < 1e-5, C
+        assert torch.equal(s_c.v, s_ref.v), C  # the last x is copied, not accumulated
+        assert (s_c.k - s_ref.k).abs().max() < 1e-5, C  # the last B, rotated by the carried phase: rounding only
+    _, s1 = m._reference_forward(*_slice(parts, 0, 40), None)
+    y_ref2, _ = m._reference_forward(*_slice(parts, 40, 300), s1)
+    y_c2, _ = m._reference_forward_chunked(*_slice(parts, 40, 300), s1, chunk=64)
+    assert (y_c2 - y_ref2).abs().max() < 1e-4
+
+
+@torch.no_grad()
+def test_a_sequence_that_fits_one_window_takes_the_old_path_bit_for_bit(monkeypatch):
+    import mote.model.mamba3 as M
+
+    m = _cpu_mixer()
+    torch.manual_seed(4)
+    u = torch.randn(1, 200, 64)
+    y_ref, _ = m._reference_forward(*_parts(m, u), None)
+    y_ref = m.out_proj(y_ref.reshape(1, 200, -1).to(u.dtype))
+    monkeypatch.setattr(M, "REF_CHUNK", 10_000)
+    assert torch.equal(m(u), y_ref)  # no split: exactly what the model computed before today
+    monkeypatch.setattr(M, "REF_CHUNK", 64)
+    assert (m(u) - y_ref).abs().max() < 1e-4  # split: fp32 rounding, nothing else
+
+
+def test_the_windowed_path_trains_to_the_same_gradients(monkeypatch):
+    """Backward runs through the window loop (CPU trainers in tests, boxes without the kernel)."""
+    import mote.model.mamba3 as M
+
+    m = _cpu_mixer().train()
+    torch.manual_seed(5)
+    u = torch.randn(1, 130, 64)
+    grads = {}
+    for C in (10_000, 32):
+        monkeypatch.setattr(M, "REF_CHUNK", C)
+        m.zero_grad()
+        m(u).square().mean().backward()
+        grads[C] = {n: p.grad.clone() for n, p in m.named_parameters() if p.grad is not None}
+    assert grads[32].keys() == grads[10_000].keys() and grads[32]
+    for n in grads[32]:
+        assert torch.isfinite(grads[32][n]).all(), n
+        assert (grads[32][n] - grads[10_000][n]).abs().max() < 1e-4 * (1 + grads[10_000][n].abs().max()), n

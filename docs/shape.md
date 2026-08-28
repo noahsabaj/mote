@@ -422,8 +422,12 @@ DEATHS_BEFORE_HALT`; one free retry covers a reboot landing right after a start)
 had parked two 6.5 GB retries behind a 1.3 GB engine for a day — and a retry the card could never satisfy is
 held with the reason instead of parking. `GET /api/training/queue` says why each queued job is waiting.
 `POST /api/engine/device` parks the engine on the CPU for standalone measurements (`mote engine park`).
-The CPU reference path itself is O(L²) in memory — the flagship reads one 4096-byte window at +6.2 GB and
-18.6 s (measured 2026-08-28) — which is why the trunk's CPU serving gets the chunked scan (finding 8) before launch.
+The CPU reference path itself was O(L²) in memory — the flagship read one 4096-byte window at +6.2 GB and
+18.6 s (measured 2026-08-28), the path the trunk serves from for seven days — so `Mamba3Mixer` now runs the
+reference in windows of `REF_CHUNK` = 256 positions with the recurrent state carried between them (finding 8
+of the serving audit; a window from the previous window's final state is the reference's own resume, exact
+algebra, fp32 rounding pinned by tests, one window = the old path bit for bit): **+1.2 GB and 2.7 s** for the
+same read; the 35M's 4096 read went +4.0 GB / 13.1 s → +1.8 GB / 6.1 s, the rest being the main network.
 
 **Serving policy and device (grilled and signed 2026-08-25 after the web QA; built the same night).** Two things
 the released mode left open. *Policy (root):* the served model is the **pin** (`.mote/config.json`'s `checkpoint`)

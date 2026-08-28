@@ -1,0 +1,22 @@
+{
+ "preset": "mote-96m",
+ "spine": "off",
+ "spine_n": 4,
+ "params": 95924732,
+ "batch": 1,
+ "seq_len": 16384,
+ "grad_accum": 4,
+ "bucket": 64,
+ "flash": true,
+ "ckpt_main": true,
+ "block_local_mbp": true,
+ "mbp": true,
+ "sec_per_step": 1.8658,
+ "bytes_per_sec": 35124,
+ "bytes_per_chunk": 2.5,
+ "flops_per_byte_M": 559.7,
+ "tflops": 19.66,
+ "mfu": 0.446,
+ "chunk_bytes_forced": 2.5,
+ "peak_mem_GB": 4.63
+}
