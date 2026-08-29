@@ -477,7 +477,7 @@ trunk is ~4 epochs of the 10 GB mix (fine per 2305.16264); the day-10 extension 
 
 ## Serving root (grilled and signed 2026-08-24, BUILT the same day; results in docs/results/2026-08-24-serving-root.md)
 
-Reading FreeToken (2608.16157, edge MoE serving) settled two things at once. The transferable part of
+Reading FreeToken (2608.16157, edge MoE serving) settled two things at once. (Re-read 2026-08-28 after the latent-feedback signing: nothing else in it transfers — the expert cache and the q* miss split are for expert pools 100–1000× Mote's size; the anchors now carry `h_prev`/`z_prev` for Soft decoding; the serving bench adopts its availability metric, worst-turn TTFT per workload beside decode rate; and the CPU per-byte decode rate at the flagship shape — the desktop's state for weeks while the trunk and arms run — has never been measured: it is the open number, taken in the gap.) The transferable part of
 that paper is (a) checkpoints of recurrent state at the semantic boundaries where a harness edits
 context, kept apart from the append-only per-position cache, and (b) every routing-dependent decision
 living on the device as data inside a captured graph. Applied to Mote:
