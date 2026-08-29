@@ -64,8 +64,7 @@ def test_retrodiction_anchors_are_unique():
 
 
 def test_remote_put_in_is_refused_and_rendered_everywhere():
-    from mote.sim.domains import household_system
-    from mote.sim.ecs import InRoom
+    from mote.sim.domains import InRoom, household_system
     from mote.sim.render import LOCALES as R
 
     refused = 0
