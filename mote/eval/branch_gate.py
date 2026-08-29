@@ -61,8 +61,6 @@ def _api(base: str, path: str, body: Optional[dict] = None) -> dict:
     from ..client import api
 
     return api("POST" if body is not None else "GET", path, body, base=base)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode())
 
 
 def sft_argv(sft_args: str, init: str, out: str) -> List[str]:
@@ -74,16 +72,25 @@ def submit(base: str, argv: List[str]) -> str:
 
 
 def wait(base: str, job_id: str, poll_s: float = 30.0) -> str:
-    """Block until the job leaves the queue; returns its final state (raises unless 'done')."""
+    """Block until the job's LINEAGE leaves the queue; returns its final state (raises unless 'done').
+
+    A daemon restart or an OOM retry re-enqueues the job as a new record whose `retry_of` names the old one
+    (mote.serve.jobs), so the id being followed moves along the lineage; the old record stays `interrupted`
+    or `failed` for good and would otherwise be waited on forever (2026-08-29)."""
     while True:
         st = _api(base, "/api/training/queue")
         recs = ([st["current"]] if st.get("current") else []) + st.get("queued", []) + st.get("recent", [])
-        rec = next((r for r in recs if r and r.get("id") == job_id), None)
+        recs = [r for r in recs if r]
+        successor = next((r for r in recs if r.get("retry_of") == job_id), None)
+        if successor is not None:
+            job_id = successor["id"]
+            continue
+        rec = next((r for r in recs if r.get("id") == job_id), None)
         state = rec["state"] if rec else "missing"
-        if state in ("done", "failed", "cancelled", "missing"):
-            if state != "done":
-                raise RuntimeError(f"SFT job {job_id} ended as {state}")
+        if state == "done":
             return state
+        if state in ("failed", "cancelled", "held", "missing"):
+            raise RuntimeError(f"SFT job {job_id} ended as {state}" + (f": {rec.get('error')}" if rec and rec.get("error") else ""))
         time.sleep(poll_s)
 
 

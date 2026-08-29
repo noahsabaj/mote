@@ -248,7 +248,10 @@ class JobQueue:
 
     @staticmethod
     def _resume_copy(rec: JobRecord, **fields) -> JobRecord:
-        fields = {"resumed": True, "retries": rec.retries, "serve": rec.serve, **fields}
+        # `retry_of` links every copy to the record it continues — an interruption's resume as much as an OOM
+        # retry — so a caller polling the old id (mote.eval.branch_gate.wait) can follow the lineage instead of
+        # waiting forever on a record that will never leave `interrupted` (2026-08-29).
+        fields = {"resumed": True, "retries": rec.retries, "serve": rec.serve, "retry_of": rec.id, **fields}
         nxt = JobRecord(id=secrets.token_hex(4), argv=list(rec.argv), **fields)
         if "--resume" not in nxt.argv:
             nxt.argv.append("--resume")

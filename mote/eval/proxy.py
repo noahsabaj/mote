@@ -267,7 +267,14 @@ def main(argv=None):
         from ..identity import identity_card
 
         ck = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-        card = identity_card(sum(v.numel() for v in ck["model"].values()))
+        # the trainer's own count (tied weights once); summing the state dict counts the tied head twice
+        n = (ck.get("extra") or {}).get("n_params")
+        if not n:  # dedupe by storage: a tied head shares the embedding's tensor
+            seen, n = set(), 0
+            for v in ck["model"].values():
+                if v.data_ptr() not in seen:
+                    seen.add(v.data_ptr()); n += v.numel()
+        card = identity_card(int(n))
     res = run(args.checkpoint, items, dev, card)
     out = Path(args.out) if args.out else Path(args.checkpoint).parent / "proxy.json"
     out.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
