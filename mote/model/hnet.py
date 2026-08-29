@@ -39,6 +39,26 @@ def strip_retired(sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     return {k: v for k, v in sd.items() if not k.startswith(RETIRED_PREFIXES)}
 
 
+def load_weights(model: nn.Module, ck: Dict[str, Any], prefer_ema: bool = True) -> str:
+    """Load a checkpoint's weights into `model`: the EMA when the checkpoint carries one and `prefer_ema`, else
+    the raw weights. Returns "ema" or "raw".
+
+    The trainer keeps its `--eval-ema` average as a list of tensors in `extra["ema"]`, in `model.parameters()`
+    order (tied weights once), and every gate reads that average (`val_bpb_ema`). Until 2026-08-29 the engine
+    and `mote.eval.val_bpb` loaded `ck["model"]` — the raw weights — so a finished --serve job, a pinned boot
+    and the standalone eval all served/scored 0.075–0.098 bpb worse than the number the run was judged on."""
+    model.load_state_dict(strip_retired(ck["model"]))
+    ema = (ck.get("extra") or {}).get("ema") if prefer_ema else None
+    params = list(model.parameters())
+    if isinstance(ema, (list, tuple)) and len(ema) == len(params) and all(
+            torch.is_tensor(e) and tuple(e.shape) == tuple(p.shape) for e, p in zip(ema, params)):
+        with torch.no_grad():
+            for p, e in zip(params, ema):
+                p.copy_(e.to(p.device, p.dtype))
+        return "ema"
+    return "raw"
+
+
 @dataclass
 class HNetOutput:
     logits: torch.Tensor  # [B, L, V] next-byte logits

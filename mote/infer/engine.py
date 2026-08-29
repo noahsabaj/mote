@@ -19,7 +19,7 @@ import torch
 from ..config import MoteConfig
 from .. import runinfo
 from ..model.arena import ArenaState, RelationArena
-from ..model.hnet import HNetForCausalLM, InferenceState, strip_retired
+from ..model.hnet import HNetForCausalLM, InferenceState, load_weights, strip_retired
 from ..model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
 from ..model.dc import HAS_SSD_KERNEL
 from ..model.relation import FullRelation
@@ -126,7 +126,7 @@ class Engine:
         ck = torch.load(Path(ckpt_path), map_location="cpu", weights_only=True)
         cfg = MoteConfig.from_dict(ck["config"])
         model = HNetForCausalLM(cfg)
-        model.load_state_dict(strip_retired(ck["model"]))
+        self.weights = load_weights(model, ck)  # "ema" when the checkpoint carries the trainer's average (the served weights, 2026-08-29)
         self._setup(model, cfg, Path(ckpt_path), int(ck.get("step", 0)), ck.get("extra", {}), device, prefix_cache_mb,
                     released=released)
 

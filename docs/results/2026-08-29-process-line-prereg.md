@@ -114,3 +114,12 @@ transcript and every earlier tool result are exposed as files in the sandbox (re
 enough to issue many, and a probe with n ≫ state bits (EQ_n) separates Relation-bearing from state-only
 models. Tool calls do not reduce the number of Relation layers a hybrid needs for in-context multi-hop reads
 (2605.16640: one attention-like layer per dependent hop).
+
+**Gap found in the defect hunt (2026-08-29):** the serving API has no way to carry a tool exchange back into the
+next turn's history. `Engine._generate` returns `done.text` without the `<|call|> … <|result|> … <|assistant|>`
+bytes, the chat schema has no `parts`, and `fold`/`build_prompt` build `ChatMessage(role, content)` only — while
+the tokenizer's `_turn` can render `parts` and the sim traces train on them. So a multi-turn conversation re-encodes
+an assistant turn that used a tool as plain text: the model never sees its earlier calls in the format it was
+trained on, and Studio-recorded preference/SFT pairs lose the tool structure. The live environment needs it:
+`done` carries `parts` (text / call / result segments), the schema accepts `parts` on assistant messages, `fold`
+passes them through (the card merges only into user turns). ≈ half a day; part of the sandbox + loop build.

@@ -20,7 +20,7 @@ import torch
 
 from ..config import MoteConfig
 from ..data.loader import ByteShard
-from ..model.hnet import HNetForCausalLM, strip_retired
+from ..model.hnet import HNetForCausalLM, load_weights, strip_retired
 from ..train.train import evaluate
 
 
@@ -33,12 +33,15 @@ def raw_shard(path: Path) -> ByteShard:
     return sh
 
 
-def load_model(checkpoint: str | Path, device: torch.device):
+def load_model(checkpoint: str | Path, device: torch.device, raw: bool = False):
+    """The checkpoint's EMA when it has one (what the run's own val_bpb_ema was read on), else the raw weights;
+    `raw=True` scores the raw weights on purpose."""
     ck = torch.load(checkpoint, map_location="cpu", weights_only=True)
     cfg = MoteConfig.from_dict(ck["config"])
     model = HNetForCausalLM(cfg, device=device)
-    model.load_state_dict(strip_retired(ck["model"]))
+    which = load_weights(model, ck, prefer_ema=not raw)
     model.eval()
+    print(f"val_bpb: {which} weights of {checkpoint}", flush=True)
     return model, cfg, ck.get("step")
 
 
