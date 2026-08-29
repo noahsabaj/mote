@@ -59,11 +59,20 @@ prongs still decide. The windows are a factor of 2 in D, not a bpb margin (seed 
 
 ## Also on the credits
 
-- The six QK-Norm arms leave the local queue for one L4, step-budgeted: 24,000 steps for `off`/`on` and
-  12,000 for the four variants (`elr_gate/muon_ref` reached 24,173 in 120 min); read at matched steps as
-  always. The local queue drains ≈ 8 h earlier.
-- The housekeeping bitwise check runs early: the test suite on HEAD, then 100 steps of the trunk argv with
-  `--log-every 1` on `58e8672` and on HEAD, compared by `scripts/bitwise_diff.py`. An early warning on the
-  same GPU family; the local check in the gap still runs.
+- **The QK-Norm set stays on the local queue.** It was going to move to one L4 (step-budgeted 24k/12k), but
+  the L4 measures 0.73× the 4060 Ti at the flagship shape (54.8 KB/s at accum 2) and only ~0.5× at 35M
+  (69 KB/s), and the org account runs **two GPU jobs at a time** — the six arms would have cost ≈ $6 and a
+  slot for 13 h, pushing the lr arms past Monday's gap. Cancelled at step ~1,300 ($0.15); the gap still
+  opens ≈ Mon 19:30 EDT.
+- **The housekeeping bitwise check ran early** (`runs/cloud/bitwise/{old,new}`: 100 steps of the trunk
+  argv with `--log-every 1` on `58e8672` and on HEAD `bbb3d36`, one L4, `scripts/bitwise_diff.py`):
+  **DIFFERS** — from step 1 (`grad_norm` 1388.99 vs 1389.04, `train_bpb` 438.6795 vs 438.6858, `w_norm`
+  in the 9th digit; 1003 differing log values over 100 steps; every tensor in `last.pt`). The size says a
+  changed reduction order or kernel path, not a different init or a semantic change. Whether the L4 is
+  run-to-run deterministic at this shape is being measured by `mote-bitwise-ctl` (HEAD twice, same
+  machine, plus the GPU test suite): identical → the refactor is not bit-inert and the gap protocol's
+  revert applies to whichever housekeeping step moved the bits (bisect: five commits, ~6 min each);
+  differing → the verdict cannot be read on this GPU and the local check in the gap decides.
 
-≈ $21 of the 25.
+Spend: four lr arms ≈ $16 of the 25 at the measured rate; the two-slot cap means the three long arms
+finish ≈ Sun 2026-08-30 13:00 EDT.
