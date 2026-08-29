@@ -266,7 +266,11 @@ class DeChunkLayer(nn.Module):
         e = local[:, :, -1]  # [B, nb, D]
         logd = L[:, :, -1]  # [B, nb]  log of each block's total decay
         s_incl = torch.cumsum(logd, dim=-1)  # S_c⁺
-        s_excl = s_incl - logd  # S_b
+        # S_b as an EXCLUSIVE prefix sum, not s_incl - logd: that subtraction rounds through the block's own
+        # total decay, which includes chunks after any given position, so a change past position t moved
+        # z̄_t by ~1e-5 (caught by tests/test_prefix_invariance.py, 2026-08-29). The exact value is causal;
+        # this makes the computed one causal too, bit for bit.
+        s_excl = torch.cat([torch.zeros_like(s_incl[..., :1]), s_incl[..., :-1]], dim=-1)  # S_b
         w = s_excl[:, :, None] - s_incl[:, None, :]  # [B, nb, nb]: rows b, cols c
         lower = torch.tril(torch.ones(nb, nb, device=x.device, dtype=torch.bool), diagonal=-1)  # c < b
         w = torch.exp(w.masked_fill(~lower, float("-inf")))
