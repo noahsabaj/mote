@@ -33,3 +33,4 @@ service-account*.json
 *.sqlite
 *.pickle
 *.pkl
+web/node_modules
