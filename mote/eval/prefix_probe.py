@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-from ..serve.engine import Engine, GenParams
+from ..infer.engine import Engine, GenParams
 
 QUESTIONS = [
     "Hi! What are you?", "What can you help me with?", "Name three colours.", "What is two plus two?",

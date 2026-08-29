@@ -27,8 +27,8 @@ import threading
 from pathlib import Path
 from typing import Dict, List
 
-from ..serve.engine import Engine, GenParams
-from ..serve.identity import with_system_card
+from ..infer.engine import Engine, GenParams
+from ..identity import with_system_card
 from ..serve.prefs import PrefStore
 
 # The rubric's own concerns, one prompt each: a reply can be good or bad here in ways worth a rater's time.

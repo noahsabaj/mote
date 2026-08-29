@@ -1,8 +1,6 @@
 """Model-level checks: causality, cache/step equivalence, loss sanity, end-to-end decode equivalence."""
 
-import math
 
-import pytest
 import torch
 import torch.nn.functional as F
 
@@ -11,19 +9,14 @@ from mote.model.dc import ratio_loss, atdc_target_ratio
 from mote.model.hnet import HNetForCausalLM
 from mote.model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
 from mote.model.relation import FullRelation
+from conftest import tiny_cfg
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def small_cfg() -> MoteConfig:
-    return MoteConfig(
-        d_model_outer=64,
-        encoder_layers=1,
-        decoder_layers=1,
-        main=RelationCfg(n_layers=2, d_model=96, n_heads=4, d_ff=128),
-        mamba3=Mamba3Cfg(d_state=32, headdim=32, expand=2),
-        max_seq_len=128,
-    )
+    return tiny_cfg(d_model_outer=64, main=RelationCfg(n_layers=2, d_model=96, n_heads=4, d_ff=128),
+                    mamba3=Mamba3Cfg(d_state=32, headdim=32, expand=2), max_seq_len=128)
 
 
 def test_relation_is_causal_and_cache_matches():

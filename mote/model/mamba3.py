@@ -134,7 +134,7 @@ class Mamba3Mixer(nn.Module):
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False, **fk)
         self.telemetry: Optional[dict] = None  # set to a dict by the serving engine to collect live values
         # Decode-graph telemetry: {"retention": [H], "trapezoid": [H]} device buffers the step writes with
-        # copy_ instead of .tolist() — nothing may synchronise inside a CUDA-graph capture (serve/graph.py).
+        # copy_ instead of .tolist() — nothing may synchronise inside a CUDA-graph capture (mote/infer/graph.py).
         self.telemetry_dev: Optional[dict] = None
 
     # ------------------------------------------------------------------------------

@@ -6,7 +6,6 @@ failure actually observed (lr_sweep_12e-4's norm ending below a lower-lr arm's) 
 that are correct behaviour (warmup, an intended decay tail).
 """
 
-import copy
 import math
 
 import pytest

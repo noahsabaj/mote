@@ -22,8 +22,8 @@ import threading
 from pathlib import Path
 from typing import Dict, List
 
-from ..serve.engine import Engine, GenParams
-from ..serve.identity import with_system_card
+from ..infer.engine import Engine, GenParams
+from ..identity import with_system_card
 
 MAX_PASSAGE_BYTES = 1024
 MAX_REPLY_BYTES = 48

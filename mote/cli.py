@@ -21,47 +21,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import secrets
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-STATE = ROOT / ".mote"
-TOKEN_FILE = STATE / "token"
-CONFIG_FILE = STATE / "config.json"
-LOG_FILE = STATE / "studio.log"
-SUP_PID = STATE / "supervisor.pid"
-SRV_PID = STATE / "server.pid"
-STOP_FLAG = STATE / "stop"
+from mote.paths import (CONFIG_FILE, LOG_FILE, ROOT, SRV_PID, STATE, STOP_FLAG, SUP_PID, TOKEN_FILE,  # noqa: F401 (the names the commands use)
+                        ensure_token, load_config, save_config)
+
 PY = Path(sys.executable)
 PYW = PY.with_name("pythonw.exe") if os.name == "nt" else PY
-DEFAULT_CONFIG = {"checkpoint": "runs/pilot_sft/last.pt", "device": "cpu", "port": 7861, "host": "127.0.0.1"}
-
-
-# ---- state ----------------------------------------------------------------------------------
-def load_config() -> dict:
-    cfg = dict(DEFAULT_CONFIG)
-    if CONFIG_FILE.exists():
-        cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
-    return cfg
-
-
-def save_config(cfg: dict) -> None:
-    STATE.mkdir(exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-
-
-def ensure_token() -> str:
-    STATE.mkdir(exist_ok=True)
-    if not TOKEN_FILE.exists():
-        TOKEN_FILE.write_text(secrets.token_urlsafe(24), encoding="utf-8")
-    return TOKEN_FILE.read_text(encoding="utf-8").strip()
 
 
 def _pid(path: Path):
@@ -392,26 +363,13 @@ def prefs_cmd(args) -> int:
 
 
 def _api(method: str, path: str, body=None):
-    import urllib.error
-    import urllib.request
+    """The studio call as a command sees it: the daemon's own message on stderr and exit 1, never a traceback."""
+    from mote.client import StudioError, api
 
-    cfg = load_config()
-    tok = ensure_token()
-    req = urllib.request.Request(f"http://127.0.0.1:{cfg['port']}{path}", method=method,
-                                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"},
-                                 data=json.dumps(body).encode() if body is not None else None)
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:  # the daemon's own message (400 malformed args, 404 no such job), not a traceback
-        try:
-            detail = json.loads(e.read()).get("detail", "")
-        except Exception:
-            detail = ""
-        print(f"studio refused {method} {path}: {e.code} {detail or e.reason}", file=sys.stderr)
-        raise SystemExit(1)
-    except urllib.error.URLError as e:
-        print(f"no studio on port {cfg['port']} ({e.reason}); `mote status`", file=sys.stderr)
+        return api(method, path, body, token=ensure_token())
+    except StudioError as e:
+        print(e, file=sys.stderr)
         raise SystemExit(1)
 
 

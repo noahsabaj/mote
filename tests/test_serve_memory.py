@@ -13,7 +13,7 @@ from mote.config import resolve_preset
 from mote.model.arena import RelationArena
 from mote.model.hnet import HNetForCausalLM
 from mote.runinfo import DEFAULT_BPIC, chunks_for, measured_bpic
-from mote.serve.prefix_cache import PAGE, PrefixStore
+from mote.infer.prefix_cache import PAGE, PrefixStore
 
 CUDA = torch.cuda.is_available()
 
@@ -57,7 +57,7 @@ def test_the_prefill_window_is_a_config_field_that_travels_with_the_checkpoint()
 
 def test_an_engine_reads_a_long_prompt_in_windows():
     """`Engine._read` is the only path a prompt takes; a window of 0 is the old one-shot behaviour."""
-    from mote.serve.engine import Engine
+    from mote.infer.engine import Engine
 
     cfg, model = _model("mote-32m")
     cfg.prefill_window = 64
@@ -219,7 +219,7 @@ def test_the_rings_are_sized_for_a_reply_and_clamp_anything_larger():
     pinned host memory at 16384, for 513 usable slots."""
     import threading
 
-    from mote.serve.graph import GraphDecoder
+    from mote.infer.graph import GraphDecoder
 
     cfg, model = _model("mote-1m")
     model = model.cuda()
@@ -242,7 +242,7 @@ def test_the_capture_cache_keeps_the_newest_widths_and_drops_the_rest():
     graphs would sit resident for the life of the engine."""
     from collections import OrderedDict
 
-    from mote.serve.graph import GraphDecoder
+    from mote.infer.graph import GraphDecoder
 
     class _Stub:
         def __init__(self):
@@ -271,7 +271,7 @@ def test_the_capture_cache_keeps_the_newest_widths_and_drops_the_rest():
 def test_a_zero_cache_size_keeps_every_capture():
     from collections import OrderedDict
 
-    from mote.serve.graph import GraphDecoder
+    from mote.infer.graph import GraphDecoder
 
     gd = GraphDecoder.__new__(GraphDecoder)
     gd.graphs, gd.max_graphs = OrderedDict(), 0
@@ -286,7 +286,7 @@ def test_a_real_capture_is_evicted_once_the_cache_is_full():
     """Two captures against a cache of one. Deliberately the smallest test that exercises real CUDA
     graphs: a capture's private pool is not returned to the allocator when the graph is reset, so a
     test that captures many of them starves everything that runs after it in the same process."""
-    from mote.serve.graph import BUCKET, GraphDecoder
+    from mote.infer.graph import BUCKET, GraphDecoder
 
     cfg, model = _model("mote-1m")
     model = model.cuda()

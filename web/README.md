@@ -65,7 +65,7 @@ src/
     format.ts               # byte/count/percent/date formatting, absolute and relative
     persist.ts              # failure-tolerant localStorage
     download.ts             # hand a generated file to the browser
-    brand.ts                # the model's name, mirroring serve/identity.py
+    brand.ts                # the model's name, mirroring mote/identity.py
     clock.svelte.ts         # one 30 s tick shared by every relative timestamp
     actions.ts              # dismissable, autosize, tip (tooltips)
     commands.ts             # /clear and /help: parsing, escaping, the menu's contents
@@ -113,7 +113,7 @@ a 272-byte reply keeps the whole page at ~86 elements. Structure view adds one s
 rows.
 
 **Chunk spans.** `chunk` events are used only as "a chunk closed" signals. Their `start`/`end`
-come from `mote/serve/engine.py` in whole-context coordinates (prompt included) and its
+come from `mote/infer/engine.py` in whole-context coordinates (prompt included) and its
 `end` is one short of its own `bytes` count, while `byte.i` is reply-local — so chunk spans are
 rebuilt from the `chunk` index that every byte already carries, which is unambiguous and in the
 same frame as everything else. The dev mock emits the same awkward values on purpose, so this

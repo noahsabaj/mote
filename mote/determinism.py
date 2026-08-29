@@ -32,7 +32,6 @@ too. Nothing depends on serving being reproducible, but it is why the mode is re
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 import torch
 

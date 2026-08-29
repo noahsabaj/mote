@@ -118,7 +118,7 @@ Measured on the RTX 4060 Ti before this work: ~9 % MFU (42 kB/s on the 35M model
 
 ## Identity and pushback
 
-Mote is told what it is two ways: a short identity card (`mote/serve/identity.py`) is prepended as the system message
+Mote is told what it is two ways: a short identity card (`mote/identity.py`) is prepended as the system message
 at serve time, and `python -m mote.data.build_identity --out data/sft_identity --params <n>` generates identity
 dialogues plus *balanced* pushback dialogues (user wrong → hold with a one-line check; user right → concede) and DPO
 pairs. Mix the shard into SFT with `--mix data/sft_identity:0.05`, then optionally run
@@ -146,7 +146,7 @@ python -m mote.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
 ```
 
 `docs/prefs.md` is the preference loop: Retry / Compare / arena votes in the studio, a challenger checkpoint for blind A/B, the rubric (`docs/rubric.md`) and the export/import round trip with Claude as the second rater. `docs/context.md` is context management: the engine keeps a prefix cache so each turn reads only the new bytes
-(`mote/serve/prefix_cache.py`, verified by `mote.eval.prefix_probe`), and the studio folds the oldest turns into an editable compaction card when a
+(`mote/infer/prefix_cache.py`, verified by `mote.eval.prefix_probe`), and the studio folds the oldest turns into an editable compaction card when a
 conversation outgrows the window (`POST /api/context` previews it), and the flagship window is 16384 bytes gated on a
 memory profile. `docs/search.md` is the settled design for web search (learned `<|search|>` call, SearXNG + an offline Wikipedia-intro
 index, snippets only, gated on a measured reading probe); nothing of it is live yet. `docs/api.md` is the contract: `/api/model`, `/api/checkpoints` (+ hot-swap), `/api/training/runs`,

@@ -2,14 +2,11 @@
 re-selects windows mid-run, and the trainer plumbing that runs it as a gate-releasing generator."""
 
 import json
-from pathlib import Path
 
 import numpy as np
-import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.data.select_sft import trajectory_keep, window_starts
-from mote.data.loader import ByteShard
+from conftest import tiny_cfg, write_shard
 
 
 # ---- the rule --------------------------------------------------------------------------------
@@ -45,19 +42,9 @@ def test_an_empty_keep_falls_back_to_every_scorable_window():
 
 
 # ---- the trainer plumbing ---------------------------------------------------------------------
-TINY = dict(d_model_outer=32, encoder_layers=1, decoder_layers=1)
-
-
 def _sft_fixture(tmp_path):
-    MoteConfig(**TINY, main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-               mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256).save(tmp_path / "tiny.json")
-    rng = np.random.default_rng(0)
-    for split, n in (("train", 12000), ("val", 3000)):
-        rng.integers(0, 256, size=n, dtype=np.uint16).tofile(tmp_path / f"tiny.sft.{split}.bin")
-        (rng.random(n) < 0.5).astype(np.uint8).tofile(tmp_path / f"tiny.sft.{split}.mask.bin")
-    (tmp_path / "tiny.sft.meta.json").write_text(json.dumps({
-        "train": {"file": "tiny.sft.train.bin", "mask_file": "tiny.sft.train.mask.bin"},
-        "val": {"file": "tiny.sft.val.bin", "mask_file": "tiny.sft.val.mask.bin"}}))
+    tiny_cfg().save(tmp_path / "tiny.json")
+    write_shard(tmp_path / "tiny", n_train=12000, n_val=3000, sft=True)
     return tmp_path / "tiny"  # ByteShard(prefix, sft=True) reads {prefix}.sft.*
 
 

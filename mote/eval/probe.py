@@ -31,8 +31,8 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from ..serve.engine import Engine, GenParams
-from ..serve.identity import NAME, with_system_card
+from ..infer.engine import Engine, GenParams
+from ..identity import NAME, with_system_card
 
 OTHER_NAMES = ["chatgpt", "gpt-4", "gpt4", "claude", "llama", "gemini", "openai", "anthropic"]
 

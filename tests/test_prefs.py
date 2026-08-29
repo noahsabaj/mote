@@ -7,10 +7,10 @@ import torch
 from fastapi.testclient import TestClient
 
 import mote.serve.app as A
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
-from mote.serve.engine import Engine
+from mote.infer.engine import Engine
 from mote.serve.prefs import PrefStore, divergence
+from conftest import tiny_cfg
 
 SRC_A = {"checkpoint": "overnight_sft/last.pt", "step": 3666, "engine": "current", "params": {"temperature": 0.8}}
 SRC_B = {"checkpoint": "overnight_sft2/last.pt", "step": 3700, "engine": "challenger", "params": {"temperature": 0.8}}
@@ -69,11 +69,7 @@ def test_export_is_blind_ranked_and_import_stamps_the_rubric(tmp_path, monkeypat
 
 
 def _tiny_ckpt(tmp_path):
-    cfg = MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
-    )
+    cfg = tiny_cfg()
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg)
     run = tmp_path / "runs" / "pilot_tiny"

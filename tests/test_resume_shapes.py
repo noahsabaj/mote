@@ -3,30 +3,21 @@ run's saved config, and --init-from an older checkpoint pads its vocabulary rows
 
 import json
 
-import numpy as np
 import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.train.train import Trainer, load_checkpoint, pad_vocab_rows
+from conftest import tiny_cfg, write_shard
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"  # the trainer refuses a missing GPU; the tests ask for what is there
 
 
 def _cfg(pad):
-    return MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1, pad_vocab_to=pad,
-        main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
-    )
+    return tiny_cfg(pad_vocab_to=pad)
 
 
 def _data(tmp_path):
-    rng = np.random.default_rng(0)
-    for split, n in (("train", 20000), ("val", 4000)):
-        rng.integers(0, 256, size=n, dtype=np.uint16).tofile(tmp_path / f"tiny.{split}.bin")
-    (tmp_path / "tiny.meta.json").write_text(json.dumps({"train": {"file": "tiny.train.bin"}, "val": {"file": "tiny.val.bin"}}))
-    return tmp_path / "tiny"
+    return write_shard(tmp_path / "tiny")
 
 
 def _argv(tmp, cfg_path, out, steps, extra=()):

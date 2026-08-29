@@ -1,7 +1,6 @@
 """The batched Newton-Schulz Muon step equals the per-parameter reference step (the pre-2026-08-24
 implementation) on every matrix, including a mixed shape group and Muon-SW's scaled decay."""
 
-import copy
 
 import torch
 

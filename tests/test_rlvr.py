@@ -7,21 +7,17 @@ import json
 import pytest
 import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
-from mote.serve.engine import Engine, GenParams
+from mote.infer.engine import Engine, GenParams
 from mote.serve.jobs import _argparser_for, _job_args, make_trainer
 from mote.tokenizer import PAD_ID
 from mote.train.rlvr import (RlvrTrainer, goal_anchor, group_advantages, has_signal, mix_advantages,
                              pad_batch, prospect, token_logprobs)
+from conftest import tiny_cfg
 
 
 def _tiny_ckpt(tmp_path):
-    cfg = MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=2048,
-    )
+    cfg = tiny_cfg(max_seq_len=2048)
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg)
     run = tmp_path / "runs" / "init"
@@ -105,7 +101,7 @@ def _argv(ck, out, extra=()):
 def test_one_step_without_signal_then_with_signal(tmp_path, monkeypatch):
     # the tiny random model (272 embedding rows since 2026-08-24) puts <|assistant|> on top and would end every
     # rollout at byte 0; the update needs non-empty rollouts, so only EOS ends one here
-    import mote.serve.engine as E
+    import mote.infer.engine as E
     from mote.tokenizer import EOS_ID
     monkeypatch.setattr(E, "STOP_IDS", {EOS_ID})
     ck = _tiny_ckpt(tmp_path)

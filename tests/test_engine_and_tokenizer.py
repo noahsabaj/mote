@@ -5,10 +5,10 @@ import threading
 import pytest
 import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
-from mote.serve.engine import Engine, GenParams
+from mote.infer.engine import Engine, GenParams
 from mote.tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer
+from conftest import tiny_cfg
 
 
 def test_chat_template_and_loss_mask():
@@ -37,11 +37,7 @@ def test_utf8_streamer_assembles_multibyte_and_survives_garbage():
 
 
 def _tiny_engine(tmp_path):
-    cfg = MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
-    )
+    cfg = tiny_cfg()
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg)
     run = tmp_path / "runs" / "pilot_tiny"
@@ -53,7 +49,7 @@ def _tiny_engine(tmp_path):
 @pytest.fixture
 def no_stop_ids(monkeypatch):
     # a random-init model samples EOS/role ids almost immediately; neutralize them so the stream has length
-    import mote.serve.engine as E
+    import mote.infer.engine as E
 
     monkeypatch.setattr(E, "STOP_IDS", set())
 

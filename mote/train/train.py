@@ -17,7 +17,6 @@ from collections import deque
 import json
 import math
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -35,7 +34,7 @@ from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.moe import collect_moe, moe_modules
 import mote
 
-from .. import determinism
+from .. import determinism, runinfo
 from .flops import _n as _n_active
 from ..model.feedback import feedback_from
 from ..model.hnet import HNetForCausalLM, strip_retired
@@ -381,34 +380,24 @@ def chunk_sample(model: HNetForCausalLM, text: str, device) -> str:
 
 # --------------------------------------------------------------------------------------
 def save_checkpoint(path: Path, model, opt, step: int, cfg: MoteConfig, extra: Dict):
+    """The one writer of a Mote checkpoint. `opt=None` (a weights-only snapshot, a post-training stage) leaves the
+    optimizer out rather than writing `None` — a resume that found `"optimizer": None` used to crash in
+    `MultiOpt.load_state_dict`."""
     tmp = path.with_suffix(".tmp")
     # Everything here is tensors and plain Python, which is what lets every reader use
     # torch.load(weights_only=True) — the safe loader, and the default since 2.6. We had been
     # opting out of it at all twelve load sites for no reason: a .pt is a pickle, and this repo is
     # public. If a future field ever needs a real class, register it with
     # torch.serialization.add_safe_globals rather than turning the flag back off.
-    torch.save({"model": model.state_dict(), "optimizer": opt.state_dict(), "step": step, "config": cfg.to_dict(), "extra": extra}, tmp)
+    ck = {"model": model.state_dict(), "step": step, "config": cfg.to_dict(), "extra": extra}
+    if opt is not None:
+        ck["optimizer"] = opt.state_dict()
+    torch.save(ck, tmp)
     os.replace(tmp, path)
 
 
 def ckpt_path_exists(out_dir: Path) -> bool:
     return (out_dir / "last.pt").exists()
-
-
-def last_logged_elapsed_sec(log_path: Path) -> float:
-    """The last `elapsed_min` a run logged, in seconds (0 without a log) — the clock of a pre-2026-08-24 checkpoint."""
-    if not log_path.exists():
-        return 0.0
-    last = 0.0
-    with open(log_path, encoding="utf-8") as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if "elapsed_min" in rec:
-                last = float(rec["elapsed_min"]) * 60.0
-    return last
 
 
 VOCAB_SIZED = ("embeddings.weight", "lm_head.weight")
@@ -444,7 +433,7 @@ def load_checkpoint(path: Path, model, opt=None, ck: Optional[Dict] = None, allo
             print(f"fresh modules not in {path}: {sorted({k.split('.')[0] for k in res.missing_keys})}", flush=True)
     else:
         model.load_state_dict(sd)
-    if opt is not None and "optimizer" in ck:
+    if opt is not None and ck.get("optimizer") is not None:
         opt.load_state_dict(ck["optimizer"])
     return ck["step"], ck.get("extra", {})
 
@@ -714,7 +703,7 @@ class Trainer:
             # instead of restarting); checkpoints from before 2026-08-24 carry no clock — read the log's last
             elapsed = extra.get("elapsed_sec")
             if elapsed is None:
-                elapsed = last_logged_elapsed_sec(out_dir / "log.jsonl")
+                elapsed = runinfo.last_elapsed_sec(out_dir)
             self.t_start = time.time() - float(elapsed or 0.0)
             print(f"resumed from step {self.step} at {(elapsed or 0.0) / 60:.1f} min", flush=True)
 
@@ -928,10 +917,7 @@ class Trainer:
     def snapshot(self) -> Path:
         """Weights-only `snap_<step>.pt`: a branch point (`--init-from` loads it; no optimizer state)."""
         p = self.out_dir / f"snap_{self.step:08d}.pt"
-        tmp = p.with_suffix(".tmp")
-        torch.save({"model": self.model.state_dict(), "step": self.step, "config": self.cfg.to_dict(),
-                    "extra": {"sched_total": self.sched_total, "schedule": self.args.schedule}}, tmp)
-        os.replace(tmp, p)
+        save_checkpoint(p, self.model, None, self.step, self.cfg, {"sched_total": self.sched_total, "schedule": self.args.schedule})
         self.log({"snapshot": str(p)})
         return p
 

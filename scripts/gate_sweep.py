@@ -34,8 +34,8 @@ RECIPE = ["--preset", "flagship", "--data", "data/flagship_mix", "--seq-len", "1
 
 
 def _api(method: str, path: str, body=None):
-    from mote.cli import _api as call
-    return call(method, path, body)
+    from mote.client import api
+    return api(method, path, body)
 
 
 def main(argv=None) -> int:

@@ -44,6 +44,7 @@ from typing import Callable, Dict, List, Optional
 
 import torch
 
+from .. import runinfo
 from ..train.train import Trainer, build_argparser
 
 
@@ -122,24 +123,7 @@ def gpu_usable_bytes() -> float:
 
 def last_logged_step(out_dir: Optional[str]) -> int:
     """The last `step` in `<out>/log.jsonl` (its tail), 0 when the run has not logged one yet."""
-    if not out_dir:
-        return 0
-    try:
-        with open(Path(out_dir) / "log.jsonl", "rb") as f:
-            f.seek(0, 2)
-            f.seek(max(f.tell() - 65536, 0))
-            tail = f.read().decode("utf-8", "replace")
-    except OSError:
-        return 0
-    step = 0
-    for line in tail.splitlines():
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(rec, dict) and isinstance(rec.get("step"), int):
-            step = max(step, rec["step"])
-    return step
+    return runinfo.last_step(out_dir, tail_bytes=65536) if out_dir else 0
 
 
 @dataclass

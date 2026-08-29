@@ -44,21 +44,13 @@ class EvalPoint(NamedTuple):
 def read_run(run: Path) -> Tuple[float, List[Tuple[float, float]]]:
     """(lr, [(tokens_seen, val_bpb), ...]) from a run directory. Each point also carries the ELR in force
     at that eval when the run logged one (`elr`, carried forward from the preceding train line)."""
-    rj = json.loads((run / "run.json").read_text(encoding="utf-8"))
+    from .. import runinfo
+
+    rj = runinfo.run_json(run)
     lr = float(rj["lr"])
-    tokens_per_step = int(rj["batch_size"]) * int(rj["seq_len"]) * int(rj["grad_accum"])
+    tokens_per_step = runinfo.tokens_per_step(rj)
     pts = []
-    recs = []
-    for line in (run / "log.jsonl").read_text(encoding="utf-8").splitlines():
-        try:
-            recs.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    # a fresh start into an existing directory appends after the old run's lines (a resume continues the step
-    # count; a fresh start logs its throughput probe at step 0): keep the last fresh start's segment only
-    starts = [i for i, r in enumerate(recs) if r.get("step") == 0 and "probe_sec_per_step" in r]
-    if starts:
-        recs = recs[starts[-1]:]
+    recs = runinfo.last_segment(runinfo.records(run))  # a fresh start into a used directory: its own segment only
     elr = None
     for rec in recs:
         if "elr" in rec:

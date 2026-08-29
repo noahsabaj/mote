@@ -57,7 +57,7 @@ import torch.nn.functional as F
 
 from ..config import MoteConfig
 from ..model.hnet import HNetForCausalLM, strip_retired
-from ..serve.engine import Engine, GenParams
+from ..infer.engine import Engine, GenParams
 from ..sim.tasks import TASK_DOMAINS, SimEnv, Task, heldout_tasks, make_task
 from ..tokenizer import PAD_ID
 from .train import load_checkpoint, save_checkpoint

@@ -1,7 +1,7 @@
 [project]
 name = "mote"
 version = "0.1.0"
-description = "Byte-level H-Net language model (Mamba-3 encoder/decoder, Relation main network, multi-byte prediction head) and the studio that serves it."
+description = "Byte-level H-Net language model (Mamba-3 encoder/decoder, Relation main network) and the studio that trains and serves it."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 license-files = ["COPYRIGHT", "LICENSE-MIT", "LICENSE-APACHE"]

@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from mote.model.norm import HAS_FUSED_NORM, RMSNorm
+from conftest import tiny_cfg
 
 needs_gpu = pytest.mark.skipif(
     not (torch.cuda.is_available() and HAS_FUSED_NORM), reason="needs CUDA + the fused kernel"
@@ -80,11 +81,7 @@ def test_model_forward_backward_matches_with_and_without_fusion():
     from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
     from mote.model.hnet import HNetForCausalLM
 
-    cfg = MoteConfig(
-        d_model_outer=64, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=2, d_model=64, n_heads=2, d_ff=128),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=512,
-    )
+    cfg = tiny_cfg(d_model_outer=64, main=RelationCfg(n_layers=2, d_model=64, n_heads=2, d_ff=128), max_seq_len=512)
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg, device="cuda")
     ids = torch.randint(0, 256, (2, 256), device="cuda")

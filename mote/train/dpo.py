@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-import os
 import random
 import time
 from pathlib import Path
@@ -26,7 +24,8 @@ import torch.nn.functional as F
 
 from ..config import MoteConfig
 from ..model.hnet import HNetForCausalLM, strip_retired
-from ..tokenizer import ByteTokenizer, ChatMessage
+from ..tokenizer import PAD_ID, ByteTokenizer, ChatMessage
+from .train import save_checkpoint
 
 
 def pair_messages(pair: Dict) -> List[Dict]:
@@ -168,7 +167,7 @@ def main(argv=None):
     opt = torch.optim.AdamW([p for p in policy.parameters() if p.requires_grad], lr=args.lr, betas=(0.9, 0.95), weight_decay=0.0)
     log_f = open(out / "log.jsonl", "a", encoding="utf-8")
     step, t0 = 0, time.time()
-    pad_id = tok.pad_id if hasattr(tok, "pad_id") else 258
+    pad_id = PAD_ID
 
     def batch_logps(model, items, weights=None):
         ids, mask = pad_batch(items, pad_id, device)
@@ -224,11 +223,8 @@ def main(argv=None):
             log_f.flush()
             if step % 5 == 0:
                 print(json.dumps(rec), flush=True)
-    ck_out = {"model": policy.state_dict(), "optimizer": None, "step": int(ck.get("step", 0)) + step, "config": cfg.to_dict(),
-              "extra": {**ck.get("extra", {}), "dpo": {"objective": args.objective, "orpo_lambda": args.orpo_lambda, "pairs": len(pairs), "epochs": args.epochs, "beta": args.beta, "lr": args.lr, "sft_weight": args.sft_weight, "init_from": args.init_from}}}
-    tmp = out / "last.tmp"
-    torch.save(ck_out, tmp)
-    os.replace(tmp, out / "last.pt")
+    save_checkpoint(out / "last.pt", policy, None, int(ck.get("step", 0)) + step, cfg,
+                    {**ck.get("extra", {}), "dpo": {"objective": args.objective, "orpo_lambda": args.orpo_lambda, "pairs": len(pairs), "epochs": args.epochs, "beta": args.beta, "lr": args.lr, "sft_weight": args.sft_weight, "init_from": args.init_from}})
     log_f.write(json.dumps({"done": True, "final_step": step}) + "\n")
     print(json.dumps({"done": True, "steps": step, "out": str(out / "last.pt")}))
 

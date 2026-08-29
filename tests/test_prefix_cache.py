@@ -1,4 +1,4 @@
-"""Prefix store (mote/serve/prefix_cache.py, Engine._read_prompt): a warm continuation equals a cold
+"""Prefix store (mote/infer/prefix_cache.py, Engine._read_prompt): a warm continuation equals a cold
 prefill up to float rounding, anchors cost only the small states (the arena rows live in pages), branches
 extend / refresh / fork correctly and honour the budget, the hot arena is not re-copied, and the engine
 reports what it reused and verifies it on request."""
@@ -7,19 +7,15 @@ import threading
 
 import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.arena import RelationArena
 from mote.model.hnet import HNetForCausalLM
-from mote.serve.engine import Engine, GenParams
-from mote.serve.prefix_cache import PAGE, PrefixStore, state_nbytes
+from mote.infer.engine import Engine, GenParams
+from mote.infer.prefix_cache import PAGE, PrefixStore, state_nbytes
+from conftest import tiny_cfg
 
 
 def _cfg():
-    return MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
-    )
+    return tiny_cfg()
 
 
 def _model(seed: int) -> HNetForCausalLM:
@@ -119,7 +115,7 @@ def test_store_branches_anchors_pages_and_budget():
 
 
 def test_engine_reuses_the_previous_turn_and_verifies(tmp_path, monkeypatch):
-    import mote.serve.engine as E
+    import mote.infer.engine as E
 
     monkeypatch.setattr(E, "STOP_IDS", set())  # a random-init model samples EOS at once; keep the stream going
     eng = _engine(tmp_path)

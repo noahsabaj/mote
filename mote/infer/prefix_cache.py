@@ -31,22 +31,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 
 from ..model.arena import RelationArena
+from ..model.tree import tree_nbytes as state_nbytes  # bytes of an anchor's tensors
 
 PAGE = 256  # chunks per CPU page (~9 MB on the flagship)
 
 
 def _pack(ids: Sequence[int]) -> bytes:
     return array("H", ids).tobytes()  # byte ids are < 512; two bytes each, so prefix checks align
-
-
-def state_nbytes(o: Any) -> int:
-    if isinstance(o, torch.Tensor):
-        return o.numel() * o.element_size()
-    if isinstance(o, (list, tuple)):
-        return sum(state_nbytes(x) for x in o)
-    if hasattr(o, "__dataclass_fields__"):
-        return sum(state_nbytes(getattr(o, k)) for k in o.__dataclass_fields__)
-    return 0
 
 
 @dataclass

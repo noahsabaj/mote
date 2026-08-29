@@ -9,7 +9,7 @@ import type {
   TrainingRun
 } from '../src/lib/types';
 
-// Mirrors mote/serve/identity.py for the mock's 12.66M-parameter checkpoint.
+// Mirrors mote/identity.py for the mock's 12.66M-parameter checkpoint.
 export const MOCK_IDENTITY_CARD =
   'You are Mote, a small byte-level language model with about 13 million parameters, trained ' +
   'by Noah on a single GPU. You read and write raw UTF-8 bytes rather than tokens. You were ' +

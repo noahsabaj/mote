@@ -18,13 +18,31 @@ import subprocess
 import sys
 from pathlib import Path
 
-MIRROR = {  # run.json key -> flag (value flags); the trunk's recipe, nothing else
-    "preset": "--preset", "config": "--config", "data": "--data", "seq_len": "--seq-len", "batch_size": "--batch-size",
-    "grad_accum": "--grad-accum", "bucket": "--bucket", "optimizer": "--optimizer", "weight_decay": "--weight-decay",
-    "lr": "--lr", "clip": "--clip", "beta2": "--beta2", "eval_batches": "--eval-batches", "eval_every": "--eval-every",
-    "bound_floor": "--bound-floor", "bound_ceiling": "--bound-ceiling", "seed": "--seed", "ckpt_minutes": "--ckpt-minutes",
-}
-MIRROR_FLAGS = {"ckpt_main": "--ckpt-main", "eval_spread": "--eval-spread", "tf32": "--tf32", "qk_norm": "--qk-norm"}
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# The run.json keys that ARE the trunk's recipe (everything else in it is the run's own: out, resume, max
+# minutes, snapshots). The flag for each comes from the trainer's parser, so a renamed flag fails here
+# instead of silently dropping out of every derived arm.
+RECIPE = ["preset", "config", "data", "seq_len", "batch_size", "grad_accum", "bucket", "optimizer", "weight_decay",
+          "lr", "clip", "beta2", "eval_batches", "eval_every", "bound_floor", "bound_ceiling", "seed", "ckpt_minutes",
+          "ckpt_main", "eval_spread", "tf32", "qk_norm"]
+
+
+def recipe_flags(run: dict) -> list:
+    from mote.train.train import build_argparser
+
+    actions = {a.dest: a for a in build_argparser()._actions}
+    missing = [d for d in RECIPE if d not in actions]
+    if missing:
+        raise SystemExit(f"run.json keys with no trainer flag any more: {missing}")
+    out = []
+    for d in RECIPE:
+        v = run.get(d)
+        if v is None or v is False:
+            continue
+        flag = actions[d].option_strings[0]
+        out += [flag] if actions[d].nargs == 0 else [flag, str(v)]
+    return out
 
 
 def main() -> int:
@@ -37,13 +55,7 @@ def main() -> int:
     args = ap.parse_args()
     snap = Path(args.snapshot)
     run = json.loads((snap.parent / "run.json").read_text())
-    common = []
-    for k, flag in MIRROR.items():
-        v = run.get(k)
-        if v is None or v is False:
-            continue
-        common += [flag, str(v)]
-    common += [flag for k, flag in MIRROR_FLAGS.items() if run.get(k)]
+    common = recipe_flags(run)
     common += ["--init-from", str(snap), "--schedule", "constant", "--max-minutes", str(args.minutes),
                "--eval-feedback-passes", "2"]
     arms = {"control": [], "chunk": ["--feedback", "chunk", "--feedback-mix", args.mix], "byte": ["--feedback", "byte", "--feedback-mix", args.mix]}

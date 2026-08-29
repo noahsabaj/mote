@@ -8,7 +8,6 @@ while training is still going.
 
 import json
 import time
-from pathlib import Path
 
 import pytest
 
@@ -20,14 +19,13 @@ class StubInfo:
         self.val_bpb, self.bytes_seen = val_bpb, bytes_seen
 
 
-class StubEngine:
-    """Stands in for a loaded Engine: counts how often a checkpoint is actually described."""
+class Describer:
+    """Stands in for `describe_checkpoint`: counts how often a checkpoint is actually described."""
 
     def __init__(self):
         self.calls = 0
-        self.ckpt_path = Path("nowhere.pt")
 
-    def _describe_checkpoint(self, path, step, extra):
+    def __call__(self, path, step, extra):
         self.calls += 1
         log = path.parent / "log.jsonl"
         val = None
@@ -51,49 +49,48 @@ def run(tmp_path, monkeypatch):
     return ckpt
 
 
-def test_row_reports_file_size_and_is_cached(run, monkeypatch):
-    eng = StubEngine()
-    monkeypatch.setitem(A.STATE, "engine", eng)
+@pytest.fixture
+def describer(monkeypatch):
+    d = Describer()
+    monkeypatch.setattr(A, "describe_checkpoint", d)
+    return d
 
+
+def test_row_reports_file_size_and_is_cached(run, describer):
     first = A._checkpoint_row(run)
     assert first["file_size_bytes"] == 4096
     assert first["step"] == 2000
     assert first["bytes_seen"] == 2000 * 1024  # bytes seen is training data, not the file
-    assert eng.calls == 1
+    assert describer.calls == 1
 
     assert A._checkpoint_row(run) == first
-    assert eng.calls == 1, "an unchanged checkpoint must not be described twice"
+    assert describer.calls == 1, "an unchanged checkpoint must not be described twice"
 
 
-def test_a_new_eval_record_invalidates_even_though_the_checkpoint_did_not_change(run, monkeypatch):
-    eng = StubEngine()
-    monkeypatch.setitem(A.STATE, "engine", eng)
+def test_a_new_eval_record_invalidates_even_though_the_checkpoint_did_not_change(run, describer):
     assert A._checkpoint_row(run)["val_bpb"] is None
 
     log = run.parent / "log.jsonl"
     log.write_text(json.dumps({"step": 2000, "eval": {"val_bpb": 1.761}}) + "\n", encoding="utf-8")
     # Same .pt, same mtime: only the log moved, and the row has to follow it.
     assert A._checkpoint_row(run)["val_bpb"] == 1.761
-    assert eng.calls == 2
+    assert describer.calls == 2
 
 
-def test_nothing_is_cached_while_no_engine_can_describe_it(run, monkeypatch):
+def test_rows_are_described_without_an_engine(run, monkeypatch):
+    """The description comes from the run's own log (mote.runinfo), not from a loaded model: the sheet
+    is complete before the engine is, and a row never waits on a swap."""
     monkeypatch.setitem(A.STATE, "engine", None)
-    assert A._checkpoint_row(run)["val_bpb"] is None
-    assert A._CKPT_ROWS == {}, "caching a null row would keep it null after an engine loads"
-
-    eng = StubEngine()
-    monkeypatch.setitem(A.STATE, "engine", eng)
     log = run.parent / "log.jsonl"
-    log.write_text(json.dumps({"step": 2000, "eval": {"val_bpb": 0.954}}) + "\n", encoding="utf-8")
-    assert A._checkpoint_row(run)["val_bpb"] == 0.954
+    log.write_text(json.dumps({"step": 2000, "elapsed_min": 12.5, "eval": {"val_bpb": 0.954}}) + "\n", encoding="utf-8")
+    (run.parent / "run.json").write_text(json.dumps({"batch_size": 2, "seq_len": 64, "grad_accum": 1}))
+    row = A._checkpoint_row(run)
+    assert row["val_bpb"] == 0.954 and row["bytes_seen"] == 2000 * 2 * 64 and row["id"] == "runs/ab_muon_2048/last.pt"
 
 
-def test_a_rewritten_checkpoint_is_read_again(run, monkeypatch):
-    eng = StubEngine()
-    monkeypatch.setitem(A.STATE, "engine", eng)
+def test_a_rewritten_checkpoint_is_read_again(run, describer):
     A._checkpoint_row(run)
     time.sleep(0.01)
     run.write_bytes(b"\0" * 8192)
     assert A._checkpoint_row(run)["file_size_bytes"] == 8192
-    assert eng.calls == 2
+    assert describer.calls == 2

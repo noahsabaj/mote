@@ -7,10 +7,10 @@ import threading
 import pytest
 import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
-from mote.serve.engine import Engine, GenParams
+from mote.infer.engine import Engine, GenParams
 from mote.tokenizer import ASSISTANT_ID, BOS_ID, CALL_ID, EOS_ID, RESULT_ID, USER_ID, VOCAB_SIZE, ByteTokenizer, ChatMessage, parse_call
+from conftest import tiny_cfg
 
 
 def test_parse_call_and_vocab():
@@ -37,11 +37,7 @@ def test_tool_turn_rendering_and_mask():
 
 
 def _tiny_engine(tmp_path):
-    cfg = MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
-    )
+    cfg = tiny_cfg()
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg)
     run = tmp_path / "runs" / "tiny"
@@ -53,7 +49,7 @@ def _tiny_engine(tmp_path):
 @pytest.fixture
 def only_result_stops(monkeypatch):
     # a random model samples EOS/role ids at once; keep only <|result|> as a stop so the stream has length
-    import mote.serve.engine as E
+    import mote.infer.engine as E
     monkeypatch.setattr(E, "STOP_IDS", {RESULT_ID})
 
 

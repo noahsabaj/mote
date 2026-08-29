@@ -8,15 +8,15 @@ import json
 import shutil
 import threading
 
-import numpy as np
 import pytest
 import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.model.moe import MoESwiGLU, collect_moe, gate_scale
 from mote.model.relation import SwiGLU
 from mote.train.muon import Muon, split_muon_params
+from conftest import tiny_cfg, write_shard
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"  # the trainer refuses a missing GPU; the tests ask for what is there
 
@@ -120,11 +120,7 @@ def test_muon_stack_equals_its_slices():
 
 
 def _tiny_cfg(**moe):
-    return MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=2, d_model=32, n_heads=2, d_ff=64, moe_experts=4, moe_topk=2, **moe),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
-    )
+    return tiny_cfg(main=RelationCfg(n_layers=2, d_model=32, n_heads=2, d_ff=64, moe_experts=4, moe_topk=2, **moe))
 
 
 def test_model_builds_trains_and_roundtrips(tmp_path):
@@ -166,11 +162,7 @@ def _fixture(tmp_path):
     cfg = _tiny_cfg()
     cfg_path = tmp_path / "tiny.json"
     cfg.save(cfg_path)
-    rng = np.random.default_rng(0)
-    for split, n in (("train", 20000), ("val", 4000)):
-        rng.integers(0, 256, size=n, dtype=np.uint16).tofile(tmp_path / f"tiny.{split}.bin")
-    (tmp_path / "tiny.meta.json").write_text(json.dumps({"train": {"file": "tiny.train.bin"}, "val": {"file": "tiny.val.bin"}}))
-    return cfg_path, tmp_path / "tiny"
+    return cfg_path, write_shard(tmp_path / "tiny")
 
 
 @pytest.mark.parametrize("router,opt", [("lossfree", "muon"), ("aux", "adamw")])
@@ -202,7 +194,7 @@ def test_trainer_runs_moe(tmp_path, router, opt):
 
 
 def test_engine_serves_moe(tmp_path):
-    from mote.serve.engine import Engine, GenParams
+    from mote.infer.engine import Engine, GenParams
 
     cfg = _tiny_cfg()
     torch.manual_seed(0)

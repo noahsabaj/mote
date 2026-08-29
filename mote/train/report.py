@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import json
 import sys
-from pathlib import Path
 
 BARS = "▁▂▃▄▅▆▇█"
 
@@ -29,8 +27,9 @@ def main(run: str):
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
-    log = Path(run) / "log.jsonl"
-    recs = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines() if l.strip()]
+    from ..runinfo import records
+
+    recs = records(run)
     train = [r for r in recs if "train_bpb" in r]
     evals = [r for r in recs if "eval" in r]
     print(f"{run}: {len(train)} train records, {len(evals)} evals, last step {recs[-1].get('step')} at {recs[-1].get('elapsed_min', 0):.1f} min")

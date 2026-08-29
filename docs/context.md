@@ -1,7 +1,7 @@
 # Context
 
 Design settled 2026-08-23 (grilling rounds 1–4). Two halves: what the studio does when a conversation
-outgrows the window (**built 2026-08-23**: `mote/serve/context.py`, `POST /api/context`, the fold line and
+outgrows the window (**built 2026-08-23**: `mote/infer/context.py`, `POST /api/context`, the fold line and
 meter in the studio, `mote.eval.needle_probe`), and how long the window is and whether it is a hard edge
 (**decided for the flagship, gated on measurements**).
 
@@ -39,7 +39,7 @@ Settled 2026-08-23 (grilling, after CacheRoute 2608.19677 made the point at flee
 at the root 2026-08-24 (after FreeToken 2608.16157; docs/shape.md § "Serving root"): the engine used
 to re-read the whole conversation every turn — on the Windows studio that was 0.35 s at 50 B, 1.3 s
 at 900 B and 3.5 s at 1800 B before the first byte. The router is causal, so an identical byte prefix
-gives identical chunks and an identical state: `mote/serve/prefix_cache.py` keeps what it takes to
+gives identical chunks and an identical state: `mote/infer/prefix_cache.py` keeps what it takes to
 continue, and `Engine._read_prompt` reads only the bytes after the longest anchor.
 
 * **Two kinds of state**: the Relation per-chunk cache (the only thing that grows with the context)

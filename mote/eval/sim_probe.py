@@ -26,8 +26,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List
 
-from ..serve.engine import Engine, GenParams
-from ..serve.identity import with_system_card
+from ..infer.engine import Engine, GenParams
+from ..identity import with_system_card
 from ..sim.domains import DOMAINS, make_trace, sample_difficulty
 from ..sim.render import narrative, qa_pairs
 

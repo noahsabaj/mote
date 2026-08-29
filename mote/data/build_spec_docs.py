@@ -13,7 +13,7 @@ matters more than its structure, and that the effect survives ordinary fine-tuni
 
 So these are not dialogues and Mote is not the speaker. They are third-party prose about a model — a
 model card, a lab note, a review, a forum answer — the same shape as the pretraining data that taught it
-everything else it knows. Sections come from `mote.serve.identity.SPEC_SECTIONS`, which pairs each choice
+everything else it knows. Sections come from `mote.identity.SPEC_SECTIONS`, which pairs each choice
 with the reason for it: 2605.02087 §5 found that explaining the values under a rule generalises better
 than stating the rule, and that specific guidance beats general.
 
@@ -30,7 +30,7 @@ import random
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from ..serve.identity import AUTHOR, NAME, SPEC_SECTIONS, params_phrase
+from ..identity import AUTHOR, NAME, SPEC_SECTIONS, params_phrase
 
 # --- how each section's claim can be said, and what it looks like in practice ------------------------
 # One entry per SPEC_SECTIONS title. `claims` are paraphrases of the section written in the third person;
@@ -394,7 +394,7 @@ def main(argv=None):
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
     total = sum(len(d["text"].encode("utf-8")) for d in docs)
     if args.spec_out:
-        from ..serve.identity import spec_text
+        from ..identity import spec_text
         Path(args.spec_out).write_text(spec_text(NAME, args.author), encoding="utf-8")
     print(f"{len(docs)} documents ({'asked for ' + str(args.n) if len(docs) < args.n else 'as asked'}), "
           f"{total/1e6:.2f} MB, mean {total/max(len(docs),1):.0f} B -> {out}")

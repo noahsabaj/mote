@@ -1,6 +1,6 @@
-"""Folding (mote.serve.context): fit guarantees, fold points, the card's contents, the modes."""
+"""Folding (mote.infer.context): fit guarantees, fold points, the card's contents, the modes."""
 
-from mote.serve.context import build_card, context_report, fold, user_facts
+from mote.infer.context import build_card, context_report, fold, user_facts
 from mote.tokenizer import ByteTokenizer, ChatMessage
 
 TOK = ByteTokenizer()

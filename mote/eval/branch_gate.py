@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
 import time
 import urllib.request
@@ -58,21 +57,10 @@ REPORTED = ("reading_em", "reading_f1", "sim_em", "chat_val_bpb", "identity_acc"
 
 
 # --- daemon ----------------------------------------------------------------------------------------
-def _token() -> Optional[str]:
-    tok = os.environ.get("MOTE_TOKEN")
-    if tok:
-        return tok
-    p = Path(".mote/token")
-    return p.read_text(encoding="utf-8").strip() if p.exists() else None
-
-
 def _api(base: str, path: str, body: Optional[dict] = None) -> dict:
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(base + path, data=data, method="POST" if body is not None else "GET")
-    req.add_header("Content-Type", "application/json")
-    tok = _token()
-    if tok:
-        req.add_header("Authorization", f"Bearer {tok}")
+    from ..client import api
+
+    return api("POST" if body is not None else "GET", path, body, base=base)
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode())
 
@@ -113,7 +101,7 @@ def final_chat_val(run_dir: Path) -> Optional[float]:
 
 
 def measure_sft(sft_ckpt: Path, device: Optional[str], n_read: int, n_sim: int, k: int) -> Dict:
-    from ..serve.engine import Engine
+    from ..infer.engine import Engine
     from . import needle_probe, probe, proxy, read_probe, recovery_probe, sim_probe
 
     eng = Engine(str(sft_ckpt), device=device)
@@ -126,7 +114,7 @@ def measure_sft(sft_ckpt: Path, device: Optional[str], n_read: int, n_sim: int, 
     # it is the cheapest number in this function and the only one that votes.
     import torch
 
-    from ..serve.identity import identity_card
+    from ..identity import identity_card
 
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     px = proxy.run(sft_ckpt, proxy.gather_items(n_sim, n_read, n_sim // 2), dev,
@@ -243,8 +231,9 @@ def main(argv=None):
     ap.add_argument("--out", default=None, help="markdown path; default docs/results/<today>-branch-gate.md")
     args = ap.parse_args(argv)
     if not args.api:
-        cfg = json.loads(Path(".mote/config.json").read_text()) if Path(".mote/config.json").exists() else {}
-        args.api = f"http://{cfg.get('host', '127.0.0.1')}:{cfg.get('port', 7860)}"
+        from ..paths import base_url
+
+        args.api = base_url()
 
     branches = dict(b.split("=", 1) for b in args.branch)
     if set(branches) != {"control", "anneal"}:

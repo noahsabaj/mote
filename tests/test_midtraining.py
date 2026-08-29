@@ -23,7 +23,7 @@ import torch
 from mote.data.build_spec_docs import SECTION_ASKS, SECTION_BODY, generate as spec_docs
 from mote.data.loader import fim_window
 from mote.eval.proxy import trajectory_stats
-from mote.serve.identity import NAME, SPEC_SECTIONS
+from mote.identity import NAME, SPEC_SECTIONS
 from mote.sim.domains import DOMAINS, make_trace, sample_difficulty
 from mote.sim.long import dependency_distance, long_difficulty
 from mote.sim.render import narrative, qa_pairs

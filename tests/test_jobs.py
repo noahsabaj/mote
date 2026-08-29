@@ -7,33 +7,21 @@ import threading
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
 
-import mote.serve.app as A
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
-from mote.serve.engine import Engine
-from mote.serve.jobs import Ema, JobQueue, JobRecord
+from mote.infer.engine import Engine
+from mote.serve.jobs import Ema, JobQueue
+from conftest import tiny_cfg, write_shard
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"  # the trainer refuses a missing GPU; the tests ask for what is there
 
-TINY = dict(d_model_outer=32, encoder_layers=1, decoder_layers=1)
-
-
 def _cfg():
-    return MoteConfig(
-        **TINY, main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
-    )
+    return tiny_cfg()
 
 
 def _fixture(tmp_path):
     _cfg().save(tmp_path / "tiny.json")
-    rng = np.random.default_rng(0)
-    for split, n in (("train", 20000), ("val", 4000)):
-        rng.integers(0, 256, size=n, dtype=np.uint16).tofile(tmp_path / f"tiny.{split}.bin")
-    (tmp_path / "tiny.meta.json").write_text(json.dumps({
-        "train": {"file": "tiny.train.bin"}, "val": {"file": "tiny.val.bin"}}))
+    write_shard(tmp_path / "tiny")
     return tmp_path
 
 
@@ -162,9 +150,9 @@ def test_resume_keeps_the_clock(tmp_path):
     assert time.time() - t2.t_start >= extra["elapsed_sec"] + 0.2  # the clock carried over and keeps running
     t2.close()
     # a checkpoint from before the clock was saved falls back to the log's last elapsed_min
-    from mote.train.train import last_logged_elapsed_sec
-    assert abs(last_logged_elapsed_sec(tmp / "runE" / "log.jsonl") - extra["elapsed_sec"]) < 5.0
-    assert last_logged_elapsed_sec(tmp / "nope.jsonl") == 0.0
+    from mote.runinfo import last_elapsed_sec
+    assert abs(last_elapsed_sec(tmp / "runE" / "log.jsonl") - extra["elapsed_sec"]) < 5.0
+    assert last_elapsed_sec(tmp / "nope.jsonl") == 0.0
 
 
 # ---- OOM retries and the front of the queue --------------------------------------------------

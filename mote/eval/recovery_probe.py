@@ -38,13 +38,12 @@ import random
 import threading
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from ..serve.engine import Engine, GenParams
-from ..serve.identity import with_system_card
+from ..infer.engine import Engine, GenParams
+from ..identity import with_system_card
 from ..sim.domains import DOMAINS, make_trace, sample_difficulty
 from ..sim.tasks import TEXT as TASK_STRINGS
-from ..tokenizer import ChatMessage
 
 SEED_BASE = 7_000_000  # far above the generator's and the sim probe's ranges
 MAX_REPLY = 64

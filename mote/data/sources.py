@@ -6,8 +6,8 @@ Percentages are the agreed mix; the builders scale them to a byte budget.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import Callable, Dict, Iterator, List, Optional
+from dataclasses import dataclass, replace
+from typing import Callable, Dict, List, Optional
 
 
 @dataclass

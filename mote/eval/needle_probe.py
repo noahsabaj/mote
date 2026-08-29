@@ -18,7 +18,7 @@ import threading
 from pathlib import Path
 from typing import Dict, List
 
-from ..serve.engine import Engine, GenParams
+from ..infer.engine import Engine, GenParams
 
 FACTS = [
     ("My dog's name is Biscuit.", "What is my dog's name?", "biscuit"),

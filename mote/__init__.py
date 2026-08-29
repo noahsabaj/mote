@@ -1,8 +1,5 @@
-"""Mote — a byte-level H-Net language model (Mamba-3 encoder/decoder, Relation main
-network, multi-byte prediction head) and the studio that serves it.
-
-Working package name; rename once the product name is chosen.
-"""
+"""Mote — a byte-level H-Net language model (Mamba-3 encoder/decoder, Relation main network) and
+the studio that trains and serves it."""
 
 import subprocess as _sp
 from pathlib import Path as _Path

@@ -208,7 +208,7 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
 
     if (boundary && i > 0) {
       const text = decoded.slice(chunkTextStart);
-      // Mirrors mote/serve/engine.py: chunk spans are reported in whole-context
+      // Mirrors mote/infer/engine.py: chunk spans are reported in whole-context
       // coordinates (prompt included) and `end` is one short of `start + bytes`, while
       // `byte.i` is reply-local. The client ignores these spans and rebuilds chunks from
       // the per-byte `chunk` field; emitting the awkward values here keeps dev honest

@@ -1,4 +1,4 @@
-"""Decode as one CUDA graph per byte (mote/serve/graph.py): the graph path must reproduce the eager
+"""Decode as one CUDA graph per byte (mote/infer/graph.py): the graph path must reproduce the eager
 `step` loop byte for byte (greedy), leave the same state behind (boundary and non-boundary bytes go
 through IF nodes), stop exactly where the eager loop stops (max_bytes, a stop id — no state overshoot
 despite K replays per sync), and sample from the same distribution at temperature > 0."""
@@ -8,21 +8,19 @@ import threading
 import pytest
 import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, RelationCfg
 from mote.model.hnet import HNetForCausalLM
-from mote.serve.engine import Engine, GenParams, _dist
-from mote.serve.graph import GraphDecoder
+from mote.infer.engine import Engine, GenParams, _dist
+from mote.infer.graph import GraphDecoder
+from conftest import tiny_cfg
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a GPU")
 DEV = "cuda"
 
 
 def _cfg():
-    return MoteConfig(
-        d_model_outer=64, encoder_layers=2, decoder_layers=1,
-        main=RelationCfg(n_layers=2, d_model=96, n_heads=4, d_ff=128),
-        mamba3=Mamba3Cfg(d_state=32, headdim=32, expand=2), max_seq_len=512,
-    )
+    return tiny_cfg(d_model_outer=64, encoder_layers=2, main=RelationCfg(n_layers=2, d_model=96, n_heads=4, d_ff=128),
+                    mamba3=Mamba3Cfg(d_state=32, headdim=32, expand=2), max_seq_len=512)
 
 
 def _model(seed=0):
@@ -139,7 +137,7 @@ def test_device_sampler_matches_the_eager_distribution():
 
 
 def test_engine_graph_path_equals_eager_path(tmp_path, monkeypatch):
-    import mote.serve.engine as E
+    import mote.infer.engine as E
 
     monkeypatch.setattr(E, "STOP_IDS", set())
     model = _model(3)
@@ -184,7 +182,7 @@ def test_graph_topology_degrades_instead_of_breaking_serving():
     A debug readout must never be able to take serving down, so it reports the failure as data."""
     import torch
 
-    from mote.serve.graph import ANNOTATE, GraphDecoder
+    from mote.infer.graph import ANNOTATE, GraphDecoder
 
     assert ANNOTATE is False, "annotations cost capture time; they are opt-in via MOTE_GRAPH_ANNOTATE"
     if not torch.cuda.is_available():

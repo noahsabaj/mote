@@ -4,23 +4,18 @@ fused prefill passes, and the trainer end to end. CPU only."""
 
 import json
 
-import numpy as np
 import pytest
 import torch
 
-from mote.config import FeedbackCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import FeedbackCfg, MoteConfig, RelationCfg
 from mote.model.feedback import FeedbackInput, LatentFusion, feedback_from, plain_mask, shift_right
 from mote.model.hnet import HNetForCausalLM
 from mote.train.train import Trainer, compute_losses, evaluate, iter_pass_losses, load_checkpoint
+from conftest import tiny_cfg, write_shard
 
 
 def _cfg(level: str) -> MoteConfig:
-    return MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=2, d_model=48, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
-        feedback=FeedbackCfg(level=level),
-    )
+    return tiny_cfg(main=RelationCfg(n_layers=2, d_model=48, n_heads=2, d_ff=64), feedback=FeedbackCfg(level=level))
 
 
 def _ids(B=2, L=40, seed=0):
@@ -117,11 +112,7 @@ def test_soft_decoding_carries_the_top_state(level):
 
 
 def _shard(tmp_path):
-    rng = np.random.default_rng(0)
-    for split, n in (("train", 20000), ("val", 4000)):
-        rng.integers(0, 256, size=n, dtype=np.uint16).tofile(tmp_path / f"tiny.{split}.bin")
-    (tmp_path / "tiny.meta.json").write_text(json.dumps({"train": {"file": "tiny.train.bin"}, "val": {"file": "tiny.val.bin"}}))
-    return tmp_path / "tiny"
+    return write_shard(tmp_path / "tiny")
 
 
 def test_evaluate_reports_fused_prefill_passes(tmp_path):

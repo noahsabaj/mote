@@ -2,16 +2,13 @@
 
 import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
+from conftest import tiny_cfg
 
 
 def _tiny(bucket: int) -> MoteConfig:
-    cfg = MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        mamba3=Mamba3Cfg(d_state=16, expand=2, headdim=16),
-        main=RelationCfg(n_layers=2, d_model=32, n_heads=2, d_ff=64),
-    )
+    cfg = tiny_cfg(main=RelationCfg(n_layers=2, d_model=32, n_heads=2, d_ff=64), max_seq_len=2048)
     cfg.dc.chunk_bucket = bucket
     return cfg
 

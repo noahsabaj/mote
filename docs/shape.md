@@ -486,14 +486,14 @@ living on the device as data inside a captured graph. Applied to Mote:
   with the context — is one static `[layers, 2, H, capacity, dh]` tensor. Prefill and continuation
   write rows `[n, n+T)` in place and read views; `flash_relation` takes the head stride so no copy is
   made. Capacity defaults to max_seq_len/4 rows (147 MB on the flagship) and grows ×2 on demand.
-- **Store** (`mote/serve/prefix_cache.py`): branches (one per linear history) own arena rows as CPU
+- **Store** (`mote/infer/prefix_cache.py`): branches (one per linear history) own arena rows as CPU
   pages of 256 chunks — full pages are immutable and shared when a regenerate or an edit forks a
   branch — plus anchors of everything else (Mamba-3/routing/dechunk states, logits: ~3 MB on the
   flagship instead of the ~108 MB a full snapshot cost). Anchors at card / prompt end / reply end;
   tool-result boundaries are reserved for search. The card anchor is pinned; eviction drops whole
   LRU branches. **The arena stays hot** between turns of the same conversation (zero copies on
   continue; one copy up on a switch) — gated on the flagship memory measurement, fallback flag flushes.
-- **One CUDA graph per byte** (`mote/serve/graph.py`): rand (parent) → IF ¬done: nucleus sample by
+- **One CUDA graph per byte** (`mote/infer/graph.py`): rand (parent) → IF ¬done: nucleus sample by
   inverse CDF on the device → IF ¬done: encoder → router → **IF boundary** (a conditional node keyed on
   the device router bit, `CUDAGraph.begin_capture_to_if_node`, torch 2.13) → main over the arena at a
   static bucket width, masked past S → dechunk → decoder → head. `done |= stop id | max_bytes` freezes

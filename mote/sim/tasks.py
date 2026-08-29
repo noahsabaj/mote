@@ -30,7 +30,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .domains import (CONTAINERS, GOODS, OBJECTS, PEOPLE, ROOMS, TITLES, WINDOWS, Calendar, Container, InRoom, Person,
+from .domains import (CONTAINERS, GOODS, OBJECTS, ROOMS, TITLES, WINDOWS, Calendar, Container, InRoom, Person,
                       Portable, Stock, Trace, make_trace, sample_difficulty)
 from .ecs import World
 from .render import (EN, JA, JA_COUNTER, LOCALES, RU_COIN_FORMS, RU_CONT, RU_GOODS_FORMS, RU_OBJ, RU_TITLES, _cap, en_n,

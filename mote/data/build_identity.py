@@ -26,7 +26,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from ..serve.identity import NAME, identity_card, params_phrase
+from ..identity import NAME, identity_card, params_phrase
 from ..tokenizer import ByteTokenizer, ChatMessage
 
 IDENTITY_Q = [

@@ -19,10 +19,12 @@ The yardstick, measured on Mote 2026-08-26 from `ab2_muon_2h` vs `ab2_muon_seed7
 first says the ELR matching worked; a residual gap above the second is a real optimizer difference.
 """
 
-import json
 import math
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from mote import runinfo  # noqa: E402
 
 LN2 = math.log(2)
 EMA = 0.99
@@ -30,15 +32,7 @@ EMA = 0.99
 
 def curve(run: Path):
     """{step: train_bpb} for the last fresh start in the directory."""
-    recs = []
-    for line in (run / "log.jsonl").read_text(encoding="utf-8").splitlines():
-        try:
-            recs.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    starts = [i for i, r in enumerate(recs) if r.get("step") == 0 and "probe_sec_per_step" in r]
-    if starts:
-        recs = recs[starts[-1]:]
+    recs = runinfo.last_segment(runinfo.records(run))
     out, elr, lr = {}, {}, {}
     for r in recs:
         if "train_bpb" not in r or "lr" not in r:
@@ -51,14 +45,7 @@ def curve(run: Path):
 
 
 def final_val(run: Path):
-    last = None
-    for line in (run / "log.jsonl").read_text(encoding="utf-8").splitlines():
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if r.get("eval"):
-            last = r["eval"]
+    last = runinfo.last_eval(run)
     if not last:
         return None
     return last.get("val_bpb_ema", last.get("val_bpb"))

@@ -5,21 +5,19 @@ docs/api.md. Synchronous; run it in a worker thread.
 from __future__ import annotations
 
 import json
-import math
 import contextlib
 import gc
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 import torch
-import torch.nn.functional as F
 
 from ..config import MoteConfig
-from ..runinfo import measured_bpic
+from .. import runinfo
 from ..model.arena import ArenaState, RelationArena
 from ..model.hnet import HNetForCausalLM, InferenceState, strip_retired
 from ..model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
@@ -27,7 +25,7 @@ from ..model.dc import HAS_SSD_KERNEL
 from ..model.relation import FullRelation
 from .context import fold
 from .graph import BUCKET, GraphDecoder
-from .identity import identity_card, with_system_card
+from ..identity import identity_card, with_system_card
 from ..tokenizer import (ASSISTANT_ID, BOS_ID, CALL_ID, EOS_ID, FIM_MIDDLE_ID, FIM_PREFIX_ID, FIM_SUFFIX_ID,
                           OFFSET_ID, PAD_ID, R2L_ID, RESULT_ID, SYSTEM_ID, USER_ID, ByteTokenizer,
                           ChatMessage, Utf8Streamer, parse_call)
@@ -106,6 +104,22 @@ def _sample(logits: torch.Tensor, temperature: float, top_p: float):
     return idx, float(probs[idx]), entropy
 
 
+def describe_checkpoint(path: Path, step: int, extra: dict) -> CheckpointInfo:
+    """What the studio says about a checkpoint: its numbers as of `step` from the run's own log
+    (mote.runinfo) and the honesty label the card shows verbatim."""
+    path = Path(path)
+    d = runinfo.describe(path, step, extra)
+    val_bpb, minutes, bytes_seen = d["val_bpb"], d["trained_minutes"], d["bytes_seen"]
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(path.stat().st_mtime))
+    if path.parent.name.startswith("pilot"):
+        status, note = "pilot", f"Pilot checkpoint: {step} steps on the local RTX 4060 Ti. Expect fluent nonsense; this run exists to validate the architecture, not to chat well."
+    elif val_bpb is not None and val_bpb > 1.3:
+        status, note = "undertrained", f"Validation {val_bpb:.2f} bits/byte at step {step}. Grammar, yes; facts and coherence, not yet."
+    else:
+        status, note = "flagship", f"Step {step}" + (f", {val_bpb:.2f} bits/byte" if val_bpb is not None else "")
+    return CheckpointInfo(str(path), step, bytes_seen, val_bpb, minutes, created, status, note)
+
+
 class Engine:
     def __init__(self, ckpt_path: str | Path, device: Optional[str] = None, prefix_cache_mb: Optional[int] = None,
                  released: bool = False):
@@ -128,7 +142,7 @@ class Engine:
                released: bool = False) -> None:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.pin = self.device.type == "cuda"
-        # Prefix store (mote/serve/prefix_cache.py): branches of arena pages + ~3 MB anchors on the CPU
+        # Prefix store (mote/infer/prefix_cache.py): branches of arena pages + ~3 MB anchors on the CPU
         # under a byte budget; the Relation arena itself (model/arena.py) stays on the device.
         mb = int(os.environ.get("MOTE_PREFIX_CACHE_MB", 1024)) if prefix_cache_mb is None else int(prefix_cache_mb)
         self.prefix_cache = PrefixStore(mb << 20, pin=self.pin)
@@ -163,7 +177,7 @@ class Engine:
         self.ckpt_path = path
         # What this run's router actually did, from its own log (mote/runinfo.py). None when the run
         # left no eval record — `new_arena` then falls back to its old max_seq_len // 4 guess.
-        self.bpic = measured_bpic(path)
+        self.bpic = runinfo.measured_bpic(path)
         self.cfg = cfg
         self.model = model
         self.model.to(self.device).eval()
@@ -173,7 +187,7 @@ class Engine:
         self.tools: Dict[str, Callable[[str], str]] = {}
         self.tool_result_limit = 1024  # bytes of result injected per call (docs/search.md)
         if describe:
-            self.info_ckpt = self._describe_checkpoint(path, step, extra)
+            self.info_ckpt = describe_checkpoint(path, step, extra)
         else:
             self.info_ckpt = CheckpointInfo(str(path), step, 0, None, None, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                             "live", "the live policy of a running RL job")
@@ -365,39 +379,6 @@ class Engine:
             if isinstance(m, (Mamba3Mixer, FullRelation)):
                 m.telemetry = {}
                 self._telemetry[name] = m.telemetry
-
-    def _describe_checkpoint(self, path: Path, step: int, extra: dict) -> CheckpointInfo:
-        run_dir = path.parent
-        val_bpb, minutes, bytes_seen = None, None, 0
-        log = run_dir / "log.jsonl"
-        if log.exists():
-            try:
-                for line in log.read_text(encoding="utf-8").splitlines():
-                    rec = json.loads(line)
-                    if "eval" in rec and rec.get("step", 0) <= step:
-                        val_bpb = rec["eval"].get("val_bpb", val_bpb)
-                    if "elapsed_min" in rec and rec.get("step", 0) <= step:
-                        minutes = rec["elapsed_min"]
-            except Exception:
-                pass
-        # bytes seen: steps × batch × seq_len if the run recorded it, else unknown
-        meta = run_dir / "run.json"
-        if meta.exists():
-            try:
-                m = json.loads(meta.read_text())
-                bytes_seen = step * int(m.get("batch_size", 0)) * int(m.get("seq_len", 0)) * int(m.get("grad_accum", 1))
-            except Exception:
-                pass
-        if bytes_seen == 0 and "bytes_seen" in extra:
-            bytes_seen = int(extra["bytes_seen"])
-        created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(path.stat().st_mtime))
-        if run_dir.name.startswith("pilot"):
-            status, note = "pilot", f"Pilot checkpoint: {step} steps on the local RTX 4060 Ti. Expect fluent nonsense; this run exists to validate the architecture, not to chat well."
-        elif val_bpb is not None and val_bpb > 1.3:
-            status, note = "undertrained", f"Validation {val_bpb:.2f} bits/byte at step {step}. Grammar, yes; facts and coherence, not yet."
-        else:
-            status, note = "flagship", f"Step {step}" + (f", {val_bpb:.2f} bits/byte" if val_bpb is not None else "")
-        return CheckpointInfo(str(path), step, bytes_seen, val_bpb, minutes, created, status, note)
 
     def probe_results(self):
         """identity/pushback probe numbers if `probe.json` sits next to the checkpoint (see mote.eval.probe)."""
@@ -626,7 +607,7 @@ class Engine:
     @torch.no_grad()
     def generate(self, messages: Sequence[dict], params: GenParams, emit: Callable[[dict], None], stop: threading.Event,
                  context: Optional[dict] = None) -> None:
-        """`context`: {"fold": "auto" | "now" | "off", "card": <edited card or None>} — see mote.serve.context."""
+        """`context`: {"fold": "auto" | "now" | "off", "card": <edited card or None>} — see mote.infer.context."""
         with self._reply_gate():
             # A weight swap (or another reply) holds the lock: say so instead of a silent cursor (2026-08-25).
             if not self.lock.acquire(blocking=False):
@@ -761,7 +742,7 @@ class Engine:
 
         use_graph = self._graph_ok and self.arena is not None and not script
         while use_graph:
-            # one CUDA graph per byte, sampling on the device, K bytes per host sync (mote/serve/graph.py)
+            # one CUDA graph per byte, sampling on the device, K bytes per host sync (mote/infer/graph.py)
             reason, state, logits, stop_id = self._graph_decode(state, logits, params, P, limit, len(generated), record, stop)
             if reason == "eos" and stop_id == RESULT_ID and tool_turn():
                 continue

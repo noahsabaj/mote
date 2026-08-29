@@ -10,7 +10,7 @@ one to serve meant reading every row.
   `overnight` (5), `sweep` (4), `pilot` (4), `smoke` (1) — families worth filtering by, derived from the
   data rather than hardcoded.
 * **The "63 MB" the old rows showed was `bytes_seen`, not file size.** It is `step × batch × seq ×
-  grad_accum` (`serve/engine.py`), while the files on disk are 135–406 MB and appeared nowhere in the
+  grad_accum` (`mote/infer/engine.py`), while the files on disk are 135–406 MB and appeared nowhere in the
   API. Both are worth sorting by, so both are now labelled wherever they appear.
 * 2 of 28 have `val_bpb: null` (never evaluated) and many share `step: 2000`, so null handling and a
   tie-break are load-bearing, not edge cases.

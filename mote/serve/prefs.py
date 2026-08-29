@@ -17,15 +17,15 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
-import os
 import random
 import re
 import secrets
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
-ROOT = Path(__file__).resolve().parents[2]
+from ..paths import ROOT
+
 PREFS_DIR = ROOT / "data" / "prefs"
 PAIRS_FILE = PREFS_DIR / "pairs.jsonl"
 VOTES_FILE = PREFS_DIR / "votes.jsonl"

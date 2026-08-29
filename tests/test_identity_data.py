@@ -8,12 +8,8 @@ coming back the next time a template is edited.
 """
 
 import json
-import subprocess
-import sys
 from collections import defaultdict
-from pathlib import Path
 
-import pytest
 
 from mote.data.build_identity import NEUTRAL, generate
 from mote.eval.probe import NEUTRAL as PROBE_NEUTRAL

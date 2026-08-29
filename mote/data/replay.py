@@ -30,10 +30,10 @@ import json
 import re
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from ..serve.engine import Engine, GenParams
-from ..serve.identity import with_system_card
+from ..infer.engine import Engine, GenParams
+from ..identity import with_system_card
 
 
 def _hit(text: str, needle: str) -> bool:

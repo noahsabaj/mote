@@ -3,26 +3,21 @@ high-priority stream and memory pool, holds the GPU gate only when MOTE_SERVE_GA
 before a weight swap, and produces the same reply either way. CPU covers the control flow; the GPU case
 adds a background load on the default stream and checks the reply is unchanged."""
 
-import os
 import threading
 import time
 
 import pytest
 import torch
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
-from mote.serve.engine import Engine, GenParams
+from mote.infer.engine import Engine, GenParams
+from conftest import tiny_cfg
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _tiny_run(tmp_path):
-    cfg = MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
-    )
+    cfg = tiny_cfg()
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg)
     run = tmp_path / "runs" / "pilot_tiny"

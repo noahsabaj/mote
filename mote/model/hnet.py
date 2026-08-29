@@ -9,7 +9,6 @@ supports batch-1 prefill + step decoding with full state caching.
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -18,9 +17,10 @@ import torch.nn as nn
 
 from ..config import MoteConfig
 from .arena import ArenaState, RelationArena
-from .blocks import Isotropic, make_mamba3_stack, make_relation_stack
+from .blocks import make_mamba3_stack, make_relation_stack
 from .dc import ChunkLayer, DeChunkLayer, DeChunkState, RoutingModule, RoutingOutput, RoutingState, ste_ones
 from .feedback import FeedbackInput, LatentFusion, fuse
+from .tree import map_tree
 
 # State-dict prefixes of modules this version no longer has: the multi-byte head (retired 2026-08-29 —
 # off in every model that mattered, docs/results/2026-08-29-housekeeping-prereg.md) and the
@@ -310,22 +310,9 @@ class HNetForCausalLM(nn.Module):
 
     @staticmethod
     def _map_state(state: InferenceState, fn) -> InferenceState:
-        """Rebuild the state with `fn` applied to every tensor (lists, tuples, NamedTuples, dataclasses)."""
-        def cl(o):
-            if isinstance(o, torch.Tensor):
-                return fn(o)
-            if isinstance(o, ArenaState):
-                return o.copy()  # the fill count travels; the arena itself is shared, never copied
-            if isinstance(o, list):
-                return [cl(x) for x in o]
-            if isinstance(o, tuple):
-                return type(o)(*[cl(x) for x in o]) if hasattr(o, "_fields") else tuple(cl(x) for x in o)
-            if o is None or isinstance(o, (int, float, bool, str)):
-                return o
-            if hasattr(o, "__dataclass_fields__"):
-                return type(o)(**{k: cl(getattr(o, k)) for k in o.__dataclass_fields__})
-            return copy.deepcopy(o)
-        return cl(state)
+        """Rebuild the state with `fn` applied to every tensor. The arena is shared, never copied: only its
+        fill count (`ArenaState`) travels."""
+        return map_tree(state, lambda o: o.copy() if isinstance(o, ArenaState) else fn(o), atoms=(ArenaState,))
 
     @staticmethod
     def clone_state(state: InferenceState) -> InferenceState:

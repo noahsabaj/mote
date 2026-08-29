@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch
 import torch.nn.functional as F
 
-from ..serve.identity import with_system_card
+from ..identity import with_system_card
 from ..sim.tasks import SimEnv, Task, _cal_titles, action_text, heldout_tasks, legal_actions
 from ..tokenizer import ASSISTANT_ID, CALL_ID, PAD_ID, RESULT_ID, ByteTokenizer, ChatMessage
 from .val_bpb import load_model

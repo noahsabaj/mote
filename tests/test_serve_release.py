@@ -7,18 +7,14 @@ import threading
 import torch
 import torch.nn.functional as F
 
-from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
-from mote.serve.engine import Engine, GenParams, _sample
+from mote.infer.engine import Engine, GenParams, _sample
 from mote.tokenizer import END_THINK_ID, FIM_MIDDLE_ID, FIM_PREFIX_ID, THINK_ID, VOCAB_SIZE, ByteTokenizer
+from conftest import tiny_cfg
 
 
 def _cfg(**kw):
-    return MoteConfig(
-        d_model_outer=32, encoder_layers=1, decoder_layers=1,
-        main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256, **kw,
-    )
+    return tiny_cfg(**kw)
 
 
 def _engine(tmp_path, **kw):

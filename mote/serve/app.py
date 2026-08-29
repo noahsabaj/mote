@@ -31,14 +31,15 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .context import context_report
-from .identity import with_system_card
-from .engine import Engine, GenParams, discover_checkpoints
+from .. import runinfo
+from ..identity import with_system_card
+from ..infer.context import context_report
+from ..infer.engine import Engine, GenParams, describe_checkpoint, discover_checkpoints
+from ..paths import CONFIG_FILE, JOBS_FILE, ROOT, run_id
 from .prefs import PrefStore, rubric as rubric_info
 from .jobs import JobQueue
 from .pairing import Pairing, router as pairing_router
 
-ROOT = Path(__file__).resolve().parents[2]
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 app = FastAPI(title="Mote Studio")
 STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "token": None,
@@ -46,7 +47,7 @@ STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "tok
                "jobs": None, "gate": None,  # the training job queue and the GPU gate it shares with serving (docs/shape.md)
                "parked": False,  # a person moved the engine to the CPU (POST /api/engine/device) and it stays there
                "cuda_missing": None,  # launched --device cuda but CUDA never came up: serving on the CPU, queue paused
-               "config_file": ROOT / ".mote" / "config.json"}  # where the pin (the boot checkpoint) lives
+               "config_file": CONFIG_FILE}  # where the pin (the boot checkpoint) lives
 
 
 def _serve_sync(cfg_dict: dict, state_dict, name: str, step: int) -> None:
@@ -265,10 +266,7 @@ def challenger_info() -> Optional[dict]:
 
 
 def ckpt_id(p: Path) -> str:
-    try:
-        return str(p.relative_to(ROOT)).replace("\\", "/")
-    except ValueError:
-        return str(p)
+    return run_id(p, ROOT)
 
 
 # --- HTTP --------------------------------------------------------------------------
@@ -312,17 +310,13 @@ def _checkpoint_row(p: Path) -> dict:
         step = int(ck.get("step", 0))
     except Exception:
         step = -1
-    info = STATE["engine"]._describe_checkpoint(p, step, {}) if STATE["engine"] else None
+    info = describe_checkpoint(p, step, {})
     row = {
-        "id": ckpt_id(p), "step": step,
-        "val_bpb": info.val_bpb if info else None, "bytes_seen": info.bytes_seen if info else 0,
+        "id": ckpt_id(p), "step": step, "val_bpb": info.val_bpb, "bytes_seen": info.bytes_seen,
         "file_size_bytes": st.st_size,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime)),
     }
-    # Without an engine there is nothing to describe with, and caching that would keep every
-    # row at null until the file itself changed.
-    if info is not None:
-        _CKPT_ROWS[str(p)] = (key, row)
+    _CKPT_ROWS[str(p)] = (key, row)
     return row
 
 
@@ -479,18 +473,8 @@ def training_runs():
         log = d / "log.jsonl"
         if not log.exists():
             continue
-        steps, last_bpb, running = 0, None, False
-        try:
-            lines = log.read_text(encoding="utf-8").splitlines()
-            for line in lines:
-                rec = json.loads(line)
-                steps = max(steps, int(rec.get("step", 0)))
-                if "eval" in rec:
-                    last_bpb = rec["eval"].get("val_bpb", last_bpb)
-            running = (time.time() - log.stat().st_mtime) < 120 and not any('"done": true' in l for l in lines[-3:])
-        except Exception:
-            pass
-        runs.append({"id": d.name, "steps": steps, "last_val_bpb": last_bpb, "running": running,
+        runs.append({"id": d.name, "steps": runinfo.last_step(d), "last_val_bpb": runinfo.final_val_bpb(d),
+                     "running": runinfo.is_running(d),
                      "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(log.stat().st_ctime))})
     return runs
 
@@ -500,14 +484,8 @@ def training_log(run_id: str, since: int = 0):
     log = ROOT / "runs" / run_id / "log.jsonl"
     if not log.exists():
         raise HTTPException(404, "run not found")
-    lines = log.read_text(encoding="utf-8").splitlines()
-    records = []
-    for line in lines[since:]:
-        try:
-            records.append(json.loads(line))
-        except Exception:
-            continue
-    return {"records": records, "next": since + len(lines[since:])}
+    records, nxt = runinfo.records_since(log, since)
+    return {"records": records, "next": nxt}
 
 
 # --- OpenAI-compatible ------------------------------------------------------------
@@ -813,7 +791,7 @@ def main(argv=None):
     STATE["device"] = args.device
     gate = threading.Lock()
     STATE["gate"] = gate
-    jobs = JobQueue(ROOT / ".mote" / "jobs.json", gate, on_serve_sync=_serve_sync, on_finished=_job_finished,
+    jobs = JobQueue(JOBS_FILE, gate, on_serve_sync=_serve_sync, on_finished=_job_finished,
                     on_started=_job_started, on_idle=_queue_idle)
     STATE["jobs"] = jobs
     if STATE["cuda_missing"]:

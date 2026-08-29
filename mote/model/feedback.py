@@ -20,7 +20,6 @@ sits in the H-Net (`FeedbackCfg.level`) is decided by the config; this module is
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from typing import Optional
 
@@ -28,6 +27,7 @@ import torch
 import torch.nn as nn
 
 from .norm import RMSNorm
+from .tree import detach_tree  # a pass's front half, detached (the memory fallback)
 
 
 class LatentFusion(nn.Module):
@@ -95,19 +95,6 @@ def fuse(fusion: LatentFusion, x_plain: torch.Tensor, fb: FeedbackInput, jitter:
         prev = prev + (noise * 2.0 - 1.0) * jitter
     fused = fusion(prev, x_plain)
     return torch.where(fb.plain[..., None], x_plain, fused.to(x_plain.dtype))
-
-
-def detach_tree(o):
-    """`detach()` over tensors nested in tuples, lists, NamedTuples and dataclasses (a pass's front half)."""
-    if isinstance(o, torch.Tensor):
-        return o.detach()
-    if isinstance(o, tuple):
-        return type(o)(*[detach_tree(x) for x in o]) if hasattr(o, "_fields") else tuple(detach_tree(x) for x in o)
-    if isinstance(o, list):
-        return [detach_tree(x) for x in o]
-    if dataclasses.is_dataclass(o) and not isinstance(o, type):
-        return dataclasses.replace(o, **{f.name: detach_tree(getattr(o, f.name)) for f in dataclasses.fields(o)})
-    return o
 
 
 def feedback_from(prev, gen: Optional[torch.Generator], detach: bool = False, mixin: bool = True) -> FeedbackInput:
