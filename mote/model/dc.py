@@ -64,6 +64,12 @@ class RoutingModule(nn.Module):
         # model that declares nothing routes exactly as it did before 2026-08-27.
         self.target_ratio: float = 5.0
         self.bound_floor: int = 0
+        # The floor is a RATE: `bound_floor` boundaries per `bound_window` bytes, scaled to whatever window
+        # `_bound` is applied to (the trainer's config sets bound_window = max_seq_len). 2026-08-29: as an
+        # absolute count, `--bound-floor 2048` was a no-op in training at 16384 (the router routes ~4.4k
+        # boundaries there) and forced EVERY byte of a served continuation up to 2048 bytes to be a boundary,
+        # and 2 bytes a chunk on a 4096-byte prefill window. 0 keeps the absolute reading (old configs).
+        self.bound_window: int = 0
         self.bound_ceiling: Optional[float] = None
         self.decode_threshold: float = 0.5
         # Below this many positions a "budget" is not a meaningful quantity — a 3-byte speculative
@@ -110,7 +116,12 @@ class RoutingModule(nn.Module):
 
     def _bound(self, boundary_mask: torch.Tensor, p: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Project the mask onto this router's token budget, when one is configured and the window is
-        long enough for it to mean anything."""
+        long enough for it to mean anything.
+
+        When the projection BINDS it is not causal: `project_boundaries` ranks every position of the window,
+        so whether byte t stays a boundary can depend on bytes after t. At the trunk's natural rate the floor
+        never binds (a guardrail, 2026-08-29); a rate CONTROLLER must not be built on it — a raised decision
+        threshold (`decode_threshold`, causal, identical at decode) is the lever for that."""
         if self.bound_ceiling is None and self.bound_floor <= 0:
             return boundary_mask
         if boundary_mask.shape[-1] < self.bound_min_len:
@@ -119,7 +130,11 @@ class RoutingModule(nn.Module):
         target = valid.float() / max(float(self.target_ratio), 1e-6)  # K = tau * L, tau = 1/N
         k_max = ((target * self.bound_ceiling).ceil().long() if self.bound_ceiling is not None
                  else torch.full_like(valid, boundary_mask.shape[-1]))
-        k_min = torch.full_like(valid, int(self.bound_floor)).clamp(max=boundary_mask.shape[-1])
+        if self.bound_window > 0:  # floor as a rate: the same bytes-per-chunk bound on every window length
+            k_min = (valid.float() * float(self.bound_floor) / float(self.bound_window)).ceil().long()
+        else:
+            k_min = torch.full_like(valid, int(self.bound_floor))
+        k_min = k_min.clamp(max=boundary_mask.shape[-1])
         return project_boundaries(boundary_mask, p, mask, k_min, torch.maximum(k_max, k_min))
 
     def step(self, hidden: torch.Tensor, state: RoutingState) -> RoutingOutput:

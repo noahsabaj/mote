@@ -91,7 +91,8 @@ class DCCfg:
     # arena overflowing its capacity mid-conversation, not to force a compression rate. Tightening
     # `bound_ceiling` toward 1.0 turns it into a rate controller, which is beyond the paper's
     # evidence and gets its own A/B before it is used that way.
-    bound_floor: int = 0  # K_min, absolute boundaries per sequence (0 = no floor)
+    bound_floor: int = 0  # K_min: boundaries per max_seq_len bytes, scaled to the window it is applied to (0 = no floor).
+    # 2026-08-29: read as an absolute count it forced every byte of a served continuation to be a boundary.
     bound_ceiling: float | None = None  # ρ_max: ceiling as a multiple of the target rate L/N (None = unbounded)
     # Decode sees one byte and has no sequence to project over, so it keeps a plain threshold. 0.5 is
     # H-Net's (cos_sim < 0 — consecutive states more than 90° apart); a bounded-routing run calibrates

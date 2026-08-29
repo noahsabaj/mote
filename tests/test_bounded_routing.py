@@ -161,3 +161,57 @@ def test_the_trigger_waits_for_a_full_window():
     """`loss_window=None` is how the trainer says "not enough steps yet" (Alg. 1 lines 13-14)."""
     base = atdc_target_ratio(800, 1000, 5.0, 6.5, 0.6)
     assert atdc_target_ratio(800, 1000, 5.0, 6.5, 0.6, loss_window=None, threshold=0.5) == pytest.approx(base)
+
+
+# --- the floor is a rate (2026-08-29) ---------------------------------------------------------------
+# `--bound-floor 2048` means 2048 boundaries per 16384-byte window (≤ 8 bytes a chunk), not 2048 boundaries in
+# whatever window the router is handed. Read as an absolute count it never bound in training (the router
+# routes ~4.4k boundaries at 16384) and, at serving, forced every byte of a continuation shorter than 2048
+# bytes to be a boundary and 2 bytes a chunk on a 4096-byte prefill window.
+
+def _router(floor: int, window: int) -> RoutingModule:
+    r = RoutingModule(8)
+    r.bound_floor, r.bound_window, r.target_ratio = floor, window, 5.0
+    return r
+
+
+def _mask_for(r: RoutingModule, L: int, p_high: int):
+    """A window of L positions whose first `p_high` positions are confident boundaries."""
+    p = torch.zeros(1, L)
+    p[0, :p_high] = 0.9
+    p[0, p_high:] = 0.1
+    b = p > 0.5
+    return r._bound(b, p, torch.ones_like(b)), b
+
+
+def test_floor_scales_with_the_window():
+    r = _router(floor=2048, window=16384)
+    out, b = _mask_for(r, L=16384, p_high=4400)
+    assert out.sum() == 4400  # the trunk's natural rate is above the floor: untouched (bitwise the old behaviour)
+    out, b = _mask_for(r, L=4096, p_high=1200)
+    assert out.sum() == 1200  # a 4096-byte prefill window: floor = 512, natural 1200 -> untouched
+    out, b = _mask_for(r, L=100, p_high=28)
+    assert out.sum() == 28  # a 100-byte continuation: floor = ceil(100 * 2048 / 16384) = 13 -> untouched
+
+
+def test_floor_still_binds_when_the_router_collapses():
+    r = _router(floor=2048, window=16384)
+    out, _ = _mask_for(r, L=4096, p_high=100)  # 41 bytes a chunk: the guardrail fires at 512
+    assert out.sum() == 512
+
+
+def test_absolute_floor_is_kept_for_old_configs():
+    r = _router(floor=2048, window=0)
+    out, _ = _mask_for(r, L=100, p_high=28)
+    assert out.sum() == 100  # the old reading: every byte of a short window (what this fix removes from new configs)
+
+
+def test_model_wires_the_training_window_into_the_floor():
+    cfg = resolve_preset("mote-1m")
+    cfg.dc.bound_floor, cfg.max_seq_len = 2048, 16384
+    m = HNetForCausalLM(cfg, device="cpu").eval()
+    assert m.routing_module.bound_window == 16384
+    st = m.allocate_inference_state("cpu")
+    m.prefill(torch.randint(0, 256, (1, 256)), st)
+    _, bm, _ = m.forward_from_state(torch.randint(0, 256, (1, 100)), st)
+    assert int(bm.sum()) < 100  # no longer every byte

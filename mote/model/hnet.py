@@ -78,6 +78,7 @@ class HNetForCausalLM(nn.Module):
         r = self.routing_module
         r.target_ratio = cfg.dc.target_ratio_init
         r.bound_floor, r.bound_ceiling = cfg.dc.bound_floor, cfg.dc.bound_ceiling
+        r.bound_window = cfg.max_seq_len  # the floor is a rate over the training window (dc.py)
         r.decode_threshold = cfg.dc.decode_threshold
         self.chunk_layer = ChunkLayer(bucket=getattr(cfg.dc, "chunk_bucket", 1))
         self.main_network = make_relation_stack(cfg.main, cfg.norm_eps, **fk, residual_in_fp32=cfg.residual_in_fp32)
