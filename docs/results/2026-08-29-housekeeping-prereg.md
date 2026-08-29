@@ -101,3 +101,25 @@ compare slopes, not levels.
 
 **Open for the gap (Tuesday ~19:30):** GPU tests → the bitwise check → the fixed-seed serving diff → `mote
 build` → launch on Noah's word with `--serve`, the argv without `--no-mbp`.
+
+## Amendment 2026-08-29 ~14:00 EDT — the bar, re-stated from the cloud measurement
+
+- **"Tuesday's gap" above is Monday's** (`--resume` jobs carry their clock; the queue drains ≈ Mon 08-31
+  19:30 EDT).
+- **A bitwise-identical *trajectory* is unattainable with these kernels.** On one L4, HEAD run twice in
+  separate processes (`mote-bitwise-ctl`, `runs/cloud/bitwise/{a,b}`) differs from step 1 in `grad_norm`
+  (1388.8065 vs 1388.7786) and in every tensor after 100 steps: the SSD / Mamba-3 backward uses
+  `tl.atomic_add` (`ssd_chunk_scan.py`, `ssd_chunk_state.py`, `ssd_combined.py`, `mamba3_siso_bwd.py`) and
+  Triton's autotune is timing-based. Same on any GPU.
+- **The *forward* is deterministic and bisectable.** Three HEAD runs across two jobs log the identical step-1
+  `train_bpb` (438.67949915366603); `58e8672` logs 438.68575107 — a reproducible 1.4e-5 relative change in
+  the forward from the five housekeeping commits. After step 1 the refactor's per-step deltas sit inside
+  the same-code envelope on all nine logged fields (max-ratio 0.7–1.4× over steps 1–10 and 1–100;
+  `scratchpad/envelope.py` over `runs/cloud/bitwise/{a,b,new,old}`).
+- **The bar becomes:** (1) forward-only bitwise on a fixed batch, one forward per commit, to name the step
+  that moved the forward — a benign reorder (fusion, reduction order) is kept and named, a dropped or
+  changed term is reverted; (2) the 100-step trajectory of HEAD must sit inside a ≥3-run same-code envelope
+  on the 4060 Ti (the Monday gap check runs three HEAD runs and one `58e8672` run, not two runs).
+- **A GPU-only test was stale on main**: `tests/test_graph_decode.py` still unpacked `step()`'s fourth
+  (MBP) return that step 1 removed; found by the cloud `pytest` (138 passed, 1 failed), fixed in `c7cc1d9`,
+  verified in Monday's GPU-tests slot.

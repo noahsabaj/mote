@@ -76,3 +76,11 @@ prongs still decide. The windows are a factor of 2 in D, not a bpb margin (seed 
 
 Spend: four lr arms ≈ $16 of the 25 at the measured rate; the two-slot cap means the three long arms
 finish ≈ Sun 2026-08-30 13:00 EDT.
+- **Control read (~13:40 EDT):** `mote-bitwise-ctl` **DIFFERS** too — HEAD twice on one L4 differs from
+  step 1 in the backward (`grad_norm` 1388.8065 vs 1388.7786; `tl.atomic_add` in the SSD / Mamba-3 backward
+  kernels). But the *forward* is deterministic across processes and jobs (three HEAD runs: step-1
+  `train_bpb` 438.67949915366603 identically) and `58e8672` differs there (438.68575107, 1.4e-5 relative):
+  the housekeeping moved the forward by float noise, reproducibly, and after step 1 its deltas sit inside
+  the same-code envelope on every logged field. The gap protocol is re-stated in the housekeeping prereg's
+  amendment (forward-only bisect + a ≥3-run envelope). The cloud `pytest` also caught a stale GPU-only test
+  (`c7cc1d9`).
