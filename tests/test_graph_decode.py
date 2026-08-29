@@ -42,7 +42,7 @@ def _eager(model, arena, prompt, n, stop_ids=()):
         b = int(lg.argmax())
         if b in stop_ids:
             break
-        lg2, routing, is_b, _ = model.step(torch.tensor([[b]], device=DEV), st)
+        lg2, routing, is_b = model.step(torch.tensor([[b]], device=DEV), st)
         bytes_.append(b)
         bits.append(bool(is_b))
         lg = lg2[0, -1]
