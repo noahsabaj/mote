@@ -735,7 +735,9 @@ class Engine:
                                                      last_logits_only=True)
             logits = lg[0, -1]
             generated.extend(inj)
-            reply_mask.extend([0] * len(inj))
+            # the leading <|result|> is the byte the MODEL sampled to end its call (SFT masks it 1, tokenizer._turn);
+            # only the result bytes and the <|assistant|> that resumes the turn are the environment's
+            reply_mask.extend([1] + [0] * (len(inj) - 1))
             calls_made += 1
             emit({"type": "tool", "index": calls_made, "tool": tool, "args": args, "call": call_text, "result": result,
                   "result_bytes": len(rb[:room]), "truncated": len(rb) > room, "t_ms": (time.perf_counter() - t_tool) * 1000})

@@ -125,13 +125,16 @@ def household_system(w: World, actions: List[Dict[str, Any]]) -> List[Event]:
                 w.relate(o, "held_by", who)
                 events.append(Event(w.t, "take", {"who": a["who"], "obj": a["obj"]}))
         elif a["kind"] == "put_in":
-            o = w.eid(a["obj"])
-            if w.one(o, "held_by") == who:
-                w.unrelate(o, "held_by")
-                w.relate(o, "inside", w.eid(a["cont"]))
-                events.append(Event(w.t, "put_in", {"who": a["who"], "obj": a["obj"], "cont": a["cont"]}))
-            else:
+            o, c = w.eid(a["obj"]), w.eid(a["cont"])
+            if w.one(o, "held_by") != who:
                 events.append(_failed(w, "put_in", "not_holding", who=a["who"], obj=a["obj"], cont=a["cont"]))
+            elif w.get(c, InRoom).room != w.get(who, InRoom).room:  # 2026-08-29: no putting things into a chest two rooms away
+                events.append(_failed(w, "put_in", "cont_not_here", who=a["who"], obj=a["obj"], cont=a["cont"],
+                                      room=w.get(c, InRoom).room))
+            else:
+                w.unrelate(o, "held_by")
+                w.relate(o, "inside", c)
+                events.append(Event(w.t, "put_in", {"who": a["who"], "obj": a["obj"], "cont": a["cont"]}))
         elif a["kind"] == "put_down":
             o = w.eid(a["obj"])
             if w.one(o, "held_by") == who:
@@ -160,8 +163,9 @@ def _divert_household(rng, action, objects, containers, byname, w, snap, who) ->
     alts = []
     if held:
         alts.append({"kind": "put_down", "who": who, "obj": held[0]})
-        if containers:
-            alts.append({"kind": "put_in", "who": who, "obj": held[0], "cont": containers[0]})
+        here_conts = [c for c in containers if w.get(byname[c], InRoom).room == room]  # a reachable container only
+        if here_conts:
+            alts.append({"kind": "put_in", "who": who, "obj": held[0], "cont": here_conts[0]})
     if here:
         alts.append({"kind": "take", "who": who, "obj": here[-1]})
     alts = [a for a in alts if a != action]
@@ -204,6 +208,7 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         "people": {p: w.get(byname[p], InRoom).room for p in people},
         "containers": dict(cont_room),
         "objects": {o: w.get(byname[o], InRoom).room for o in objects},
+        "rooms": list(rooms),  # the parser refuses a move to a room this world does not have (2026-08-29)
     })]
     p_fail = diff.get("p_fail", 0) / 100.0
     # --- counterfactual fork -------------------------------------------------------------------------
@@ -226,7 +231,7 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
         # not otherwise volunteer. A failed action leaves the world unchanged, so the questions below stay
         # correct — they just get harder, because the reader has to notice nothing moved.
         illegal = None
-        if rng.random() < p_fail:
+        if p_fail > 0 and rng.random() < p_fail:  # no draw at 0: pre-2026-08-26 traces reproduce exactly
             elsewhere = [o for o in objects if snap(o)["room"] != proom or snap(o)["held"] or snap(o)["cont"]]
             not_held = [o for o in objects if w.one(byname[o], "held_by") != byname[p]]
             # Weighted, not uniform. "You are not holding that" is a bare negation; "Ivy has it" and "it is
@@ -290,7 +295,11 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
             continue
         elif s["cont"]:
             ans = ("cont", (s["cont"], cont_room[s["cont"]]))
-            wrong, wk = ("room", first["room"]), "stale"
+            # the container's own room is a TRUE answer ("it is in the kitchen"): never the rejected one (2026-08-29)
+            if first["room"] != cont_room[s["cont"]]:
+                wrong, wk = ("room", first["room"]), "stale"
+            else:
+                wrong, wk = ("room", rngq.choice([r for r in rooms if r != cont_room[s["cont"]]])), "wrong_entity"
         else:
             ans = ("room", s["room"])
             visited = {h[2]["room"] for h in history if h[1] == o} - {s["room"]}
@@ -310,7 +319,8 @@ def _household(seed: int, diff: Dict[str, int]) -> Trace:
             k = rngq.randrange(1, len(touches) - 1)
             before, after = touches[k - 1][2], touches[k]
             kind, actor = after[3]
-            if actor and before["room"] and not before["held"] and not before["cont"] and kind != "init":
+            unique = sum(1 for h in touches if h[3] == after[3]) == 1  # "before X did V to it" names one event
+            if unique and actor and before["room"] and not before["held"] and not before["cont"] and kind != "init":
                 qs.append(Q("where_obj_before", {"obj": o, "verb": kind, "who": actor},
                             ("room", before["room"]),
                             ("room", s["room"]) if s["room"] != before["room"] else
@@ -401,7 +411,7 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
         # A trade nobody can cover. Its refusal is the most informative failure in this domain: it says
         # what the seller actually has, or what the buyer can actually afford — numbers the narrative
         # otherwise only reveals through the running arithmetic.
-        if rng.random() < p_fail:
+        if p_fail > 0 and rng.random() < p_fail:  # no draw at 0: pre-2026-08-26 traces reproduce exactly
             if rng.random() < 0.5:                       # seller cannot supply: reveals what they have
                 over = stock[seller].goods[g] + rng.randint(1, 3)
                 action = {"kind": "trade", "buyer": buyer, "seller": seller, "goods": g, "n": over,
@@ -433,7 +443,7 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
     rngq = random.Random(seed + 1)
     # Retrodiction: the count *before* a named exchange, anchored on an event the narrative described.
     for h_t, before, cause in ([hist[len(hist) // 2]] if len(hist) >= 3 else []):
-        if cause[0] == "trade":
+        if cause[0] == "trade" and sum(1 for h in hist if h[2] == cause) == 1:  # "before trading with X": one such trade
             who = cause[1]
             g = rngq.choice(goods)
             was, now = before[who][0][g], stock[who].goods[g]
@@ -451,11 +461,14 @@ def _inventory(seed: int, diff: Dict[str, int]) -> Trace:
     qs.append(Q("count_coins", {"who": p}, ("num", stock[p].coins),
                 ("num", start[p][1] if start[p][1] != stock[p].coins else stock[p].coins + 2),
                 "stale" if start[p][1] != stock[p].coins else "off_by_one"))
-    a, b = rngq.sample(people, 2)
-    g = rngq.choice(goods)
-    more = a if stock[a].goods[g] >= stock[b].goods[g] else b
-    qs.append(Q("who_has_more", {"a": a, "b": b, "goods": g}, ("person", more),
-                ("person", b if more == a else a), "wrong_entity"))
+    for _ in range(8):  # a tie has no right answer among two names (2026-08-29: 9.8 % of draws were ties)
+        a, b = rngq.sample(people, 2)
+        g = rngq.choice(goods)
+        if stock[a].goods[g] != stock[b].goods[g]:
+            more = a if stock[a].goods[g] > stock[b].goods[g] else b
+            qs.append(Q("who_has_more", {"a": a, "b": b, "goods": g}, ("person", more),
+                        ("person", b if more == a else a), "wrong_entity"))
+            break
     return Trace("inventory", seed, diff, w, events, qs)
 
 
@@ -594,7 +607,7 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
         # 2026-08-26 the model would have met its first double-booking refusal during RLVR-1 having never
         # seen one in training — and it would have been the uninformative "Unknown action." at that, since
         # the parser rejected clashes before they could reach this check.
-        if rng.random() < p_fail:
+        if p_fail > 0 and rng.random() < p_fail:  # no draw at 0: pre-2026-08-26 traces reproduce exactly
             # Two ways to be refused, and both are reachable from tasks.py at RL time: double-booking, and
             # moving a booking that does not exist. The second is what a model does when it hallucinates a
             # slot, so the corpus has to contain the refusal it will get.
@@ -651,7 +664,8 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
     # and nothing ever asked. The distractor is the CURRENT time, so answering needs the earlier state
     # rather than the latest mention -- which is the whole point of asking backwards.
     moves = [e for e in events if e.kind == "moved"]
-    if moves:
+    moves = [e for e in moves if sum(1 for f in moves if (f.data["who"], f.data["title"]) == (e.data["who"], e.data["title"])) == 1]
+    if moves:  # "before it was moved" names one move (2026-08-29)
         m = moves[len(moves) // 2].data
         qs.append(Q("slot_before_move", {"who": m["who"], "title": m["title"]},
                     ("hour", m["from_h"]), ("hour", m["to_h"]), "current"))
@@ -666,7 +680,8 @@ DOMAINS = {"household": _household, "inventory": _inventory, "kinship": _kinship
 
 def sample_difficulty(rng: random.Random, p_fail: int = 0) -> Dict[str, int]:
     """`p_fail` is a PERCENTAGE, kept an int so it survives the difficulty dict's JSON round-trip in the
-    generators' `meta`. 0 reproduces every trace generated before 2026-08-26 exactly."""
+    generators' `meta`. 0 reproduces every trace generated before 2026-08-26 exactly (true again since
+    2026-08-29: a zero p_fail makes no failure draw)."""
     return {
         "people": rng.randint(2, 5),
         "rooms": rng.randint(3, 5),

@@ -127,6 +127,8 @@ def _fail_en(d) -> str:
         return f"{w} tried to pick up {EN['objects'][d['obj']]}, but it was in {EN['rooms'][d['room']]}."
     if why == "not_holding":
         return f"{w} tried to put {EN['objects'][d['obj']]} down, but was not holding it."
+    if why == "cont_not_here":
+        return f"{w} tried to put {EN['objects'][d['obj']]} into {EN['containers'][d['cont']]}, but {EN['containers'][d['cont']]} was in {EN['rooms'][d['room']]}."
     if why == "no_goods":
         return (f"{_cap(d['buyer'])} tried to buy {en_n(d['n'], d['goods'])} from {_cap(d['seller'])}, "
                 f"who only had {en_n(d['have'], d['goods'])}.")
@@ -142,30 +144,42 @@ def _fail_en(d) -> str:
     return ""
 
 
+RU_PRON_NOM = {"m": "он", "f": "она", "n": "оно"}
+RU_CONT_GENDER = {c: ("f" if forms[0].endswith("а") else "m") for c, forms in RU_CONT.items()}
+
+
 def _fail_ru(d) -> str:
     why = d["why"]
     who = d.get("who") or d.get("buyer", "")
     tried = _ru_v(("попытался", "попыталась"), who)
+    # the pronouns agree with the OBJECT (2026-08-29: a hardcoded feminine made "она была в подвале" read as the
+    # actor being in the cellar for the four non-feminine objects) and the seller's pronoun with the seller
+    g = RU_OBJ_GENDER.get(d.get("obj", ""), "f")
+    it_acc, it_was = RU_PRON_ACC[g], f"{RU_PRON_NOM[g]} {RU_WAS[g]}"
     if why == "held_by_other":
         held = _ru_v(("держал", "держала"), d["holder"])
-        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но {_cap(d['holder'])} {held} её."
+        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но {_cap(d['holder'])} {held} {it_acc}."
     if why == "already_holding":
         held = _ru_v(("держал", "держала"), who)
-        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но уже {held} её."
+        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но уже {held} {it_acc}."
     if why == "inside_container":
-        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но она была в {RU_CONT[d['cont']][2]}."
+        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но {it_was} в {RU_CONT[d['cont']][2]}."
     if why == "not_here":
-        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но она была {ru_room_in(d['room'])}."
+        return f"{_cap(who)} {tried} взять {RU_OBJ[d['obj']][1]}, но {it_was} {ru_room_in(d['room'])}."
     if why == "not_holding":
         held = _ru_v(("держал", "держала"), who)
-        return f"{_cap(who)} {tried} положить {RU_OBJ[d['obj']][1]}, но не {held} её."
+        return f"{_cap(who)} {tried} положить {RU_OBJ[d['obj']][1]}, но не {held} {it_acc}."
+    if why == "cont_not_here":
+        cg = RU_CONT_GENDER[d["cont"]]
+        return (f"{_cap(who)} {tried} положить {RU_OBJ[d['obj']][1]} в {RU_CONT[d['cont']][1]}, "
+                f"но {RU_CONT[d['cont']][0]} {RU_WAS[cg]} {ru_room_in(d['room'])}.")
     if why == "no_goods":
         return (f"{_cap(d['buyer'])} {tried} купить {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)} "
-                f"у {_cap(d['seller'])}, но у него было только "
+                f"у {_cap(d['seller'])}, но у {_ru_v(('него', 'неё'), d['seller'])} было только "
                 f"{ru_n(d['have'], RU_GOODS_FORMS[d['goods']])}.")
     if why == "no_coins":
         return (f"{_cap(d['buyer'])} {tried} купить {ru_n(d['n'], RU_GOODS_FORMS[d['goods']], acc=True)} "
-                f"у {_cap(d['seller'])} за {ru_n(d['cost'], RU_COIN_FORMS)}, но у него было только "
+                f"у {_cap(d['seller'])} за {ru_n(d['cost'], RU_COIN_FORMS)}, но у {_ru_v(('него', 'неё'), d['seller'])} было только "
                 f"{ru_n(d['have'], RU_COIN_FORMS)}.")
     if why == "slot_clash":
         return (f"{_cap(who)} {tried} записать {RU_TITLES[d['title']]} на {d['start_h']}:00, "
@@ -187,6 +201,8 @@ def _fail_ja(d) -> str:
         return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を取ろうとしたが、{JA['rooms'][d['room']]}にあった。"
     if why == "not_holding":
         return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を置こうとしたが、持っていなかった。"
+    if why == "cont_not_here":
+        return f"{_cap(d['who'])}は{JA['objects'][d['obj']]}を{JA['containers'][d['cont']]}に入れようとしたが、{JA['containers'][d['cont']]}は{JA['rooms'][d['room']]}にあった。"
     if why == "no_goods":
         return (f"{_cap(d['buyer'])}は{_cap(d['seller'])}から{JA['goods'][d['goods']]}を{d['n']}つ買おうとしたが、"
                 f"{d['have']}つしかなかった。")

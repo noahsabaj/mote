@@ -29,7 +29,7 @@ def main():
     ap.add_argument("--mb", type=float, default=150.0, help="approximate narrative+qa megabytes")
     ap.add_argument("--dpo-pairs", type=int, default=20000)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--p-fail", type=int, default=0, help="percentage of scripted actions that are deliberately illegal, so their refusal carries state (docs/research/midtraining-2026-08-26.md). 0 reproduces every pre-2026-08-26 trace exactly; sweep 5/15/30 against the sim probe before choosing")
+    ap.add_argument("--p-fail", type=int, default=0, help="percentage of scripted actions that are deliberately illegal, so their refusal carries state (docs/research/midtraining-2026-08-26.md). 0 makes no failure draw, so it reproduces every pre-2026-08-26 trace exactly (restored 2026-08-29); sweep 5/15/30 against the sim probe before choosing")
     ap.add_argument("--parallel-frac", type=float, default=0.0, help="share of worlds rendered in ALL THREE locales rather than one. Identical world state in three surface forms is Allen-Zhu 2309.14316's diversity-of-form argument; 2603.29026 measured parallel data as having minimal effect on cross-lingual ALIGNMENT, which is a different claim, so this is deliberately a fraction and not the default")
     ap.add_argument("--swap-frac", type=float, default=0.0, help="share of English documents with a fraction of their entity words swapped for the ru/ja equivalents (LINK, 2605.23885: up to 2x speedup to equivalent performance from a bilingual vocabulary alone — and the renderer already is one). Cheaper than parallel rendering and keeps world diversity intact")
     ap.add_argument("--swap-rate", type=float, default=0.15, help="fraction of swappable words replaced within a swapped document")
@@ -53,7 +53,7 @@ def main():
     while written < target or n_dpo < args.dpo_pairs:
         seed += 1
         domain = domains[seed % len(domains)]
-        parallel = rng.random() < args.parallel_frac
+        parallel = args.parallel_frac > 0 and rng.random() < args.parallel_frac  # no draw at 0: seeds stay aligned
         locales = LOCALES if parallel else [rng.choices(LOCALES, [w for _, w in LOCALE_WEIGHTS])[0]]
         trace = make_trace(domain, seed, sample_difficulty(random.Random(seed ^ 0x5EED), args.p_fail))
         rendered = [(l, narrative(trace, l), qa_pairs(trace, l)) for l in locales]
@@ -63,9 +63,11 @@ def main():
         for locale, doc, pairs in rendered:
             # LINK-style substitution, English only: the point is to put another script inside an
             # otherwise-English context, which is not a thing you can do to a document already in it.
-            swapped = locale == "en" and rng.random() < args.swap_frac
+            swapped = locale == "en" and args.swap_frac > 0 and rng.random() < args.swap_frac
             if swapped:
-                doc = lexical_swap(doc, rng, args.swap_rate)
+                new_doc = lexical_swap(doc, rng, args.swap_rate)
+                swapped = new_doc != doc  # `swapped` means the document CONTAINS a swap, not that one was drawn
+                doc = new_doc
             meta = {"domain": domain, "locale": locale, "seed": seed,
                     "parallel": parallel, "swapped": swapped, **trace.difficulty}
             if written < target:

@@ -185,7 +185,8 @@ def parse_action(domain: str, text: str, w: World, init: Dict[str, Any]) -> Opti
             if g[0] not in ppl:
                 return None
             if kind == "move":
-                return {"kind": "move", "who": g[0], "to": g[1]} if g[1] in ROOMS else None
+                rooms = init.get("rooms") or ROOMS  # this world's rooms (traces before 2026-08-29 carry none)
+                return {"kind": "move", "who": g[0], "to": g[1]} if g[1] in rooms else None
             if kind == "take":
                 return {"kind": "take", "who": g[0], "obj": g[1]} if g[1] in OBJECTS and g[1] in w.names.values() else None
             if kind == "put_in":
