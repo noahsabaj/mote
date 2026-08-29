@@ -43,7 +43,7 @@ FILLER = [
 
 def _reply(eng: Engine, messages: List[Dict], mode: str, max_bytes: int = 48) -> str:
     ev: List[dict] = []
-    eng.generate(messages, GenParams(temperature=0.0, top_p=1.0, max_bytes=max_bytes, n_candidates=0), ev.append, threading.Event(),
+    eng.generate(messages, GenParams(temperature=0.0, top_p=1.0, max_bytes=max_bytes), ev.append, threading.Event(),
                  context={"fold": mode})
     return ev[-1]["text"] if ev and ev[-1]["type"] == "done" else ""
 

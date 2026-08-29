@@ -1,8 +1,8 @@
 """Analytic training FLOPs per byte for the H-Net, so every run can report TFLOPS and MFU.
 
 The usual 6·N rule (forward + backward ≈ 6 FLOPs per parameter per token) applied per stage:
-byte-level modules see every byte, the main network sees one position per chunk, and the two
-attention-like mixers add their pairwise matmuls (4·T·d per position forward, ×3 with backward).
+byte-level modules see every byte, the main network sees one position per chunk, and the Relation
+mixer adds its pairwise matmuls (4·T·d per position forward, ×3 with backward).
 The SSM scan inside Mamba-3 is omitted (well under 1 % at these widths).
 """
 
@@ -38,23 +38,16 @@ def _n(module) -> int:
 
 def flops_per_byte(model, seq_len: int, bytes_per_chunk: float) -> float:
     cfg = model.cfg
-    D0 = cfg.d_model_outer
     bpc = max(float(bytes_per_chunk), 1.0)
     T_main = seq_len / bpc  # chunk-level positions per sequence
 
     byte_level = _n(model.encoder) + _n(model.decoder) + _n(model.routing_module)
-    # The spine replaces residual_proj with its own generators; both are byte-level and per-position.
-    # `_n(model.encoder)` already counts the encoder's and decoder's spine sites, since they are
-    # submodules of those stacks — only the chunk-stage site and the stream scales are left over.
-    byte_level += _n(model.chunk_spine) + model.stream.scale.numel() if model.spine_on else _n(model.residual_proj)
+    byte_level += _n(model.residual_proj)
     byte_level += _n(model.lm_head)  # next-byte head
     main = _n(model.main_network) + (model.pad_dimension.numel() if model.pad_dimension is not None else 0)
     fl = 6.0 * byte_level + 6.0 * main / bpc
     # Relation pairwise matmuls (U = P1·P2ᵀ and Y = F·Ĩ): 4·T·d per position forward, ×3 with backward
     fl += 12.0 * T_main * cfg.main.d_model * cfg.main.n_layers / bpc
-    if model.mbp_head is not None:
-        fl += 6.0 * (_n(model.mbp_head) + _n(model.lm_head))  # head runs over every byte + shared lm_head again
-        fl += 12.0 * seq_len * D0 * cfg.mbp.n_layers  # LCA attention (dense mask; block-sparse would be less)
     return fl
 
 

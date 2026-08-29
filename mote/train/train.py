@@ -1,11 +1,10 @@
 """Pretraining loop for the byte-level H-Net.
 
-    L = CE_nbp + λ1 · CE_mbp + α · L_ratio(N(step))
+    L = CE_nbp + α · L_ratio(N(step))
 
 Features: bf16 autocast, AdamW(0.9, 0.95) with per-stage LR multipliers and a no-decay set,
 warmup-stable-decay schedule, gradient clipping, ATDC target-ratio schedule, periodic evaluation
-(val bits/byte, bytes-per-chunk, boundary/word alignment, multi-byte-head accuracy, a chunked text
-sample), JSONL logging, atomic checkpoints every N minutes with auto-resume, and a wall-clock budget.
+(val bits/byte, bytes-per-chunk, boundary/word alignment, a chunked text sample), JSONL logging, atomic checkpoints every N minutes with auto-resume, and a wall-clock budget.
 
     python -m mote.train.train --preset pilot --data data/fineweb_edu_pilot --out runs/pilot \
         --batch-size 16 --seq-len 2048 --max-minutes 60
@@ -34,13 +33,12 @@ triton_lock.install()  # the trainer shares autotuned kernels with serving repli
 from ..data.loader import ByteShard, MixedShard
 from ..model.dc import atdc_target_ratio, bytes_per_chunk, ratio_loss
 from ..model.moe import collect_moe, moe_modules
-from ..model import spine
 import mote
 
 from .. import determinism
 from .flops import _n as _n_active
 from ..model.feedback import feedback_from
-from ..model.hnet import HNetForCausalLM
+from ..model.hnet import HNetForCausalLM, strip_retired
 from ..tokenizer import OFFSET_ID, ByteTokenizer
 from .flops import flops_per_byte, peak_tflops_for
 from . import elr
@@ -120,7 +118,7 @@ def wsd_lr(step: int, total: int, base: float, warmup_frac: float = 0.1, decay_f
     return base * max(min_ratio, 1.0 - (1.0 - min_ratio) * math.sqrt(t))
 
 
-BRANCH_SCHEDULES = ("branch", "cooldown", "constant")
+BRANCH_SCHEDULES = ("branch", "constant")
 BRANCH_DECAY_FRAC = 0.2  # the 2x2's fork point: constant to here, then decay (docs/shape.md § mid)
 # 0.2 sits between the two windows 2608.24814 App. F.1 tested at a fixed peak lr and budget: at 0.1 the
 # weight-decayed run never overtook the unregularised one, at 0.3 it did and finished lower — same runs,
@@ -154,9 +152,7 @@ def schedule_lr(kind: str, step: int, total: int, base: float, min_ratio: float 
         return base * (step + 1) / warm if step < warm else base
     if kind == "constant":
         return base
-    if kind in ("branch", "cooldown"):  # `cooldown` accepted so a saved config still parses; it now gets
-        #                                  the `branch` curve, which is safe because no cooldown branch has
-        #                                  ever been run — the mid stage has not executed yet.
+    if kind == "branch":
         t = min(step / max(total, 1), 1.0)
         if t < 1.0 - decay_frac:
             return base
@@ -218,8 +214,8 @@ def _targets(batch: torch.Tensor, loss_mask: Optional[torch.Tensor]):
     return inputs, targets, tmask
 
 
-def _pass_loss(model, out, inputs, targets, tmask, target_ratio: float, mbp_weight: float, ratio_weight: float):
-    """The loss of one forward pass: CE sum + ratio (+ MoE, + multi-byte head). Every stat a 0-dim tensor."""
+def _pass_loss(model, out, inputs, targets, tmask, target_ratio: float, ratio_weight: float):
+    """The loss of one forward pass: CE sum + ratio (+ MoE). Every stat a 0-dim tensor."""
     ce_sum, n = _masked_ce_sum(out.logits, targets, tmask)
     mask = torch.ones_like(inputs, dtype=torch.bool)
     lr_ = ratio_loss(out.routing.boundary_prob, out.routing.boundary_mask, mask, target_ratio)
@@ -230,16 +226,10 @@ def _pass_loss(model, out, inputs, targets, tmask, target_ratio: float, mbp_weig
     if moe_aux is not None:  # balance / z losses of the MoE FFNs, per-token like the ratio loss
         loss = loss + moe_aux * n_safe
         stats.update(moe_stats)
-    if out.mbp_logits is not None and mbp_weight > 0:
-        gamma = getattr(model.cfg.mbp, "position_gamma", 0.0) if hasattr(model, "cfg") else 0.0
-        pw = torch.exp(-out.offset.float() / gamma) if gamma and gamma > 0 else None  # earlier draft slots matter more
-        ce_m_sum, _ = _masked_ce_sum(out.mbp_logits, targets, tmask, pw)
-        loss = loss + mbp_weight * ce_m_sum
-        stats["ce_mbp_sum"] = ce_m_sum.detach()
     return loss, n_safe, stats
 
 
-def iter_pass_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: float, mbp_weight: float, ratio_weight: float,
+def iter_pass_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: float, ratio_weight: float,
                      loss_mask: Optional[torch.Tensor] = None, passes: int = 1, gen: Optional[torch.Generator] = None, detach: bool = False):
     """Latent feedback's multi-pass teacher forcing (2608.08888 §3.3), one pass at a time: pass 1 is the
     ordinary forward; pass k fuses pass k−1's top states, shifted right, into the plain inputs (prefix
@@ -248,15 +238,15 @@ def iter_pass_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: 
     activations alive at a time)."""
     inputs, targets, tmask = _targets(batch, loss_mask)
     out = model(inputs)
-    yield (*_pass_loss(model, out, inputs, targets, tmask, target_ratio, mbp_weight, ratio_weight), out)
+    yield (*_pass_loss(model, out, inputs, targets, tmask, target_ratio, ratio_weight), out)
     prev = out
     for _ in range(passes - 1):
         fb = feedback_from(prev, gen, detach=detach, mixin=True)
         prev = model(inputs, feedback=fb)
-        yield (*_pass_loss(model, prev, inputs, targets, tmask, target_ratio, mbp_weight, ratio_weight), prev)
+        yield (*_pass_loss(model, prev, inputs, targets, tmask, target_ratio, ratio_weight), prev)
 
 
-def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: float, mbp_weight: float, ratio_weight: float,
+def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: float, ratio_weight: float,
                    loss_mask: Optional[torch.Tensor] = None, passes: int = 1, gen: Optional[torch.Generator] = None):
     """Returns (loss_unnormalised, n_tokens, stats, out). The loss is a SUM over counted tokens (plus the
     ratio loss scaled by the token count), so that gradient accumulation normalises ONCE by the total
@@ -265,7 +255,7 @@ def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: fl
 
     `passes` > 1 adds the latent-feedback passes (λ = 1, averaged over the extra passes as in the paper's
     eq. 12); `n` stays pass 1's token count, so a feedback micro-batch weighs about twice a plain one."""
-    it = iter_pass_losses(model, batch, target_ratio, mbp_weight, ratio_weight, loss_mask, passes, gen, detach=False)
+    it = iter_pass_losses(model, batch, target_ratio, ratio_weight, loss_mask, passes, gen, detach=False)
     loss, n_safe, stats, out = next(it)
     if passes > 1:
         extra, ce_fb = 0.0, 0.0
@@ -297,7 +287,7 @@ def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, 
     slice under the GPU gate, so a chat waits for one window instead of the whole evaluation (a 16-window
     EMA eval held the gate for minutes and a reply showed no first byte for as long, QA 2026-08-24)."""
     model.eval()
-    tot_nll, tot_tok, tot_bytes, tot_chunks, mbp_correct, mbp_tot = 0.0, 0, 0, 0, 0, 0
+    tot_nll, tot_tok, tot_bytes, tot_chunks = 0.0, 0, 0, 0
     # latent feedback: k fused prefill passes over the same windows (2608.08888 eqs. 10-11) — pass k fuses
     # pass k−1's top states, shifted right, into the plain inputs; val_bpb_fb1 is what the gate reads
     n_fb = feedback_passes if getattr(model, "feedback_level", "off") != "off" else 0
@@ -343,10 +333,6 @@ def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, 
         b_inner = bm[:, 1:]
         word_hits += (b_inner & (sep(prev) | sep(cur))).sum().item()
         boundary_count += b_inner.sum().item()
-        if out.mbp_logits is not None:
-            pred = out.mbp_logits.argmax(-1)
-            mbp_correct += (pred == targets).sum().item()
-            mbp_tot += targets.numel()
         for i, m in enumerate(moe_modules(model)):  # expert usage per layer over the eval windows
             moe_loads[i] = moe_loads.get(i, 0.0) + m.stats["load"].float().cpu()
             moe_batches += 1
@@ -363,8 +349,6 @@ def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, 
         p_all = torch.cat(bp_all)
         rate = tot_chunks / max(tot_bytes, 1)  # the fraction of positions that ended up boundaries
         res["val_decode_threshold"] = float(torch.quantile(p_all, max(1.0 - rate, 0.0)))
-    if mbp_tot:
-        res["mbp_top1_acc"] = mbp_correct / mbp_tot
     if moe_loads:
         n_layers = len(moe_loads)
         loads = [moe_loads[i] / max(moe_batches // n_layers, 1) for i in range(n_layers)]
@@ -427,7 +411,7 @@ def last_logged_elapsed_sec(log_path: Path) -> float:
     return last
 
 
-VOCAB_SIZED = ("embeddings.weight", "lm_head.weight", "mbp_head.transition.weight")
+VOCAB_SIZED = ("embeddings.weight", "lm_head.weight")
 
 
 def pad_vocab_rows(sd: Dict, model) -> Dict:
@@ -451,7 +435,7 @@ def load_checkpoint(path: Path, model, opt=None, ck: Optional[Dict] = None, allo
     """`ck`: the checkpoint if the caller already read it (a resume reads it first for its config)."""
     if ck is None:
         ck = torch.load(path, map_location="cpu", weights_only=True)
-    sd = pad_vocab_rows(ck["model"], model)
+    sd = pad_vocab_rows(strip_retired(ck["model"]), model)
     if allow_new:  # modules the checkpoint predates (an --init-from into a latent-feedback config) start fresh
         res = model.load_state_dict(sd, strict=False)
         stray = [k for k in res.missing_keys if not k.startswith(tuple(allow_new))]
@@ -467,7 +451,7 @@ def load_checkpoint(path: Path, model, opt=None, ck: Optional[Dict] = None, allo
 
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preset", default="mote-13m", type=normalize_preset,
+    ap.add_argument("--preset", default="mote-11m", type=normalize_preset,
                     help="model size: " + ", ".join(PRESETS) + " (the retired role names still resolve)")
     ap.add_argument("--config", default=None, help="JSON config overriding the preset")
     ap.add_argument("--data", required=True, help="shard prefix, e.g. data/fineweb_edu_pilot")
@@ -500,12 +484,9 @@ def build_argparser() -> argparse.ArgumentParser:
                          "bound an orthogonal update cannot cross, the slack absorbs the aligned component and noise")
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks (bit-neutral, ~30%% more compute, much less memory)")
     ap.add_argument("--bucket", type=int, default=None, help="chunk-count bucket (default from the preset, 64); 1 = exact shapes")
-    ap.add_argument("--no-mbp", action="store_true", help="A/B: train without the multi-byte head")
+    ap.add_argument("--no-mbp", action="store_true", help=argparse.SUPPRESS)  # the head is gone (2026-08-29); a no-op so queued argv still parses
     ap.add_argument("--mix", action="append", default=[], metavar="PREFIX:SHARE[:plain]", help="extra shard mixed into training by share, e.g. data/sft_identity:0.05 (repeatable); ':plain' reads an SFT shard without its loss mask")
     ap.add_argument("--beta2", type=float, default=0.95, help="AdamW \u03b2\u2082 (2608.16760: the convergence threshold rises as the batch shrinks; A/B 0.99/0.997 at our 32 kB steps)")
-    ap.add_argument("--mbp-weight", type=float, default=None, help="\u03bb1 for the multi-byte head loss (preset default 1.0)")
-    ap.add_argument("--mbp-gamma", type=float, default=None, help="position weighting exp(-offset/\u03b3) on the head loss (0 = off)")
-    ap.add_argument("--mbp-transition", action="store_true", help="add the V\u00d7V byte-transition bias to the head (DSpark Markov head)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--fast", action="store_true", help="give up bitwise reproducibility for ~20 %% throughput. Runs are reproducible by default: cuBLAS pinned to a fixed workspace plus the two-pass Relation backward, which together are the whole story (mote/determinism.py). A `--fast` number and a default number are not comparable, so the mode is recorded in run.json")
     ap.add_argument("--resume", action="store_true")
@@ -527,19 +508,6 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--reselect-eps", type=float, default=0.02, help="a window whose loss moved less than this since the last pass is stuck")
     ap.add_argument("--init-from", default=None, help="checkpoint to initialize weights from (e.g. pretrain -> SFT)")
     ap.add_argument("--ratio-weight", type=float, default=None, help="override dc.ratio_loss_weight (\u03b1)")
-    ap.add_argument("--bf16-residual", action="store_true", help="A/B: keep the residual stream in bf16 instead of fp32")
-    ap.add_argument("--relation-window", type=int, default=None, help="A/B: each chunk sees at most the last N chunks (materialized path)")
-    ap.add_argument("--attention-main", action="store_true", help="ablation: parameter-matched causal attention instead of Relation in the main network")
-    # --- hyper-connection spine (signed 2026-08-26, docs/research/spine-2026-08-26.md) -------------
-    ap.add_argument("--spine", default=None, choices=["off", "expand", "frac"],
-                    help="multi-stream residual at byte resolution: expand = n copies (memory x n), frac = n slices (free)")
-    ap.add_argument("--spine-n", type=int, default=None, help="streams (expand) or slices (frac); every paper's optimum is 4")
-    ap.add_argument("--spine-project", default=None,
-                    choices=["spectral_sphere", "orthogonal", "sinkhorn", "perm_convex", "diag", "none"],
-                    help="manifold for H_res; the non-default values are the literature's control arms")
-    ap.add_argument("--spine-post-scale", type=float, default=None, help="H_post multiplier (mHC's 2.0; Motif 3 anneals it to 1.0)")
-    ap.add_argument("--no-spine-lss", action="store_true", help="ablation: replicate streams exactly, so they start in the symmetry's fixed subspace")
-    ap.add_argument("--no-spine-dynamic", action="store_true", help="ablation: static hyper-connections (HC measures DHC > SHC at n=4)")
     ap.add_argument("--moe", type=int, default=None, metavar="E", help="mixture of experts in the main-network FFNs: E experts (signed 2026-08-24, docs/shape.md \"MoE\")")
     ap.add_argument("--moe-topk", type=int, default=2, help="active experts per chunk")
     ap.add_argument("--moe-ff", type=int, default=None, help="expert hidden width (default d_ff // topk: active FLOPs match the dense FFN)")
@@ -548,15 +516,13 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--moe-aux-weight", type=float, default=None, help="balance-loss weight (default 1e-4 lossfree / 1e-2 aux)")
     ap.add_argument("--moe-gamma", type=float, default=None, help="lossfree: expert-bias step per optimizer step (default 1e-3)")
     ap.add_argument("--moe-gate-scale", type=float, default=None, help="routed-output scale (default: Moonlight's computed factor for lossfree, 1.0 for aux)")
-    ap.add_argument("--jepa", choices=["minimal", "ema", "sigreg"], default=None, help="JEPA aux loss on the byte encoder (lab arms, docs/shape.md 2026-08-24)")
-    ap.add_argument("--jepa-weight", type=float, default=0.05, help="weight of the JEPA aux loss")
     ap.add_argument("--no-flash", action="store_true", help="A/B: materialized Relation instead of the Triton kernel")
     ap.add_argument("--target-ratio", type=float, nargs=2, default=None, metavar=("INIT", "FINAL"), help="override the ATDC target-ratio schedule endpoints")
     ap.add_argument("--adapt-threshold", type=float, default=None, help="ATDC's proficiency trigger tau (2605.30080 Alg. 1): raise the target ratio by --adapt-rate while the windowed mean LM loss is below this. Mote shipped the paper's schedule without this trigger until 2026-08-27; None keeps it off")
     ap.add_argument("--adapt-rate", type=float, default=None, help="ATDC's gamma, the boost applied when the trigger fires (paper: 1.05)")
     ap.add_argument("--bound-ceiling", type=float, default=None, help="bounded routing (GeneZip 2602.17739): cap boundaries per window at this multiple of the target rate L/N. A GUARDRAIL at loose values (the arena can then never overflow its capacity); tightening it toward 1.0 makes it a compression-rate controller, which is past the paper's evidence and wants its own A/B")
     ap.add_argument("--bound-floor", type=int, default=None, help="bounded routing: minimum boundaries per window (the paper's K_min=8 keeps the router from collapsing)")
-    ap.add_argument("--schedule", default="wsd", choices=["wsd", "trunk", "branch", "constant", "cooldown"], help="wsd: warmup-stable-decay over the budget (lab arms); trunk: warmup then constant, never decays (the flagship trunk); branch: constant for 80%% then decay to --min-lr-ratio (a mid-training branch off a trunk snapshot); constant: the same branch without the decay, the other arm of the 2x2. `cooldown` is a deprecated alias for `branch`. docs/shape.md § mid")
+    ap.add_argument("--schedule", default="wsd", choices=["wsd", "trunk", "branch", "constant"], help="wsd: warmup-stable-decay over the budget (lab arms); trunk: warmup then constant, never decays (the flagship trunk); branch: constant for 80%% then decay to --min-lr-ratio (a mid-training branch off a trunk snapshot); constant: the same branch without the decay, the other arm of the 2x2. docs/shape.md § mid")
     ap.add_argument("--min-lr-ratio", type=float, default=None, help="where a decay lands, as a fraction of --lr. Default depends on the schedule: 0 for a branch (straight to zero — Bergsma 2502.15938, and 2602.06797's optimal schedules also terminate at 0), 0.1 for wsd, which every lab arm to date was run with and must stay comparable to.")
     ap.add_argument("--snapshot-steps", type=int, default=0, help="also keep a weights-only snap_<step>.pt every N steps (the branch points for the mid-training branches)")
     ap.add_argument("--snapshot-at", type=float, default=None, metavar="FRAC", help="also snapshot the first time the run crosses this fraction of its horizon. The 2x2 forks here: the decayed arm keeps going under --schedule branch, and the no-decay arm resumes from this snapshot under --schedule constant for the remaining bytes, so the two are token-matched (docs/shape.md § mid)")
@@ -634,20 +600,6 @@ class Trainer:
 
         if args.bucket is not None:
             cfg.dc.chunk_bucket = args.bucket
-        if args.no_mbp:
-            cfg.mbp.enabled = False
-        if args.mbp_weight is not None:
-            cfg.mbp.loss_weight = args.mbp_weight
-        if args.mbp_gamma is not None:
-            cfg.mbp.position_gamma = args.mbp_gamma
-        if args.mbp_transition:
-            cfg.mbp.transition = True
-        if args.bf16_residual:
-            cfg.residual_in_fp32 = False
-        if args.relation_window is not None:
-            cfg.main.window_chunks = args.relation_window
-        if args.attention_main:
-            cfg.main.mixer = "attention"
         if args.moe:
             cfg.main.moe_experts = args.moe
             cfg.main.moe_topk = args.moe_topk
@@ -661,18 +613,6 @@ class Trainer:
                 cfg.main.moe_bias_gamma = args.moe_gamma
             if args.moe_gate_scale is not None:
                 cfg.main.moe_gate_scale = args.moe_gate_scale
-        if args.spine is not None:
-            cfg.spine.mode = args.spine
-        if args.spine_n is not None:
-            cfg.spine.n = args.spine_n
-        if args.spine_project is not None:
-            cfg.spine.project = args.spine_project
-        if args.spine_post_scale is not None:
-            cfg.spine.post_scale = args.spine_post_scale
-        if args.no_spine_lss:
-            cfg.spine.lss = False
-        if args.no_spine_dynamic:
-            cfg.spine.dynamic = False
         if args.qk_norm:
             cfg.main.qk_norm = True
         if args.tau_s is not None:
@@ -683,9 +623,9 @@ class Trainer:
             from ..model import relation as _relation
             _relation.USE_FLASH = False
         # after every architecture flag, not before them: config.json is the run's readable record and used
-        # to be written while the config was still half-built, so --no-mbp, --attention-main, --moe,
-        # --bf16-residual and --relation-window never appeared in it. The checkpoint always carried the
-        # finished config, so resumes were right and only the file on disk was wrong.
+        # to be written while the config was still half-built, so the architecture flags (--moe, --qk-norm,
+        # ...) never appeared in it. The checkpoint always carried the finished config, so resumes were
+        # right and only the file on disk was wrong.
         cfg.save(out_dir / "config.json")
         self.cfg = cfg
         # ATDC's proficiency trigger (2605.30080 Alg. 1 line 11) averages this window of LM loss
@@ -693,9 +633,6 @@ class Trainer:
         self.model = model = HNetForCausalLM(cfg, device=device)
         if args.ckpt_main:
             model.main_network.grad_checkpoint = True
-        # stream collapse and identity degeneration are the two ways this stack fails without the
-        # loss saying so; both are only meaningful when there is a spine at all
-        self._spine_stats = getattr(cfg.spine, "mode", "off") != "off"
         self.n_params = model.num_params()
         self.peak_tflops = peak_tflops_for(device) if device.type == "cuda" else None
         print(f"params: {self.n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('mote.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('mote.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
@@ -725,16 +662,6 @@ class Trainer:
             self.elr_match = elr.ELRMatcher(elr.ELRTrace.load(Path(args.elr_match)), self._elr_named)
             print(f"elr: tracking {args.elr_match} — {len(self.elr_match.trace.samples)} samples over "
                   f"steps {self.elr_match.trace.samples[0].step}..{self.elr_match.trace.samples[-1].step}", flush=True)
-
-        self.jepa, self.jepa_opt, self._enc_h = None, None, None
-        if args.jepa:
-            from .jepa import JepaAux
-
-            self.jepa = JepaAux(model, args.jepa, cfg.d_model_outer).to(device)
-            model.encoder.register_forward_hook(
-                lambda m, i, o: setattr(self, "_enc_h", o if torch.is_tensor(o) else o[0]))
-            self.jepa_opt = torch.optim.AdamW(self.jepa.parameters(), lr=args.lr, betas=(0.9, args.beta2), weight_decay=0.0)
-            print(f"jepa aux: {args.jepa}, weight {args.jepa_weight}, {sum(q.numel() for q in self.jepa.parameters())/1e6:.2f}M aux params", flush=True)
 
         if args.reselect_every > 0 and not args.sft:
             raise ValueError("--reselect-every selects assistant-byte windows: it needs --sft")
@@ -773,7 +700,7 @@ class Trainer:
         self.feedback_window = int(args.feedback_window or 0)
 
         self.step, self.t_start = 0, time.time()
-        self.sched_total = None  # step horizon of the trunk/cooldown schedules: fixed at the first probe, survives resume
+        self.sched_total = None  # step horizon of the trunk/branch schedules: fixed at the first probe, survives resume
         self.ckpt_path = out_dir / "last.pt"
         if args.resume and self.ckpt_path.exists():
             self.step, extra = load_checkpoint(self.ckpt_path, model, self.opt, ck=self._resume_ck)
@@ -782,9 +709,6 @@ class Trainer:
                 self.sched_total = extra.get("sched_total") or extra.get("total_steps")
             if "generator_state" in extra:
                 self.gen.set_state(torch.tensor(extra["generator_state"], dtype=torch.uint8))
-            if self.jepa is not None and "jepa" in extra:
-                self.jepa.load_state_dict(extra["jepa"])
-                self.jepa_opt.load_state_dict(extra["jepa_opt"])
             self._ema_state = extra.get("ema")
             # the wall clock survives a resume too (max-minutes, the wsd progress and elapsed_min continue
             # instead of restarting); checkpoints from before 2026-08-24 carry no clock — read the log's last
@@ -847,9 +771,6 @@ class Trainer:
                  "sched_total": self.sched_total, "schedule": self.args.schedule,
                  "n_params": self.n_params, "bytes_seen": self.step * self.tokens_per_step,
                  "elapsed_sec": time.time() - self.t_start}
-        if self.jepa is not None:
-            extra["jepa"] = self.jepa.state_dict()
-            extra["jepa_opt"] = self.jepa_opt.state_dict()
         if self.ema is not None:
             extra["ema"] = self.ema
         save_checkpoint(self.ckpt_path, self.model, self.opt, self.step, self.cfg, extra)
@@ -907,8 +828,6 @@ class Trainer:
         float() on them is the one sync per logging interval, as before."""
         args, device = self.args, self.device
         self.opt.zero_grad(set_to_none=True)
-        if self.jepa_opt is not None:
-            self.jepa_opt.zero_grad(set_to_none=True)
         agg = {}
         total_n = None
         for _ in range(args.grad_accum):
@@ -921,10 +840,9 @@ class Trainer:
                 lmask = lmask[:, : self.feedback_window + 1] if lmask is not None else None
             if n_pass > 1 and args.feedback_detach:
                 # one pass of activations alive at a time: back-propagate each pass as it is produced
-                assert self.jepa is None, "latent feedback and the JEPA aux are separate arms"
                 stats = {}
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                    it = iter_pass_losses(self.fwd, batch, target_ratio, self.cfg.mbp.loss_weight, self.cfg.dc.ratio_loss_weight, lmask,
+                    it = iter_pass_losses(self.fwd, batch, target_ratio, self.cfg.dc.ratio_loss_weight, lmask,
                                           passes=n_pass, gen=self.gen, detach=True)
                     for j, (lk, nk, sk, _o) in enumerate(it):
                         (lk if j == 0 else lk / (n_pass - 1)).backward()
@@ -934,15 +852,8 @@ class Trainer:
                             stats["ce_fb_sum"] = stats.get("ce_fb_sum", 0.0) + sk["ce_sum"] / (n_pass - 1)
             else:
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                    loss, n, stats, out_fwd = compute_losses(self.fwd, batch, target_ratio, self.cfg.mbp.loss_weight, self.cfg.dc.ratio_loss_weight, lmask,
-                                                             passes=n_pass, gen=self.gen)
-                    if self.jepa is not None:
-                        aux, jstats = self.jepa(batch[:, :-1], self._enc_h)
-                        loss = loss + args.jepa_weight * aux * n  # same sum-normalisation as CE
-                        bp = out_fwd.routing.boundary_prob
-                        pb = (bp[..., 1] if bp.dim() == 3 else bp).float().clamp(1e-6, 1 - 1e-6)
-                        jstats["jepa_bent"] = (-(pb * pb.log() + (1 - pb) * (1 - pb).log())).mean().detach()
-                        stats = {**stats, **jstats}
+                    loss, n, stats, _out = compute_losses(self.fwd, batch, target_ratio, self.cfg.dc.ratio_loss_weight, lmask,
+                                                          passes=n_pass, gen=self.gen)
                 loss.backward()  # unnormalised sum; normalised once below
             if self.feedback_mix is not None:
                 stats["passes"] = torch.tensor(float(n_pass), device=device)
@@ -951,8 +862,6 @@ class Trainer:
                 agg[k] = v if k not in agg else agg[k] + v
             yield ("slice", None)
         grads = [p.grad for p in self.model.parameters() if p.grad is not None]
-        if self.jepa is not None:
-            grads += [p.grad for p in self.jepa.parameters() if p.grad is not None]
         torch._foreach_div_(grads, total_n)
         gnorm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), args.clip)
         self.opt.step()
@@ -961,16 +870,10 @@ class Trainer:
         if self.ema is not None:
             with torch.no_grad():
                 torch._foreach_lerp_(self.ema, [p.detach() for p in self.model.parameters()], 1.0 - self.ema_decay)
-        if self.jepa is not None:
-            torch.nn.utils.clip_grad_norm_(self.jepa.parameters(), args.clip)
-            self.jepa_opt.step()
-            self.jepa.ema_update(self.model)
         out = {"ce": agg["ce_sum"] / total_n, "ratio": agg["ratio"] / args.grad_accum, "bpic": agg["bpic"] / args.grad_accum, "grad_norm": gnorm}
         for k in agg:
-            if k.startswith("jepa_") or k.startswith("moe_"):
+            if k.startswith("moe_"):
                 out[k] = agg[k] / args.grad_accum
-        if "ce_mbp_sum" in agg:
-            out["ce_mbp"] = agg["ce_mbp_sum"] / total_n
         if "ce_fb_sum" in agg:
             out["ce_fb"] = agg["ce_fb_sum"] / total_n  # the feedback passes' CE per token (mean over the extra passes)
         if "passes" in agg:
@@ -1061,7 +964,7 @@ class Trainer:
         snapped_at = args.snapshot_at is not None and (self.sched_total or 0) and self.step >= args.snapshot_at * self.sched_total
 
         while self._running() and not self._stop:
-            # wsd follows wall-clock progress (arms compare at equal wall-clock); trunk/cooldown follow
+            # wsd follows wall-clock progress (arms compare at equal wall-clock); trunk/branch follow
             # the step horizon fixed at the first probe, so a resume continues the schedule instead of
             # restarting it
             pr = self._progress() if args.schedule == "wsd" else min(self.step / max(self.sched_total, 1), 1.0)
@@ -1086,10 +989,6 @@ class Trainer:
                 # after set_lr, which would otherwise overwrite it: param_lr wins for Muon's matrices, the
                 # schedule still drives the AdamW groups (they are identical between the arms being compared)
                 lr = self.elr_match.apply(self.opt, self.step) or lr
-            # arm the spine's activation sample for exactly the forward that will be logged: the
-            # reduction is over [B, L, n, d] and is not free at 16384
-            if self._spine_stats:
-                spine.set_stream_collect(self.model, (self.step + 1) % args.log_every == 0)
             stats = yield from self._train_step(target_ratio)
             self._loss_window.append(float(stats["ce"]))  # ATDC's proficiency trigger reads this window
             self.step += 1
@@ -1109,8 +1008,6 @@ class Trainer:
                 rec["tflops"] = flops_per_byte(self.model, args.seq_len, stats.get("bpic", 1.0)) * rec["bytes_per_sec"] / 1e12
                 if self.peak_tflops:
                     rec["mfu"] = rec["tflops"] / self.peak_tflops
-                if self._spine_stats:
-                    rec.update(spine.spine_stats(self.model))
                 if self.norms:
                     sample = self.norms.sample(self.step, lr, self.args.weight_decay)  # 61 norms in one device->host transfer
                     rec.update(self.norms.record(sample))

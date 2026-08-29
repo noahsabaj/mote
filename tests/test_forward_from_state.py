@@ -1,10 +1,10 @@
 """`forward_from_state` over k bytes must equal k sequential `step` calls: same logits, same boundaries,
-same resulting state (checked through the next step and the multi-byte draft), with and without
+same resulting state (checked through the next step), with and without
 boundaries inside the segment. `clone_state` must be a true snapshot."""
 
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 
 
@@ -14,20 +14,18 @@ def _model(seed=0):
         d_model_outer=32, encoder_layers=2, decoder_layers=1,
         mamba3=Mamba3Cfg(d_state=16, expand=2, headdim=16),
         main=RelationCfg(n_layers=2, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(enabled=True, n_layers=1, n_heads=2, d_ff=64),
     )
     return HNetForCausalLM(cfg, dtype=torch.float32).eval()
 
 
 def _run_steps(model, state, bytes_):
     logits, bmask, bprob = [], [], []
-    mbp = None
     for b in bytes_:
-        lg, routing, is_b, mbp = model.step(torch.tensor([[b]]), state)
+        lg, routing, is_b = model.step(torch.tensor([[b]]), state)
         logits.append(lg[0, 0])
         bmask.append(bool(is_b))
         bprob.append(float(routing.boundary_prob[0, 1]))
-    return torch.stack(logits), bmask, bprob, mbp
+    return torch.stack(logits), bmask, bprob
 
 
 @torch.no_grad()
@@ -42,26 +40,20 @@ def test_forward_from_state_matches_sequential_steps():
 
         s1 = model.allocate_inference_state("cpu")
         model.prefill(prompt, s1)
-        lg1, bm1, bp1, _ = _run_steps(model, s1, cont)
-        nxt1, _, _, mbp1 = _run_steps(model, s1, [probe])
+        lg1, bm1, bp1 = _run_steps(model, s1, cont)
+        nxt1, _, _ = _run_steps(model, s1, [probe])
 
         s2 = model.allocate_inference_state("cpu")
         model.prefill(prompt, s2)
         lg2, bm2, bp2 = model.forward_from_state(torch.tensor([cont]), s2)
-        nxt2, _, _, mbp2 = _run_steps(model, s2, [probe])
+        nxt2, _, _ = _run_steps(model, s2, [probe])
 
         seen[any(bm1)] += 1
         assert bm2.tolist() == bm1, (seed, bm1, bm2.tolist())
         assert torch.allclose(bp2, torch.tensor(bp1), atol=1e-5)
         assert torch.allclose(lg2[0], lg1, atol=1e-4, rtol=1e-4), (lg2[0] - lg1).abs().max()
         assert torch.allclose(nxt2, nxt1, atol=1e-4, rtol=1e-4), (nxt2 - nxt1).abs().max()
-        assert s1.n_chunks == s2.n_chunks and s1.cur_offset == s2.cur_offset
-        assert len(s1.cur_chunk_inputs) == len(s2.cur_chunk_inputs)
-        assert (mbp1 is None) == (mbp2 is None)
-        if mbp1 is not None:
-            assert torch.allclose(mbp1, mbp2, atol=1e-4, rtol=1e-4)
-        if s1.prev_chunk_inputs is not None:
-            assert torch.allclose(s1.prev_chunk_inputs, s2.prev_chunk_inputs, atol=1e-5)
+        assert s1.main.n == s2.main.n
     assert seen[True] > 0, "no seed produced a boundary inside the segment"
 
 
@@ -71,10 +63,10 @@ def test_segment_without_boundary_keeps_chunk_bookkeeping():
     model = _model(1)
     s = model.allocate_inference_state("cpu")
     model.prefill(torch.randint(0, 256, (1, 16)), s)
-    off0, n0 = s.cur_offset, s.n_chunks
+    n0 = s.main.n
     lg, bm, bp = model.forward_from_state(torch.tensor([[65, 65, 65]]), s)
     if not bm.any():
-        assert s.cur_offset == off0 + 3 and s.n_chunks == n0
+        assert s.main.n == n0
     assert lg.shape == (1, 3, model.cfg.pad_vocab_to)
 
 

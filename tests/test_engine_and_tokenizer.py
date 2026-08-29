@@ -5,7 +5,7 @@ import threading
 import pytest
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams
 from mote.tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID, USER_ID, ByteTokenizer, ChatMessage, Utf8Streamer
@@ -40,7 +40,6 @@ def _tiny_engine(tmp_path):
     cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
     )
     torch.manual_seed(0)
@@ -64,7 +63,7 @@ def test_engine_event_stream_contract(tmp_path, no_stop_ids):
     info = eng.info()
     assert info["status"] == "pilot" and info["context_limit_bytes"] == 256 and info["params"] > 0
     events = []
-    eng.generate([{"role": "user", "content": "hi"}], GenParams(temperature=0.9, top_p=0.95, max_bytes=24, n_candidates=3), events.append, threading.Event())
+    eng.generate([{"role": "user", "content": "hi"}], GenParams(temperature=0.9, top_p=0.95, max_bytes=24), events.append, threading.Event())
     types = [e["type"] for e in events]
     assert types[0] == "start" and types[-1] == "done"
     bytes_ev = [e for e in events if e["type"] == "byte"]
@@ -72,15 +71,10 @@ def test_engine_event_stream_contract(tmp_path, no_stop_ids):
     assert bytes_ev[0]["i"] == 0 and all(e["i"] == i for i, e in enumerate(bytes_ev))
     for e in bytes_ev:
         assert set(e) >= {"byte", "text", "pending", "p", "entropy", "boundary", "boundary_p", "chunk", "source", "t_ms"}
-        assert 0 <= e["byte"] < 262 and 0.0 <= e["p"] <= 1.0 + 1e-6 and e["source"] in ("nbp", "mbp", "fix")
+        assert 0 <= e["byte"] < 262 and 0.0 <= e["p"] <= 1.0 + 1e-6 and e["source"] == "nbp"
     done = events[-1]
     assert done["reason"] == "max_bytes" and len(bytes_ev) == 24
     assert done["stats"]["bytes"] == len(bytes_ev)
-    # a boundary early in the reply triggers a draft; every draft byte is either accepted (mbp) or corrected (fix)
-    if any(e["boundary"] for e in bytes_ev[:-3]):
-        assert done["stats"]["mbp_proposed"] > 0 and done["stats"]["spec_rounds"] > 0
-        assert any(e["source"] in ("mbp", "fix") for e in bytes_ev)
-        assert done["stats"]["mbp_accepted"] + done["stats"]["spec_fixes"] >= 1
     assert any(e["type"] == "stats" for e in events)
     if any(e["boundary"] for e in bytes_ev):  # diagnostics are emitted at chunk boundaries
         assert any(e["type"] == "diagnostics" for e in events)
@@ -96,6 +90,6 @@ def test_engine_stop_flag(tmp_path, no_stop_ids):
         if e["type"] == "byte" and e["i"] == 2:
             stop.set()
 
-    eng.generate([{"role": "user", "content": "hi"}], GenParams(max_bytes=100, n_candidates=0), emit, stop)
+    eng.generate([{"role": "user", "content": "hi"}], GenParams(max_bytes=100), emit, stop)
     assert events[-1]["type"] == "done" and events[-1]["reason"] == "stopped"
     assert len([e for e in events if e["type"] == "byte"]) == 3

@@ -1,7 +1,7 @@
 """Model configuration for the byte-level H-Net.
 
 One stage: bytes -> Mamba-3 encoder -> dynamic chunking -> Relation main network ->
-dechunk -> Mamba-3 decoder -> next-byte head (+ multi-byte prediction head).
+dechunk -> Mamba-3 decoder -> next-byte head.
 """
 
 from __future__ import annotations
@@ -24,21 +24,14 @@ class Mamba3Cfg:
     ngroups: int = 1
     rope_fraction: float = 0.5
     chunk_size: int = 64
-    is_mimo: bool = False
-    mimo_rank: int = 1
-    is_outproj_norm: bool = False
     A_floor: float = 1e-4
 
 
 @dataclass
 class RelationCfg:
-    # None = full attention over all chunks; an int limits each chunk to the last N chunks
-    # (windowed-main A/B, docs/context.md; forces the materialized path until the kernel learns windows)
     """Full Relation main network (Ge, Yang, Nie 2026)."""
 
     n_layers: int = 6
-    mixer: str = "relation"  # "attention" = parameter-matched causal-attention ablation control
-    window_chunks: int | None = None
     d_model: int = 384
     n_heads: int = 8  # must be even (Givens head pairs)
     d_ff: int = 768
@@ -59,20 +52,6 @@ class RelationCfg:
     moe_z_weight: float = 1e-3  # router z-loss (aux router only)
     moe_bias_gamma: float = 1e-3  # lossfree: expert-bias step per optimizer step
     moe_gate_scale: float | None = None  # None = Moonlight's computed factor (lossfree) / 1.0 (aux)
-
-
-@dataclass
-class MBPCfg:
-    """Multi-byte prediction head with Latent Causal Attention (Owodunni et al. 2026)."""
-
-    enabled: bool = True
-    n_layers: int = 2
-    n_heads: int = 4
-    d_ff: int = 768
-    n_candidates: int = 3  # draft length per boundary at inference (verified exactly)
-    loss_weight: float = 1.0  # λ1 in L = λ0·L_nbp + λ1·L_mbp + α·L_ratio
-    position_gamma: float = 0.0  # >0: weight the head's loss by exp(-offset/γ) (DFlash/DSpark position weighting)
-    transition: bool = False  # first-order byte-transition bias on the head's logits (DSpark's Markov head; V×V at byte vocab)
 
 
 @dataclass
@@ -127,21 +106,6 @@ def _make(cls, d: dict):
 
 
 @dataclass
-class SpineCfg:
-    """The hyper-connection spine: one multi-stream residual at byte resolution (mote/model/spine.py).
-
-    Seven sites — the three encoder sublayers, the whole chunk stage, the three decoder sublayers.
-    The main network keeps its own plain residual inside: different width, different resolution."""
-
-    mode: str = "off"                    # off | expand (n copies, memory x n) | frac (n slices, free)
-    n: int = 4                           # every paper's recommended expansion; HC's own ablation peaks here
-    project: str = "spectral_sphere"     # sHC. see spine.py for why not the Birkhoff polytope
-    dynamic: bool = True                 # input-dependent coefficients (HC measures DHC > SHC at n=4)
-    post_scale: float = 2.0              # Motif 3 (2608.09119) anneals this to 1 against outlier growth
-    lss: bool = True                     # Learned Stream Scaling: streams start close but never identical
-
-
-@dataclass
 class FeedbackCfg:
     """Latent feedback (2608.08888, signed 2026-08-28, docs/results/2026-08-28-latent-feedback-prereg.md):
     the previous position's top state fused into the next input through a GLU, u = RMSNorm(W_U h_prev
@@ -163,10 +127,8 @@ class MoteConfig:
     encoder_layers: int = 2  # Mamba-3 layers, no FFN ("m" blocks in H-Net notation)
     decoder_layers: int = 2
     main: RelationCfg = field(default_factory=RelationCfg)
-    mbp: MBPCfg = field(default_factory=MBPCfg)
     dc: DCCfg = field(default_factory=DCCfg)
     mamba3: Mamba3Cfg = field(default_factory=Mamba3Cfg)
-    spine: SpineCfg = field(default_factory=SpineCfg)
     feedback: FeedbackCfg = field(default_factory=FeedbackCfg)
     max_seq_len: int = 2048  # bytes
     # Serving reads a prompt in windows of this many bytes instead of one pass. The Mamba-3 prefill
@@ -186,16 +148,16 @@ class MoteConfig:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "MoteConfig":
+        """Keys this version no longer has are ignored at every level (`mbp`, `spine`, `window_chunks`, ...),
+        so a checkpoint from before they were retired still loads."""
         d = dict(d)
-        return cls(
-            main=_make(RelationCfg, d.pop("main", {})),
-            mbp=_make(MBPCfg, d.pop("mbp", {})),
-            dc=_make(DCCfg, d.pop("dc", {})),
-            mamba3=_make(Mamba3Cfg, d.pop("mamba3", {})),
-            spine=_make(SpineCfg, d.pop("spine", {})),
-            feedback=_make(FeedbackCfg, d.pop("feedback", {})),
-            **d,
-        )
+        subs = {
+            "main": _make(RelationCfg, d.pop("main", {})),
+            "dc": _make(DCCfg, d.pop("dc", {})),
+            "mamba3": _make(Mamba3Cfg, d.pop("mamba3", {})),
+            "feedback": _make(FeedbackCfg, d.pop("feedback", {})),
+        }
+        return cls(**subs, **{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
@@ -208,42 +170,40 @@ class MoteConfig:
     # --- presets ------------------------------------------------------------------
     # Named by exact rounded parameter count (2026-08-26). The old role names rotted: `local` runs on
     # the L4 too, and `flagship` stopped being the flagship the moment Mote-138M existed. A size does
-    # not rot. `PRESET_ALIASES` below keeps the retired names resolving, so queued argv still works.
+    # not rot — but it can move: retiring the multi-byte head (2026-08-29) took 13M to 11M and 35M to
+    # 32M. `PRESET_ALIASES` below keeps every retired name resolving, so queued argv still works.
 
     @classmethod
     def mote_1m(cls) -> "MoteConfig":
-        """1,249,558: the T1 bug gate (docs/shape.md 2026-08-24). Ten-minute runs that answer
+        """1,060,758: the T1 bug gate (docs/shape.md 2026-08-24). Ten-minute runs that answer
         "is this broken" — never "is this better"; tiny scale issues no quality verdicts."""
         return cls(
             d_model_outer=128,
             encoder_layers=1,
             decoder_layers=1,
             main=RelationCfg(n_layers=2, d_model=192, n_heads=4, d_ff=384),
-            mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=256),
             max_seq_len=2048,
         )
 
     @classmethod
-    def mote_13m(cls) -> "MoteConfig":
-        """12,657,246: the local 4060 Ti gate run (Relation 6L/384/8×48/768 = the paper's 10M setting)."""
+    def mote_11m(cls) -> "MoteConfig":
+        """10,870,110: the local 4060 Ti gate run (Relation 6L/384/8×48/768 = the paper's 10M setting)."""
         return cls(
             d_model_outer=256,
             encoder_layers=2,
             decoder_layers=2,
             main=RelationCfg(n_layers=6, d_model=384, n_heads=8, d_ff=768),
-            mbp=MBPCfg(n_layers=2, n_heads=4, d_ff=768),
             max_seq_len=2048,
         )
 
     @classmethod
-    def mote_35m(cls) -> "MoteConfig":
-        """35,356,424: the largest comfortable overnight run on the 8 GB RTX 4060 Ti (5.9 GB peak at batch 4x2048)."""
+    def mote_32m(cls) -> "MoteConfig":
+        """31,643,528: the largest comfortable overnight run on the 8 GB RTX 4060 Ti (5.9 GB peak at batch 4x2048)."""
         return cls(
             d_model_outer=384,
             encoder_layers=2,
             decoder_layers=2,
             main=RelationCfg(n_layers=8, d_model=512, n_heads=8, d_ff=1536),
-            mbp=MBPCfg(n_layers=2, n_heads=4, d_ff=1024),
             max_seq_len=2048,
         )
 
@@ -256,14 +216,13 @@ class MoteConfig:
             encoder_layers=3,
             decoder_layers=3,
             main=RelationCfg(n_layers=12, d_model=768, n_heads=8, d_ff=2048),
-            mbp=MBPCfg(n_layers=2, n_heads=8, d_ff=2048, enabled=False),  # head off for Mote-96M (decided 2026-08-23: no loss gain under Muon, 8-13% of step time)
             max_seq_len=16384,  # decided 2026-08-23 (docs/context.md); profiled at batch 1 + ckpt: 6.34 GB peak on the 4060 Ti
         )
 
     @classmethod
     def mote_138m(cls) -> "MoteConfig":
-        """138,401,306 — Mote-96M taken deeper (main 12 → 18 layers); the target for the hyper-connection
-        spine (signed 2026-08-26). n_res 30 → 42, so `_init_weights` shrinks every out-projection's init
+        """138,401,306 — Mote-96M taken deeper (main 12 → 18 layers). n_res 30 → 42, so `_init_weights`
+        shrinks every out-projection's init
         by 1.18x; that is a transient, because Muon + weight decay drive ‖W‖ to an equilibrium
         ‖W‖ ∝ lr^0.478 that does not depend on where it started (docs/research/elr-2026-08-26.md)."""
         return cls(
@@ -271,7 +230,6 @@ class MoteConfig:
             encoder_layers=3,
             decoder_layers=3,
             main=RelationCfg(n_layers=18, d_model=768, n_heads=8, d_ff=2048),
-            mbp=MBPCfg(n_layers=2, n_heads=8, d_ff=2048, enabled=False),
             max_seq_len=16384,
         )
 
@@ -282,11 +240,11 @@ class MoteConfig:
 
     @classmethod
     def pilot(cls) -> "MoteConfig":
-        return cls.mote_13m()
+        return cls.mote_11m()
 
     @classmethod
     def local(cls) -> "MoteConfig":
-        return cls.mote_35m()
+        return cls.mote_32m()
 
     @classmethod
     def flagship(cls) -> "MoteConfig":
@@ -298,16 +256,19 @@ class MoteConfig:
 # mote/train/train.py hardcoded a different list; the two drifted apart unnoticed.
 PRESETS: Dict[str, Any] = {
     "mote-1m": MoteConfig.mote_1m,
-    "mote-13m": MoteConfig.mote_13m,
-    "mote-35m": MoteConfig.mote_35m,
+    "mote-11m": MoteConfig.mote_11m,
+    "mote-32m": MoteConfig.mote_32m,
     "mote-96m": MoteConfig.mote_96m,
     "mote-138m": MoteConfig.mote_138m,
 }
 PRESET_ALIASES: Dict[str, str] = {
     "smoke": "mote-1m",
-    "pilot": "mote-13m",
-    "local": "mote-35m",
+    "pilot": "mote-11m",
+    "local": "mote-32m",
     "flagship": "mote-96m",
+    # the sizes before the multi-byte head was retired (2026-08-29): queued argv and run.json keep resolving
+    "mote-13m": "mote-11m",
+    "mote-35m": "mote-32m",
 }
 PRESET_NAMES = tuple(PRESETS) + tuple(PRESET_ALIASES)
 

@@ -20,7 +20,6 @@ CUDA = torch.cuda.is_available()
 
 def _model(preset="mote-1m", seed=0, **dc):
     cfg = resolve_preset(preset)
-    cfg.mbp.enabled = False
     for k, v in dc.items():
         setattr(cfg.dc, k, v)
     torch.manual_seed(seed)
@@ -60,7 +59,7 @@ def test_an_engine_reads_a_long_prompt_in_windows():
     """`Engine._read` is the only path a prompt takes; a window of 0 is the old one-shot behaviour."""
     from mote.serve.engine import Engine
 
-    cfg, model = _model("mote-35m")
+    cfg, model = _model("mote-32m")
     cfg.prefill_window = 64
     e = Engine.from_model(model, cfg, device="cpu")
     ids = list(torch.randint(0, 256, (300,)).tolist())
@@ -105,7 +104,7 @@ def test_capacity_comes_from_a_measured_rate_not_from_max_seq_len():
 
 
 def test_new_arena_uses_bpic_when_it_has_one():
-    cfg, model = _model("mote-35m")
+    cfg, model = _model("mote-32m")
     guessed = model.new_arena("cpu")
     measured = model.new_arena("cpu", bpic=3.32)
     assert measured.capacity == RelationArena.capacity_for(cfg.max_seq_len, 3.32)

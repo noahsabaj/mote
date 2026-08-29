@@ -66,7 +66,7 @@ def sample_pairs(eng: Engine, prompts: List[str], temperature: float, max_bytes:
         for _ in range(2):
             ev: List[dict] = []
             eng.generate(with_system_card(msgs, n_params),
-                         GenParams(temperature=temperature, top_p=0.9, max_bytes=max_bytes, n_candidates=0),
+                         GenParams(temperature=temperature, top_p=0.9, max_bytes=max_bytes),
                          ev.append, threading.Event())
             replies.append(ev[-1]["text"] if ev and ev[-1]["type"] == "done" else "")
         a, b = replies

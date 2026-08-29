@@ -204,8 +204,7 @@
         bps: lastT?.bytes_per_sec,
         valBpb: last?.eval.val_bpb,
         bpic: last?.eval.val_bpic,
-        sep: last?.eval.boundary_on_separator_frac,
-        mbp: last?.eval.mbp_top1_acc
+        sep: last?.eval.boundary_on_separator_frac
       };
     })
   );
@@ -333,7 +332,6 @@
               <th>val bpb</th>
               <th>B/chunk</th>
               <th>@sep</th>
-              <th>mbp top-1</th>
             </tr>
           </thead>
           <tbody>
@@ -346,7 +344,6 @@
                 <td>{row.valBpb !== undefined ? num(row.valBpb, 3) : '—'}</td>
                 <td>{row.bpic !== undefined ? num(row.bpic, 2) : '—'}</td>
                 <td>{row.sep !== undefined ? pct(row.sep, 0) : '—'}</td>
-                <td>{row.mbp !== undefined ? pct(row.mbp, 0) : '—'}</td>
               </tr>
             {/each}
           </tbody>
@@ -378,10 +375,6 @@
           <dd>{num(latest.eval.val_bpic, 2)}</dd>
           <dt>Boundaries on separators</dt>
           <dd>{pct(latest.eval.boundary_on_separator_frac, 1)}</dd>
-          {#if latest.eval.mbp_top1_acc !== undefined}
-            <dt>Multi-byte top-1</dt>
-            <dd>{pct(latest.eval.mbp_top1_acc, 1)}</dd>
-          {/if}
         </dl>
 
         {#if latest.eval.sample}

@@ -26,7 +26,7 @@ mkdir -p "$OUT" docs/results
 
 common=(--preset local --data data/local_mix --optimizer muon --lr "$LR"
         --batch-size 4 --seq-len 2048 --grad-accum 4 --max-minutes "$MIN"
-        --eval-every 500 --ckpt-minutes 30 --no-mbp --eval-spread --seed 42)
+        --eval-every 500 --ckpt-minutes 30 --eval-spread --seed 42)
 
 echo "== 1/2  the reference: Muon, recording its per-matrix ELR =="
 python -m mote.cli train start -- "${common[@]}" \

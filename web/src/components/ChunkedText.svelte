@@ -19,7 +19,7 @@
     return kept.map((c) => ({
       key: c.index,
       label: `chunk ${c.index} · bytes ${c.start}–${c.end} · ${c.bytes} B`,
-      segments: trace.segmentsFor(c.start, c.end)
+      text: c.text
     }));
   });
 
@@ -31,8 +31,7 @@
 {#if structure}<span class="prose structured"
     >{#if hidden}<span class="elided">… {hidden} earlier chunks not shown …&#10;</span
       >{/if}{#each rows as row, r (row.key)}<span class="chunk" class:alt={r % 2 === 1} title={row.label}
-        >{#each row.segments as seg, i (i)}<span class:par={seg.mbp}>{seg.text}</span
-          >{/each}</span
+        >{row.text}</span
       >{/each}{#if streaming}<span
         class="caret"
         class:pending={trace.pending > 0}
@@ -55,7 +54,6 @@
 {#if structure}
   <p class="legend" aria-label="How to read this view">
     <span class="key"><span class="swatch-a"></span><span class="swatch-b"></span>one learned chunk each</span>
-    <span class="key"><span class="swatch-par">bytes</span> taken in parallel from the multi-byte head</span>
   </p>
 {/if}
 
@@ -77,13 +75,6 @@
   }
   .structured .chunk.alt {
     background: var(--chunk-b);
-  }
-
-  .structured .par {
-    text-decoration: underline;
-    text-decoration-color: var(--accent-line);
-    text-decoration-thickness: 1.5px;
-    text-underline-offset: 0.22em;
   }
 
   .elided {
@@ -137,12 +128,5 @@
   .swatch-b {
     background: var(--chunk-b);
     margin-left: -0.2em;
-  }
-  .swatch-par {
-    text-decoration: underline;
-    text-decoration-color: var(--accent-line);
-    text-decoration-thickness: 1.5px;
-    text-underline-offset: 0.22em;
-    color: var(--ink-2);
   }
 </style>

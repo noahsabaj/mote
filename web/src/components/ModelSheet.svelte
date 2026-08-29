@@ -69,8 +69,6 @@
       <dd>{info.architecture.main}</dd>
       <dt>Decoder</dt>
       <dd>{info.architecture.decoder_layers} layers</dd>
-      <dt>Multi-byte head</dt>
-      <dd>{info.architecture.mbp_layers} layers</dd>
       <dt>Context</dt>
       <dd>{info.context_limit_bytes.toLocaleString()} bytes</dd>
     </dl>

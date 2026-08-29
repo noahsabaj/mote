@@ -12,11 +12,13 @@ import numpy as np
 import pytest
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.model.moe import MoESwiGLU, collect_moe, gate_scale
 from mote.model.relation import SwiGLU
 from mote.train.muon import Muon, split_muon_params
+
+DEV = "cuda" if torch.cuda.is_available() else "cpu"  # the trainer refuses a missing GPU; the tests ask for what is there
 
 D, F_, E, K = 32, 16, 4, 2
 
@@ -121,7 +123,6 @@ def _tiny_cfg(**moe):
     return MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=2, d_model=32, n_heads=2, d_ff=64, moe_experts=4, moe_topk=2, **moe),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3, enabled=False),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
     )
 
@@ -137,7 +138,7 @@ def test_model_builds_trains_and_roundtrips(tmp_path):
     assert isinstance(layers[0].mlp, SwiGLU) and isinstance(layers[1].mlp, MoESwiGLU)
     assert layers[1].mlp.d_ff == 32  # d_ff // topk: active FLOPs of the dense FFN
     ids = torch.randint(0, 256, (2, 96))
-    loss, n, stats, _ = compute_losses(model, ids, 5.0, 0.0, 0.03)
+    loss, n, stats, _ = compute_losses(model, ids, 5.0, 0.03)
     assert "moe_aux" in stats and "moe_maxvio" in stats
     loss.backward()
     assert layers[1].mlp.w1.grad is not None and layers[1].mlp.router.weight.grad is not None
@@ -163,7 +164,6 @@ def test_model_builds_trains_and_roundtrips(tmp_path):
 
 def _fixture(tmp_path):
     cfg = _tiny_cfg()
-    cfg.mbp.enabled = True
     cfg_path = tmp_path / "tiny.json"
     cfg.save(cfg_path)
     rng = np.random.default_rng(0)
@@ -181,8 +181,8 @@ def test_trainer_runs_moe(tmp_path, router, opt):
     out = tmp_path / f"run_{router}"
     argv = ["--config", str(cfg_path), "--data", str(prefix), "--out", str(out), "--batch-size", "2", "--seq-len", "64",
             "--grad-accum", "2", "--lr", "1e-3", "--eval-every", "3", "--eval-batches", "1", "--log-every", "1",
-            "--ckpt-minutes", "99999", "--max-minutes", "99999", "--max-steps", "3", "--no-mbp",
-            "--moe", "4", "--moe-topk", "2", "--moe-router", router, "--optimizer", opt]
+            "--ckpt-minutes", "99999", "--max-minutes", "99999", "--max-steps", "3",
+            "--moe", "4", "--moe-topk", "2", "--moe-router", router, "--optimizer", opt, "--device", DEV]
     t = Trainer(argv)
     for _ in t.run():
         pass

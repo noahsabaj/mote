@@ -8,7 +8,7 @@ import threading
 import pytest
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams, _dist
 from mote.serve.graph import GraphDecoder
@@ -21,7 +21,6 @@ def _cfg():
     return MoteConfig(
         d_model_outer=64, encoder_layers=2, decoder_layers=1,
         main=RelationCfg(n_layers=2, d_model=96, n_heads=4, d_ff=128),
-        mbp=MBPCfg(enabled=False, n_layers=1, n_heads=2, d_ff=64),
         mamba3=Mamba3Cfg(d_state=32, headdim=32, expand=2), max_seq_len=512,
     )
 
@@ -150,7 +149,7 @@ def test_engine_graph_path_equals_eager_path(tmp_path, monkeypatch):
     eng = Engine(run / "last.pt", device=DEV)
     assert eng._graph_ok
     msgs = [{"role": "user", "content": "hello there"}]
-    params = GenParams(temperature=0.0, max_bytes=30, n_candidates=0)
+    params = GenParams(temperature=0.0, max_bytes=30)
 
     def run_(eng):
         evs = []

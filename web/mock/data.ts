@@ -95,7 +95,7 @@ export const CHECKPOINTS: CkptSpec[] = [
     created_at: '2026-08-23T08:01:55Z'
   },
   {
-    id: 'mock/ab_muon_nombp/last.pt',
+    id: 'mock/ab_muon/last.pt',
     step: 2000,
     val_bpb: 1.797,
     bytes_seen: 65536000,
@@ -193,8 +193,7 @@ export function modelPayload(): ModelInfo {
       outer_width: 256,
       encoder_layers: 2,
       decoder_layers: 2,
-      main: 'Relation 6L/384/8 heads',
-      mbp_layers: 2
+      main: 'Relation 6L/384/8 heads'
     },
     context_limit_bytes: 2048,
     device: { name: 'Mock device (development server, no GPU)', vram_total_mb: 8188, vram_used_mb: 912 },
@@ -202,8 +201,7 @@ export function modelPayload(): ModelInfo {
     defaults: {
       temperature: 0.8,
       top_p: 0.9,
-      max_bytes: 512,
-      n_candidates: 3
+      max_bytes: 512
     },
     // The backend sends these whenever a probe.json sits beside the checkpoint; the mock
     // reports them for the loaded run so the measured rendering is visible in dev, and leaves
@@ -314,7 +312,6 @@ export function runLog(id: string, since: number): { records: LogRecord[]; next:
       bytes_per_sec: 690000 + noise(step * 3) * 40000,
       train_bpb: Number(trainBpbAt(step).toFixed(4)),
       ce: Number(ce.toFixed(4)),
-      ce_mbp: Number((ce * 1.18).toFixed(4)),
       ratio: Number((0.04 + Math.abs(noise(step * 7)) * 0.05).toFixed(4)),
       bpic: Number((4.4 + Math.min(1.8, step / total * 2) + noise(step * 11) * 0.2).toFixed(3)),
       grad_norm: Number((0.9 + Math.abs(noise(step * 5)) * 1.6).toFixed(3))
@@ -330,7 +327,6 @@ export function runLog(id: string, since: number): { records: LogRecord[]; next:
           boundary_on_separator_frac: Number(
             Math.min(0.94, 0.31 + 0.6 * (1 - Math.exp(-step / 1400))).toFixed(4)
           ),
-          mbp_top1_acc: Number(Math.min(0.72, 0.12 + 0.7 * (1 - Math.exp(-step / 2200))).toFixed(4)),
           sample: SAMPLES[Math.min(SAMPLES.length - 1, Math.floor(step / (total / 3)))]
         }
       });

@@ -78,7 +78,7 @@ def test_each_row_of_a_batch_is_bounded_independently():
 def test_a_ceiling_caps_bytes_per_chunk_end_to_end():
     """What the whole thing is for: the boundary count a prompt produces becomes a number you can
     bound, which is what lets the serving arena be sized instead of grown."""
-    cfg = resolve_preset("mote-35m")
+    cfg = resolve_preset("mote-32m")
     cfg.dc.target_ratio_init = 5.0
     cfg.dc.bound_ceiling = 1.2
     torch.manual_seed(0)
@@ -93,7 +93,7 @@ def test_a_ceiling_caps_bytes_per_chunk_end_to_end():
 
 
 def test_an_unconfigured_router_routes_exactly_as_before():
-    cfg = resolve_preset("mote-35m")
+    cfg = resolve_preset("mote-32m")
     assert cfg.dc.bound_ceiling is None and cfg.dc.bound_floor == 0
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg)
@@ -107,7 +107,7 @@ def test_an_unconfigured_router_routes_exactly_as_before():
 
 
 def test_short_windows_are_not_bounded():
-    """A speculative round is three bytes. Pricing a budget over it would force a boundary the model
+    """A short continuation is three bytes. Pricing a budget over it would force a boundary the model
     did not ask for, so the projection only applies once a window is long enough to have a rate."""
     r = RoutingModule(8)
     r.target_ratio, r.bound_ceiling, r.bound_floor = 5.0, 1.0, 0
@@ -131,7 +131,7 @@ def test_decode_uses_its_own_threshold_not_the_projection():
         model.prefill(torch.randint(0, 256, (1, 32)), state)
         fired = 0
         for _ in range(32):
-            _, routing, is_b, _ = model.step(torch.tensor([[65]]), state)
+            _, routing, is_b = model.step(torch.tensor([[65]]), state)
             fired += int(is_b)
             assert bool(is_b) == bool(routing.boundary_prob[0, 1] > 0.99)
     model.routing_module.decode_threshold = 0.0

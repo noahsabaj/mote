@@ -175,15 +175,6 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
   let chunkTextStart = 0;
   let emitted = 0;
   let chunksClosed = 0;
-  let mbpProposed = 0;
-  let mbpAccepted = 0;
-  // Speculative accounting, same three counters mote/serve/engine.py keeps: one round per
-  // draft, one fix when verification rejects a draft byte, one replay when a prefix was
-  // already accepted and the state has to be rolled back.
-  let specRounds = 0;
-  let specFixes = 0;
-  let specReplays = 0;
-  let pendingFix = false;
   let pendingBuf: number[] = [];
   let decoded = '';
   const boundaryHistory: number[] = [];
@@ -196,19 +187,12 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
       bytes_per_sec: emitted / Math.max(0.001, elapsed / 1000),
       chunks: chunksClosed,
       bytes_per_chunk: chunksClosed ? emitted / chunksClosed : emitted,
-      mbp_proposed: mbpProposed,
-      mbp_accepted: mbpAccepted,
-      mbp_accept_rate: mbpProposed ? mbpAccepted / mbpProposed : 0,
-      spec_rounds: specRounds,
-      spec_fixes: specFixes,
-      spec_replays: specReplays,
       context_bytes: promptBytes + emitted,
       context_limit: contextLimit
     };
   };
 
   const rate = 26 + (seed % 32); // 26-57 bytes/s
-  let mbpRun = 0;
 
   for (let i = 0; i < bytes.length; i++) {
     if (!session.active || ws.readyState !== 1) break;
@@ -252,29 +236,7 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
       });
     }
 
-    // Multi-byte head: once in a while it proposes ahead and the proposal is accepted.
-    let source: 'nbp' | 'mbp' | 'fix' = 'nbp';
-    if (mbpRun > 0) {
-      mbpRun -= 1;
-      source = 'mbp';
-      mbpAccepted += 1;
-    } else if (pendingFix) {
-      // The draft was cut short: this byte is the correction verification drew instead.
-      pendingFix = false;
-      source = 'fix';
-    } else if (boundary && Math.random() < 0.42) {
-      mbpProposed += params.n_candidates;
-      const take = 1 + Math.floor(Math.random() * Math.max(1, params.n_candidates));
-      specRounds += 1;
-      if (take < params.n_candidates) {
-        specFixes += 1;
-        specReplays += 1; // take >= 1 here, so a prefix was always committed first
-        pendingFix = true;
-      }
-      mbpAccepted += 1;
-      mbpRun = take - 1;
-      source = 'mbp';
-    }
+    const source = 'nbp' as const;
 
     // UTF-8 assembly: continuation bytes complete nothing, so `text` stays null.
     pendingBuf.push(b);
@@ -317,8 +279,8 @@ async function stream(ws: WebSocket, req: ClientGenerate, session: Session): Pro
 
     if (emitted % 16 === 0) send(ws, { type: 'stats', ...stats() });
 
-    // Parallel acceptances arrive together; single bytes arrive at the sampling rate.
-    await sleep(source === 'mbp' && mbpRun > 0 ? 2 : (1000 / rate) * (0.65 + Math.random() * 0.8));
+    // Bytes arrive at the sampling rate.
+    await sleep((1000 / rate) * (0.65 + Math.random() * 0.8));
   }
 
   if (ws.readyState !== 1) return;

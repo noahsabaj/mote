@@ -14,8 +14,7 @@ only drains the rings every K replays (one sync per K bytes) and sees at most K-
 after a stop — and no state overshoot at all, because `done` freezes the step exactly at the stop.
 
 The Relation main step reads the arena at a static width (a bucket of rows ≥ S + K, masked past S), one
-captured graph per bucket; every Mamba-3 / routing / dechunk tensor is written in place. Graph mode is
-for models without a multi-byte head (the flagship); the 35M's speculative rounds stay eager.
+captured graph per bucket; every Mamba-3 / routing / dechunk tensor is written in place.
 """
 
 from __future__ import annotations
@@ -62,7 +61,6 @@ class GraphDecoder:
     K = 8  # replays per host sync
 
     def __init__(self, model: HNetForCausalLM, arena: RelationArena, device, stop_ids, ring_size: int, seed: int = 0, pool=None):
-        assert model.mbp_head is None, "graph decode is for models without a multi-byte head"
         self.model, self.arena, self.device = model, arena, torch.device(device)
         self.pool = pool  # the engine's serving MemPool id: captures allocate there instead of a private pool
         cfg = model.cfg

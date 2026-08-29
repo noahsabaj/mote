@@ -34,7 +34,7 @@ echo "== 1. the two shared SFT checkpoints (30 min each)"
 for MIX in plain neutral; do
   python -m mote.train.train --preset local --init-from "$BASE" --sft --data "data/ra_id_${MIX}" \
       --out "$OUT/sft_$MIX" --optimizer muon --lr 3e-4 --batch-size 4 --grad-accum 4 --seq-len 2048 \
-      --max-minutes 30 --eval-every 500 --ckpt-minutes 10 --no-mbp --eval-spread
+      --max-minutes 30 --eval-every 500 --ckpt-minutes 10 --eval-spread
   python -m mote.eval.probe --checkpoint "$OUT/sft_$MIX/last.pt" --out "$OUT/sft_$MIX/probe.json" | tail -3
 done
 

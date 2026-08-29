@@ -6,7 +6,7 @@ Every mixer exposes ``forward(x, ...)``, ``step(x, state)`` and ``allocate_infer
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -62,33 +62,6 @@ class Block(nn.Module):
             hidden = self.mlp(hidden)
         return hidden, residual, new_cache
 
-    # --- spine path -------------------------------------------------------------------------
-    # With a hyper-connection spine the stream state IS the residual, so the block no longer folds
-    # one: each sublayer becomes its own site, taking an already-read `u` and returning only its
-    # delta. `u` arrives in fp32, which is the dtype the ordinary path carries too (the embedding is
-    # fp32 and bf16 autocast downcasts the matmul inputs), so nothing needs casting here.
-    def spine_body(self, index: int, u: torch.Tensor, cache: Any = None, return_cache: bool = False, token_mask: Optional[torch.Tensor] = None):
-        """Sublayer `index` (0 = mixer, 1 = FFN) applied to `u`. Returns (delta, new_cache)."""
-        if index == 0:
-            hidden = self.norm1(u, prenorm=False)
-            if isinstance(self.mixer, FullRelation):
-                if return_cache:
-                    return self.mixer(hidden, cache=cache, return_cache=True)
-                return self.mixer(hidden, cache=cache), None
-            if return_cache:
-                return self.mixer(hidden, return_final_states=True, initial_states=cache)
-            return self.mixer(hidden), None
-        hidden = self.norm2(u, prenorm=False)
-        return (self.mlp(hidden, token_mask) if self.moe else self.mlp(hidden)), None
-
-    def spine_step(self, index: int, u: torch.Tensor, cache: Any):
-        if index == 0:
-            hidden = self.norm1(u, prenorm=False)
-            if isinstance(self.mixer, FullRelation):
-                return self.mixer(hidden, cache=cache, return_cache=True)
-            return self.mixer.step(hidden, cache)
-        return (self.mlp(self.norm2(u, prenorm=False))), None
-
     def allocate_inference_cache(self, batch_size: int, device, dtype=None):
         if isinstance(self.mixer, FullRelation):
             return None  # Relation cache is built lazily from the first prefill
@@ -98,62 +71,17 @@ class Block(nn.Module):
 class Isotropic(nn.Module):
     """A stack of blocks followed by a final RMSNorm that folds in the residual."""
 
-    def __init__(self, blocks: List[Block], d_model: int, eps: float = 1e-5, device=None, dtype=None,
-                 spine_cfg=None, site_offset: int = 0):
+    def __init__(self, blocks: List[Block], d_model: int, eps: float = 1e-5, device=None, dtype=None):
         super().__init__()
         self.layers = nn.ModuleList(blocks)
         self.rmsnorm = RMSNorm(d_model, eps=eps, device=device, dtype=dtype)
         self.grad_checkpoint = False  # recompute each block in the backward (trainer flag --ckpt-main)
-        # One spine site per sublayer. `site_offset` keeps HC's rotating read (`e_{k mod n}`) counting
-        # across the whole spine rather than restarting in each stack — it is the only thing in the
-        # initialisation that breaks the stream-permutation symmetry, so it must be global.
-        self.spines = None
-        if spine_cfg is not None and spine_cfg.mode != "off":
-            from .spine import Spine
-            self.spines = nn.ModuleList([
-                Spine(d_model, spine_cfg.n, site_offset + i, mode=spine_cfg.mode, project=spine_cfg.project,
-                      dynamic=spine_cfg.dynamic, post_scale=spine_cfg.post_scale, eps=eps, device=device)
-                for i in range(sum(b.height for b in blocks))
-            ])
 
     @property
     def height(self) -> int:
         return sum(b.height for b in self.layers)
 
-    def spine_forward(self, x: torch.Tensor, caches: Optional[List[Any]] = None, return_caches: bool = False, token_mask: Optional[torch.Tensor] = None):
-        """x: [B, L, n, d_stream] in, same out. No final RMSNorm — the stream state is carried on to
-        the next stack, and the caller norms once after collapsing it."""
-        new_caches: List[Any] = []
-        site = 0
-        for i, layer in enumerate(self.layers):
-            cache = caches[i] if caches is not None else None
-            for j in range(layer.height):
-                spine = self.spines[site]
-                site += 1
-                u, carried = spine.read(x)
-                y, c = layer.spine_body(j, u, cache=cache, return_cache=return_caches and j == 0, token_mask=token_mask)
-                x = spine.write(x, y, carried)
-                if j == 0:
-                    new_caches.append(c)
-        return (x, new_caches) if return_caches else x
-
-    def spine_step(self, x: torch.Tensor, caches: List[Any]):
-        new_caches: List[Any] = []
-        site = 0
-        for layer, cache in zip(self.layers, caches):
-            for j in range(layer.height):
-                spine = self.spines[site]
-                site += 1
-                u, carried = spine.read(x)
-                y, c = layer.spine_step(j, u, cache)
-                x = spine.write(x, y, carried)
-                if j == 0:
-                    new_caches.append(c)
-        return x, new_caches
-
     def forward(self, hidden: torch.Tensor, caches: Optional[List[Any]] = None, return_caches: bool = False, token_mask: Optional[torch.Tensor] = None):
-        if self.spines is not None:
-            return self.spine_forward(hidden, caches, return_caches, token_mask)
         residual = None
         new_caches: List[Any] = []
         use_ckpt = self.grad_checkpoint and torch.is_grad_enabled() and caches is None and not return_caches
@@ -168,8 +96,6 @@ class Isotropic(nn.Module):
         return (hidden, new_caches) if return_caches else hidden
 
     def step(self, hidden: torch.Tensor, caches: List[Any]) -> Tuple[torch.Tensor, List[Any]]:
-        if self.spines is not None:
-            return self.spine_step(hidden, caches)
         residual = None
         new_caches: List[Any] = []
         for layer, cache in zip(self.layers, caches):
@@ -183,7 +109,7 @@ class Isotropic(nn.Module):
 
 
 # --------------------------------------------------------------------------------------
-def make_mamba3_stack(n_layers: int, d_model: int, cfg, eps: float, layer_offset: int = 0, residual_in_fp32: bool = True, device=None, dtype=None, spine_cfg=None, site_offset: int = 0) -> Isotropic:
+def make_mamba3_stack(n_layers: int, d_model: int, cfg, eps: float, layer_offset: int = 0, residual_in_fp32: bool = True, device=None, dtype=None) -> Isotropic:
     """Encoder / decoder: Mamba-3 mixers without FFN ('m' blocks)."""
     blocks = []
     for i in range(n_layers):
@@ -201,7 +127,7 @@ def make_mamba3_stack(n_layers: int, d_model: int, cfg, eps: float, layer_offset
             dtype=dtype,
         )
         blocks.append(Block(d_model, mixer, None, eps=eps, residual_in_fp32=residual_in_fp32, device=device, dtype=dtype))
-    return Isotropic(blocks, d_model, eps=eps, device=device, dtype=dtype, spine_cfg=spine_cfg, site_offset=site_offset)
+    return Isotropic(blocks, d_model, eps=eps, device=device, dtype=dtype)
 
 
 def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=None, dtype=None) -> Isotropic:
@@ -210,12 +136,7 @@ def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=N
     blocks = []
     n_exp = int(getattr(cfg, "moe_experts", 0) or 0)
     for i in range(cfg.n_layers):
-        mixer_cls = FullRelation
-        if getattr(cfg, "mixer", "relation") == "attention":
-            from .attention import CausalAttention
-
-            mixer_cls = CausalAttention
-        mixer = mixer_cls(
+        mixer = FullRelation(
             cfg.d_model,
             cfg.n_heads,
             layer_idx=i,
@@ -226,7 +147,6 @@ def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=N
             qk_norm=getattr(cfg, "qk_norm", False),
             device=device,
             dtype=dtype,
-                    window=getattr(cfg, "window_chunks", None),
         )
         if n_exp > 1 and not (i == 0 and getattr(cfg, "moe_dense_first", False)):
             f = cfg.moe_d_ff or max(cfg.d_ff // cfg.moe_topk, 1)

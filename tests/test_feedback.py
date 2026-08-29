@@ -8,17 +8,16 @@ import numpy as np
 import pytest
 import torch
 
-from mote.config import FeedbackCfg, MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import FeedbackCfg, Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.feedback import FeedbackInput, LatentFusion, feedback_from, plain_mask, shift_right
 from mote.model.hnet import HNetForCausalLM
 from mote.train.train import Trainer, compute_losses, evaluate, iter_pass_losses, load_checkpoint
 
 
-def _cfg(level: str, mbp: bool = False) -> MoteConfig:
+def _cfg(level: str) -> MoteConfig:
     return MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=2, d_model=48, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3, enabled=mbp),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
         feedback=FeedbackCfg(level=level),
     )
@@ -70,17 +69,17 @@ def test_multi_pass_loss_trains_the_fusion(level):
     model = HNetForCausalLM(_cfg(level)).train()
     batch = _ids(L=41)
     gen = torch.Generator().manual_seed(1)
-    loss, n, stats, out = compute_losses(model, batch, 5.0, 0.0, 0.03, passes=3, gen=gen)
+    loss, n, stats, out = compute_losses(model, batch, 5.0, 0.03, passes=3, gen=gen)
     assert "ce_fb_sum" in stats and float(n) == batch.shape[0] * (batch.shape[1] - 1)
     loss.backward()
     assert model.fusion.w_u.weight.grad is not None and model.fusion.w_u.weight.grad.abs().sum() > 0
     # the same mixture drawn on the same generator is the same loss: multi-pass training stays reproducible
     model.zero_grad(set_to_none=True)
-    loss2, *_ = compute_losses(model, batch, 5.0, 0.0, 0.03, passes=3, gen=torch.Generator().manual_seed(1))
+    loss2, *_ = compute_losses(model, batch, 5.0, 0.03, passes=3, gen=torch.Generator().manual_seed(1))
     assert torch.equal(loss.detach(), loss2.detach())
     # detach mode: per-pass backward works and reaches the fusion through the later passes
     model.zero_grad(set_to_none=True)
-    for j, (lk, nk, sk, _o) in enumerate(iter_pass_losses(model, batch, 5.0, 0.0, 0.03, passes=2, gen=gen, detach=True)):
+    for j, (lk, nk, sk, _o) in enumerate(iter_pass_losses(model, batch, 5.0, 0.03, passes=2, gen=gen, detach=True)):
         (lk if j == 0 else lk / 1).backward()
     assert model.fusion.w_g.weight.grad is not None
 
@@ -97,7 +96,7 @@ def test_soft_decoding_carries_the_top_state(level):
         assert carried is not None and carried.shape[1] == 1
         before = carried.clone()
         for b in (65, 66, 67):
-            logits, routing, is_b, _ = model.step(torch.tensor([[b]]), state)
+            logits, routing, is_b = model.step(torch.tensor([[b]]), state)
         after = state.h_prev if level == "byte" else state.z_prev
         assert after is not None and after.shape == before.shape
         if level == "byte":

@@ -23,7 +23,6 @@ def _grads(seed=0, steps=1):
     from mote.train.train import compute_losses
 
     cfg = resolve_preset("mote-1m")
-    cfg.mbp.enabled = False
     torch.manual_seed(seed)
     m = HNetForCausalLM(cfg).cuda()
     x = torch.randint(0, 256, (2, 256), device="cuda")
@@ -32,7 +31,7 @@ def _grads(seed=0, steps=1):
         for p in m.parameters():
             p.grad = None
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            loss, n, _, _ = compute_losses(m, x, cfg.dc.target_ratio_init, 0.0, cfg.dc.ratio_loss_weight, None)
+            loss, n, _, _ = compute_losses(m, x, cfg.dc.target_ratio_init, cfg.dc.ratio_loss_weight, None)
         (loss / n).backward()
         out = {k: p.grad.detach().clone() for k, p in m.named_parameters() if p.grad is not None}
     return out, float(loss) / n

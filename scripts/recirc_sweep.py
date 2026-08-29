@@ -50,7 +50,6 @@ def load_model(path: Path, ema: bool):
             for p, v in zip(model.parameters(), vals):
                 p.copy_(v.to(p.dtype))
     model.eval()
-    assert not model.spine_on, "this harness reconstructs the plain (spine-off) wiring"
     return model, cfg, int(ck["step"])
 
 

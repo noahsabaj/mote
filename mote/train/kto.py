@@ -38,7 +38,7 @@ import torch
 import torch.nn.functional as F
 
 from ..config import MoteConfig
-from ..model.hnet import HNetForCausalLM
+from ..model.hnet import HNetForCausalLM, strip_retired
 from ..tokenizer import ByteTokenizer, ChatMessage
 from .dpo import pad_batch, seq_logprob
 
@@ -95,9 +95,9 @@ def main(argv=None):
     ck = torch.load(args.init_from, map_location="cpu", weights_only=True)
     cfg = MoteConfig.from_dict(ck["config"])
     policy = HNetForCausalLM(cfg, device=device)
-    policy.load_state_dict(ck["model"])
+    policy.load_state_dict(strip_retired(ck["model"]))
     ref = HNetForCausalLM(cfg, device=device)
-    ref.load_state_dict(ck["model"])
+    ref.load_state_dict(strip_retired(ck["model"]))
     ref.eval()
     for p in ref.parameters():
         p.requires_grad_(False)

@@ -24,7 +24,7 @@ MIRROR = {  # run.json key -> flag (value flags); the trunk's recipe, nothing el
     "lr": "--lr", "clip": "--clip", "beta2": "--beta2", "eval_batches": "--eval-batches", "eval_every": "--eval-every",
     "bound_floor": "--bound-floor", "bound_ceiling": "--bound-ceiling", "seed": "--seed", "ckpt_minutes": "--ckpt-minutes",
 }
-MIRROR_FLAGS = {"ckpt_main": "--ckpt-main", "no_mbp": "--no-mbp", "eval_spread": "--eval-spread", "tf32": "--tf32", "qk_norm": "--qk-norm"}
+MIRROR_FLAGS = {"ckpt_main": "--ckpt-main", "eval_spread": "--eval-spread", "tf32": "--tf32", "qk_norm": "--qk-norm"}
 
 
 def main() -> int:

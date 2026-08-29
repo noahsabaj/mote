@@ -117,7 +117,7 @@
   // What the *next* reply will be drawn at. The transcript already discloses what each past
   // reply was drawn at, so this reads forward: the two never say the same thing twice.
   // Only the randomness knobs are named — they are what changes the character of a reply, and
-  // naming all four would reflow the toolbar mid-drag. A cap or draft-length change adds a dot.
+  // naming all three would reflow the toolbar mid-drag. A cap change adds a dot.
   const summary = $derived(
     settings.offDefaultKeys
       .filter((k) => k === 'temperature' || k === 'top_p')
@@ -125,7 +125,7 @@
       .join(' · ')
   );
   const otherChanged = $derived(
-    settings.offDefaultKeys.some((k) => k === 'max_bytes' || k === 'n_candidates')
+    settings.offDefaultKeys.some((k) => k === 'max_bytes')
   );
   const spoken = $derived(
     settings.offDefaultKeys.map((k) => showParam(k, settings.params[k])).join(', ')

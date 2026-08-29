@@ -104,7 +104,6 @@ class FullRelation(nn.Module):
         lambda_init: float = 0.5,
         rope_theta: float = 10000.0,
         givens: bool = True,
-        window: int | None = None,
         qk_norm: bool = False,
         device=None,
         dtype=None,
@@ -118,7 +117,6 @@ class FullRelation(nn.Module):
         self.layer_idx = layer_idx
         self.tau_s = tau_s
         self.rope_theta = rope_theta
-        self.window = window  # windowed-main A/B: each chunk sees at most the last `window` chunks
         self.use_givens = givens
         self.telemetry: Optional[dict] = None  # set to a dict by the serving engine to collect live values
 
@@ -209,7 +207,7 @@ class FullRelation(nn.Module):
         Sall = S + T
         new_cache = cache if arena else (p2_all, info_all)
 
-        if USE_FLASH and HAS_TRITON and (x.is_cuda or _INTERPRET) and T >= FLASH_MIN_T and self.window is None:
+        if USE_FLASH and HAS_TRITON and (x.is_cuda or _INTERPRET) and T >= FLASH_MIN_T:
             y, g = flash_relation(p1, p2_all, info_all, self.lam, self.tau_s, q_start=S)
             out = self.wo(y.transpose(1, 2).reshape(B, T, D))
             extras = []
@@ -227,8 +225,6 @@ class FullRelation(nn.Module):
         kj = torch.arange(0, Sall, device=x.device)
         is_self = qi[:, None] == kj[None, :]
         is_past = kj[None, :] < qi[:, None]
-        if self.window is not None:
-            is_past = is_past & (qi[:, None] - kj[None, :] < self.window)
         log_i = torch.log((qi + 1).float())[:, None]  # 1-based count correction
         r = torch.where(
             is_self,

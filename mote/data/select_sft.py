@@ -37,14 +37,14 @@ import torch
 import torch.nn.functional as F
 
 from ..config import MoteConfig
-from ..model.hnet import HNetForCausalLM
+from ..model.hnet import HNetForCausalLM, strip_retired
 from .loader import ByteShard
 
 
 def _load(path: str, device) -> HNetForCausalLM:
     ck = torch.load(path, map_location="cpu", weights_only=True)
     model = HNetForCausalLM(MoteConfig.from_dict(ck["config"]), device=device)
-    model.load_state_dict(ck["model"])
+    model.load_state_dict(strip_retired(ck["model"]))
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)

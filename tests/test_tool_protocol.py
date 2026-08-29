@@ -7,7 +7,7 @@ import threading
 import pytest
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams
 from mote.tokenizer import ASSISTANT_ID, BOS_ID, CALL_ID, EOS_ID, RESULT_ID, USER_ID, VOCAB_SIZE, ByteTokenizer, ChatMessage, parse_call
@@ -40,7 +40,6 @@ def _tiny_engine(tmp_path):
     cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3, enabled=False),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
     )
     torch.manual_seed(0)
@@ -69,7 +68,7 @@ def test_tool_hook_round_trip(tmp_path, only_result_stops):
     seen = []
     eng.register_tool("echo", lambda a: (seen.append(a), f"pong:{a}")[1])
     script = [ord("A"), CALL_ID, *b"echo: hi", RESULT_ID] + [ord("b")] * 21  # 10 + 9 injected + 21 = the 40-byte budget
-    ev = _run(eng, GenParams(temperature=0.0, top_p=1.0, max_bytes=40, n_candidates=0, script=list(script)))
+    ev = _run(eng, GenParams(temperature=0.0, top_p=1.0, max_bytes=40, script=list(script)))
     tools = [e for e in ev if e["type"] == "tool"]
     done = ev[-1]
     assert seen == ["hi"] and len(tools) == 1
@@ -91,17 +90,17 @@ def test_tool_hook_round_trip(tmp_path, only_result_stops):
 def test_unknown_tool_and_call_cap(tmp_path, only_result_stops):
     eng = _tiny_engine(tmp_path)
     script = [CALL_ID, *b"nope: x", RESULT_ID, CALL_ID, *b"nope: y", RESULT_ID]
-    ev = _run(eng, GenParams(temperature=0.0, top_p=1.0, max_bytes=60, n_candidates=0, max_calls=1, script=list(script)))
+    ev = _run(eng, GenParams(temperature=0.0, top_p=1.0, max_bytes=60, max_calls=1, script=list(script)))
     tools = [e for e in ev if e["type"] == "tool"]
     assert len(tools) == 1 and tools[0]["result"] == "(no such tool: nope)" and tools[0]["args"] == "x"
     assert ev[-1]["reason"] == "eos" and ev[-1]["calls"] == 1  # the second <|result|> ends the reply: the cap is 1
 
-    ev = _run(eng, GenParams(temperature=0.0, top_p=1.0, max_bytes=30, n_candidates=0, max_calls=0, script=[CALL_ID, *b"nope: x", RESULT_ID]))
+    ev = _run(eng, GenParams(temperature=0.0, top_p=1.0, max_bytes=30, max_calls=0, script=[CALL_ID, *b"nope: x", RESULT_ID]))
     assert not [e for e in ev if e["type"] == "tool"] and ev[-1]["reason"] == "eos" and ev[-1]["calls"] == 0
 
 
 def test_result_without_call_is_a_plain_stop(tmp_path, only_result_stops):
     eng = _tiny_engine(tmp_path)
     eng.register_tool("echo", lambda a: "never")
-    ev = _run(eng, GenParams(temperature=0.0, top_p=1.0, max_bytes=30, n_candidates=0, script=[ord("x"), RESULT_ID]))
+    ev = _run(eng, GenParams(temperature=0.0, top_p=1.0, max_bytes=30, script=[ord("x"), RESULT_ID]))
     assert ev[-1]["reason"] == "eos" and ev[-1]["calls"] == 0 and ev[-1]["text"] == "x"

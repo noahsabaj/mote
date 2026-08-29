@@ -86,7 +86,7 @@ def heldout_items(n: int, locales: List[str], seed_base: int = SEED_BASE, per_tr
 def _reply(eng: Engine, prompt: str, temperature: float, max_bytes: int) -> str:
     ev: List[dict] = []
     msgs = with_system_card([{"role": "user", "content": prompt}], eng.info()["params"])
-    eng.generate(msgs, GenParams(temperature=temperature, top_p=1.0, max_bytes=max_bytes, n_candidates=0), ev.append, threading.Event())
+    eng.generate(msgs, GenParams(temperature=temperature, top_p=1.0, max_bytes=max_bytes), ev.append, threading.Event())
     return ev[-1]["text"] if ev and ev[-1]["type"] == "done" else ""
 
 

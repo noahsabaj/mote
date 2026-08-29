@@ -12,13 +12,15 @@ import numpy as np
 import pytest
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.data.build_local import build_local
 from mote.data.build_mix import skip_after, skip_docs
 from mote.data.loader import ByteShard, MixedShard
 from mote.data.sources import ANNEAL, FLAGSHIP
 from mote.tokenizer import ASSISTANT_ID, BOS_ID, EOS_ID
 from mote.train.train import Trainer, parse_mix_spec, schedule_lr, wsd_lr
+
+DEV = "cuda" if torch.cuda.is_available() else "cpu"  # the trainer refuses a missing GPU; the tests ask for what is there
 
 
 def test_three_schedules():
@@ -36,7 +38,6 @@ def test_three_schedules():
     assert br[0] == base and all(x == base for x in br[:32])  # flat while mix C is being absorbed
     assert all(a >= b for a, b in zip(br, br[1:])) and br[-1] == pytest.approx(0.0)
     assert schedule_lr("branch", 900, 1000, base, min_ratio=0.0) == pytest.approx(0.5 * base)  # linear
-    assert schedule_lr("cooldown", 900, 1000, base, min_ratio=0.0) == pytest.approx(0.5 * base)  # alias
     # `constant`: the no-decay arm of the 2x2 — same data, same length, no decay at all.
     assert all(schedule_lr("constant", s, 1000, base) == base for s in (0, 500, 999, 1000))
     # wsd is untouched: every lab arm on record decayed to 0.1x, and --min-lr-ratio defaults per-schedule
@@ -131,7 +132,6 @@ def _fixture(tmp_path):
     cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3, enabled=False),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
     )
     cfg_path = tmp_path / "tiny.json"
@@ -147,7 +147,7 @@ def _argv(cfg_path, prefix, out, extra=()):
     return ["--config", str(cfg_path), "--data", str(prefix), "--out", str(out),
             "--batch-size", "2", "--seq-len", "64", "--grad-accum", "1", "--lr", "1e-3",
             "--eval-every", "1000", "--eval-batches", "1", "--log-every", "1",
-            "--ckpt-minutes", "99999", "--max-minutes", "99999", *extra]
+            "--ckpt-minutes", "99999", "--max-minutes", "99999", "--device", DEV, *extra]
 
 
 def _log(out):

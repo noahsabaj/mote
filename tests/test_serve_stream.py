@@ -10,18 +10,17 @@ import time
 import pytest
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _tiny_run(tmp_path, mbp: bool):
+def _tiny_run(tmp_path):
     cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3, enabled=mbp),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
     )
     torch.manual_seed(0)
@@ -32,9 +31,9 @@ def _tiny_run(tmp_path, mbp: bool):
     return run
 
 
-def _engine(tmp_path, monkeypatch, gated: bool, mbp: bool = True):
+def _engine(tmp_path, monkeypatch, gated: bool):
     monkeypatch.setenv("MOTE_SERVE_GATED", "1" if gated else "0")
-    run = _tiny_run(tmp_path, mbp)
+    run = _tiny_run(tmp_path)
     eng = Engine(run / "last.pt", device=DEV)
     eng.gpu_gate = threading.Lock()
     return eng
@@ -84,7 +83,7 @@ def test_reply_identical_with_and_without_gate(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(DEV != "cuda", reason="needs the GPU")
 def test_reply_unchanged_under_a_default_stream_load(tmp_path, monkeypatch):
-    eng = _engine(tmp_path, monkeypatch, False, mbp=False)  # no multi-byte head: the graph decoder runs
+    eng = _engine(tmp_path, monkeypatch, False)  # the graph decoder runs
     quiet = _reply(eng, 48)
     stop = threading.Event()
 

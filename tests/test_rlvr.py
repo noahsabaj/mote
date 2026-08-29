@@ -7,7 +7,7 @@ import json
 import pytest
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams
 from mote.serve.jobs import _argparser_for, _job_args, make_trainer
@@ -20,7 +20,6 @@ def _tiny_ckpt(tmp_path):
     cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3, enabled=False),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=2048,
     )
     torch.manual_seed(0)
@@ -93,7 +92,7 @@ def test_engine_from_model_serves_a_live_model(tmp_path):
     assert live.ckpt_name == "rl/policy.pt" and live.info()["params"] == ref.info()["params"]
     ev = []
     import threading
-    live.generate([{"role": "user", "content": "hi"}], GenParams(temperature=0.0, top_p=1.0, max_bytes=8, n_candidates=0),
+    live.generate([{"role": "user", "content": "hi"}], GenParams(temperature=0.0, top_p=1.0, max_bytes=8),
                   ev.append, threading.Event(), context={"want_ids": True})
     assert ev[-1]["type"] == "done" and len(ev[-1]["ids"]) == len(ev[-1]["mask"]) and ev[-1]["prompt_ids"]
 

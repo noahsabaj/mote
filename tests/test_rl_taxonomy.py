@@ -3,7 +3,7 @@ sim tasks with two tiny checkpoints (every expert step scored over the state's l
 
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.eval.rl_taxonomy import CATEGORIES, categorize, run, state_walk
 from mote.model.hnet import HNetForCausalLM
 from mote.sim.tasks import heldout_tasks
@@ -25,7 +25,6 @@ def _ckpt(tmp_path, name, seed):
     cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3, enabled=False),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=4096,
     )
     torch.manual_seed(seed)

@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.dc import ratio_loss, atdc_target_ratio
 from mote.model.hnet import HNetForCausalLM
 from mote.model.mamba3 import HAS_MAMBA3_KERNEL, Mamba3Mixer
@@ -21,7 +21,6 @@ def small_cfg() -> MoteConfig:
         encoder_layers=1,
         decoder_layers=1,
         main=RelationCfg(n_layers=2, d_model=96, n_heads=4, d_ff=128),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=128, n_candidates=3),
         mamba3=Mamba3Cfg(d_state=32, headdim=32, expand=2),
         max_seq_len=128,
     )
@@ -120,11 +119,10 @@ def test_hnet_forward_backward_and_decode_equivalence():
     V = cfg.pad_vocab_to
     ids = torch.randint(0, 256, (2, 40), device=DEV)
     out = model(ids)
-    assert out.logits.shape == (2, 40, V) and out.mbp_logits.shape == (2, 40, V)
+    assert out.logits.shape == (2, 40, V)
     assert torch.all(out.routing.boundary_mask[:, 0])
     loss = (
         F.cross_entropy(out.logits[:, :-1].reshape(-1, V), ids[:, 1:].reshape(-1))
-        + F.cross_entropy(out.mbp_logits[:, :-1].reshape(-1, V), ids[:, 1:].reshape(-1))
         + 0.03 * ratio_loss(out.routing.boundary_prob, out.routing.boundary_mask, torch.ones_like(ids, dtype=torch.bool), 6.0)
     )
     loss.backward()
@@ -141,15 +139,13 @@ def test_hnet_forward_backward_and_decode_equivalence():
         assert torch.allclose(pre.logits, full.logits[:, :25], atol=2e-3, rtol=2e-3), (pre.logits - full.logits[:, :25]).abs().max()
         assert torch.equal(pre.routing.boundary_mask, full.routing.boundary_mask[:, :25])
         for t in range(25, 40):
-            lg, routing, is_b, mbp = model.step(ids1[:, t : t + 1], st)
+            lg, routing, is_b = model.step(ids1[:, t : t + 1], st)
             assert is_b == bool(full.routing.boundary_mask[0, t])
             assert torch.allclose(lg[:, 0], full.logits[:, t], atol=2e-3, rtol=2e-3), (t, (lg[:, 0] - full.logits[:, t]).abs().max())
-            if is_b:
-                assert mbp is not None and mbp.shape == (1, cfg.mbp.n_candidates, V)
 
 
 def test_param_count_pilot_and_stage_groups():
-    cfg = MoteConfig.mote_13m()
+    cfg = MoteConfig.mote_11m()
     model = HNetForCausalLM(cfg)
     n = model.num_params()
     assert 5e6 < n < 30e6, n

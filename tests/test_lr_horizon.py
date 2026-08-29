@@ -7,16 +7,17 @@ import math
 import numpy as np
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.train.lr_horizon import fit, parabola_vertex, predict, read_run
 from mote.train.train import Trainer
+
+DEV = "cuda" if torch.cuda.is_available() else "cpu"  # the trainer refuses a missing GPU; the tests ask for what is there
 
 
 def _fixture(tmp_path):
     cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3, enabled=False),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
     )
     cfg_path = tmp_path / "tiny.json"
@@ -31,9 +32,9 @@ def _fixture(tmp_path):
 def test_eval_ema_logged_and_checkpointed(tmp_path):
     cfg_path, prefix = _fixture(tmp_path)
     out = tmp_path / "run"
-    argv = ["--config", str(cfg_path), "--data", str(prefix), "--out", str(out), "--batch-size", "2", "--seq-len", "64",
+    argv = ["--config", str(cfg_path), "--data", str(prefix), "--out", str(out), "--device", DEV, "--batch-size", "2", "--seq-len", "64",
             "--grad-accum", "1", "--lr", "1e-3", "--eval-every", "2", "--eval-batches", "1", "--log-every", "1",
-            "--ckpt-minutes", "0", "--max-minutes", "99999", "--max-steps", "2", "--no-mbp", "--eval-ema", "0.5"]
+            "--ckpt-minutes", "0", "--max-minutes", "99999", "--max-steps", "2", "--eval-ema", "0.5"]
     t = Trainer(argv)
     for _ in t.run():
         pass

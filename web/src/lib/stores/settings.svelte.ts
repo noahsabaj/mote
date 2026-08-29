@@ -29,8 +29,7 @@ export interface ParamSpec {
 export const SHORT: Record<keyof SamplingParams, string> = {
   temperature: 'T',
   top_p: 'top-p',
-  max_bytes: 'max',
-  n_candidates: 'n'
+  max_bytes: 'max'
 };
 
 export const GROUP_LABELS: Record<ParamGroup, string> = {
@@ -67,16 +66,6 @@ export const PARAM_SPECS: ParamSpec[] = [
     min: 32,
     max: 4096,
     step: 32,
-    digits: 0
-  },
-  {
-    key: 'n_candidates',
-    label: 'Draft length n',
-    hint: 'Bytes the multi-byte head drafts at each chunk boundary; the model verifies them exactly (0 = off). Speed only — an accepted draft byte is distributed exactly as a sampled one.',
-    group: 'limits',
-    min: 0,
-    max: 8,
-    step: 1,
     digits: 0
   }
 ];
@@ -151,8 +140,7 @@ export function parseValue(key: keyof SamplingParams, text: string): number | nu
   if (!text.trim() || !Number.isFinite(v)) return null;
   if (!spec) return v;
   const clamped = Math.min(spec.max, Math.max(spec.min, v));
-  // Fractional bytes and fractional draft lengths do not exist, so a typed 1024.7 on those
-  // knobs is a typo rather than a preference.
+  // Fractional bytes do not exist, so a typed 1024.7 on that knob is a typo rather than a preference.
   return spec.digits === 0 ? Math.round(clamped) : clamped;
 }
 
@@ -165,8 +153,7 @@ export function showParam(key: keyof SamplingParams, v: number): string {
 const FALLBACK: SamplingParams = {
   temperature: 0.8,
   top_p: 0.9,
-  max_bytes: 512,
-  n_candidates: 3
+  max_bytes: 512
 };
 
 /** Slider steps are decimal, so a dragged 0.8 and a default 0.8 can differ in the last bit. */

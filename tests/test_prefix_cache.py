@@ -7,7 +7,7 @@ import threading
 
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.arena import RelationArena
 from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams
@@ -18,7 +18,6 @@ def _cfg():
     return MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
     )
 
@@ -52,8 +51,8 @@ def test_split_prefill_matches_cold_prefill():
         assert torch.allclose(lg[0, -1], out.logits[0, -1], atol=1e-4, rtol=1e-4), (lg[0, -1] - out.logits[0, -1]).abs().max()
         assert parked.main.n == cold.main.n
         nb = torch.tensor([[65]])
-        a, _, _, _ = model.step(nb, cold)
-        b, _, _, _ = model.step(nb, parked)
+        a, _, _ = model.step(nb, cold)
+        b, _, _ = model.step(nb, parked)
         assert torch.allclose(a, b, atol=1e-4, rtol=1e-4)
         # the source of a moved state is untouched by continuing the copy: a second copy continues identically
         parked2 = HNetForCausalLM.move_state(warm, "cpu")
@@ -124,7 +123,7 @@ def test_engine_reuses_the_previous_turn_and_verifies(tmp_path, monkeypatch):
 
     monkeypatch.setattr(E, "STOP_IDS", set())  # a random-init model samples EOS at once; keep the stream going
     eng = _engine(tmp_path)
-    params = GenParams(temperature=0.0, max_bytes=10, n_candidates=0)
+    params = GenParams(temperature=0.0, max_bytes=10)
 
     def run(messages, context=None):
         evs = []

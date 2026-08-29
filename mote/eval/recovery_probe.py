@@ -123,7 +123,7 @@ def run(eng: Engine, items: List[Dict]) -> Dict:
             {"role": "user", "content": it["refusal"]},
         ], eng.info()["params"])
         ev: List[dict] = []
-        eng.generate(msgs, GenParams(temperature=0.0, top_p=1.0, max_bytes=MAX_REPLY, n_candidates=0),
+        eng.generate(msgs, GenParams(temperature=0.0, top_p=1.0, max_bytes=MAX_REPLY),
                      ev.append, threading.Event())
         reply = (ev[-1]["text"] if ev and ev[-1]["type"] == "done" else "").strip()
         kind = classify(reply, it["refused_call"], _parser_for(it))

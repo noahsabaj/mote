@@ -65,7 +65,7 @@ def load_items(n: int, seed: int) -> List[Dict]:
 def _reply(eng: Engine, content: str) -> str:
     ev: List[dict] = []
     msgs = with_system_card([{"role": "user", "content": content}], eng.info()["params"])
-    eng.generate(msgs, GenParams(temperature=0.0, top_p=1.0, max_bytes=MAX_REPLY_BYTES, n_candidates=0), ev.append, threading.Event())
+    eng.generate(msgs, GenParams(temperature=0.0, top_p=1.0, max_bytes=MAX_REPLY_BYTES), ev.append, threading.Event())
     text = ev[-1]["text"] if ev and ev[-1]["type"] == "done" else ""
     return text.strip().split("\n")[0]
 

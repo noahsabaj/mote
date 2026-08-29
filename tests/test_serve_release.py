@@ -7,7 +7,7 @@ import threading
 import torch
 import torch.nn.functional as F
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.model.hnet import HNetForCausalLM
 from mote.serve.engine import Engine, GenParams, _sample
 from mote.tokenizer import END_THINK_ID, FIM_MIDDLE_ID, FIM_PREFIX_ID, THINK_ID, VOCAB_SIZE, ByteTokenizer
@@ -17,7 +17,6 @@ def _cfg(**kw):
     return MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3, enabled=False),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256, **kw,
     )
 
@@ -34,7 +33,7 @@ def _engine(tmp_path, **kw):
 
 def _reply(eng, text, script):
     ev = []
-    eng.generate([{"role": "user", "content": text}], GenParams(max_bytes=len(script), script=list(script), n_candidates=0),
+    eng.generate([{"role": "user", "content": text}], GenParams(max_bytes=len(script), script=list(script)),
                  ev.append, threading.Event())
     done = ev[-1]
     assert done["type"] == "done"
@@ -97,7 +96,7 @@ def test_released_replies_hold_the_gpu_gate(tmp_path, monkeypatch):
             t = threading.Thread(target=probe)
             t.start()
             t.join()  # probe while the reply is in flight (the reply thread waits for the 50 ms timeout)
-    eng.generate([{"role": "user", "content": "gate"}], GenParams(max_bytes=len(script), script=script, n_candidates=0), emit, threading.Event())
+    eng.generate([{"role": "user", "content": "gate"}], GenParams(max_bytes=len(script), script=script), emit, threading.Event())
     assert seen["free"] is False and ev[-1]["type"] == "done"
     assert gate.acquire(timeout=1.0)  # released after the reply
     gate.release()
@@ -139,18 +138,18 @@ def test_waiting_frames(tmp_path):
     eng = _engine(tmp_path)
     ev = []
     long = "x" * 1800
-    eng.generate([{"role": "user", "content": long}], GenParams(max_bytes=2, script=[65, 66], n_candidates=0),
+    eng.generate([{"role": "user", "content": long}], GenParams(max_bytes=2, script=[65, 66]),
                  ev.append, threading.Event())
     w = [e for e in ev if e["type"] == "waiting"]
     assert w and w[0]["on"] == "prefill" and w[0]["bytes"] >= 1800 and ev.index(w[0]) < ev.index(next(e for e in ev if e["type"] == "start"))
     ev.clear()
-    eng.generate([{"role": "user", "content": long}], GenParams(max_bytes=2, script=[65, 66], n_candidates=0),
+    eng.generate([{"role": "user", "content": long}], GenParams(max_bytes=2, script=[65, 66]),
                  ev.append, threading.Event())
     assert not [e for e in ev if e["type"] == "waiting"]  # the prefix store makes the second read cheap
     # a held lock: the reply says it is waiting for the swap
     ev.clear()
     eng.lock.acquire()
-    t = threading.Thread(target=lambda: eng.generate([{"role": "user", "content": "hi"}], GenParams(max_bytes=1, script=[65], n_candidates=0), ev.append, threading.Event()))
+    t = threading.Thread(target=lambda: eng.generate([{"role": "user", "content": "hi"}], GenParams(max_bytes=1, script=[65]), ev.append, threading.Event()))
     t.start()
     for _ in range(200):
         if ev:

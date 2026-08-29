@@ -4,7 +4,7 @@
   import type { ByteTrace } from '../lib/trace.svelte';
   import type { Turn } from '../lib/stores/chat.svelte';
   import Sparkline from './Sparkline.svelte';
-  import { byteGlyph, hex, num, pct } from '../lib/format';
+  import { byteGlyph, hex, num } from '../lib/format';
   import { copyText } from '../lib/clipboard';
 
   let { trace, turn }: { trace: ByteTrace; turn?: Turn } = $props();
@@ -14,7 +14,7 @@
   const drawnAt = $derived.by(() => {
     const p = turn?.params;
     if (!p) return null;
-    return `T ${p.temperature} · top-p ${p.top_p} · n ${p.n_candidates} · max ${p.max_bytes} B`;
+    return `T ${p.temperature} · top-p ${p.top_p} · max ${p.max_bytes} B`;
   });
 
   const ROW = 26;
@@ -66,8 +66,6 @@
     <dd>{total}</dd>
     <dt>Chunks</dt>
     <dd>{trace.chunkCount}{trace.chunkCount ? ` · ${num(total / trace.chunkCount, 1)} B each` : ''}</dd>
-    <dt>From the multi-byte head</dt>
-    <dd>{pct(trace.mbpFraction(), 1)} of this reply's bytes (the footer's figure is the share of <em>drafts</em> accepted)</dd>
     {#if drawnAt}
       <dt>Drawn at</dt>
       <dd>{drawnAt}</dd>
@@ -95,7 +93,6 @@
     <span class="c-i">#</span>
     <span class="c-hex">hex</span>
     <span class="c-ch">byte</span>
-    <span class="c-src">from</span>
     <span class="c-n">p</span>
     <span class="c-n">H</span>
     <span class="c-n">p(b)</span>
@@ -117,9 +114,6 @@
             <span class="c-i">{r.i}</span>
             <span class="c-hex">{hex(r.byte)}</span>
             <span class="c-ch" class:sep={!r.chars}>{byteGlyph(r.byte)}</span>
-            <span class="c-src" class:mbp={r.mbp} class:fix={r.fix}
-              >{r.mbp ? 'parallel' : r.fix ? 'corrected' : 'sampled'}</span
-            >
             <span class="c-n">{num(r.p, 2)}</span>
             <span class="c-n">{num(r.entropy, 2)}</span>
             <span class="c-n">{num(r.boundaryP, 2)}</span>
@@ -130,9 +124,7 @@
   </div>
   </div>
   <p class="meta foot">
-    A left rule marks a byte the router chose as a chunk start. <span class="k">parallel</span>
-    came from the multi-byte head, <span class="k">corrected</span> replaced a draft byte that
-    verification rejected. <span class="k">p</span> is the sampled byte's probability,
+    A left rule marks a byte the router chose as a chunk start. <span class="k">p</span> is the sampled byte's probability,
     <span class="k">H</span> the entropy of that step, <span class="k">p(b)</span> the boundary
     probability.
   </p>
@@ -163,7 +155,7 @@
   .head,
   .row {
     display: grid;
-    grid-template-columns: 2.3rem 2.1rem 2.2rem 3.9rem 2rem 2rem 2.3rem;
+    grid-template-columns: 2.3rem 2.1rem 2.2rem 2rem 2rem 2.3rem;
     gap: 0.3rem;
     align-items: center;
     font-family: var(--font-mono);
@@ -176,7 +168,7 @@
      the rows squeeze under the vertical scrollbar. The floor allows for that scrollbar. */
   .head,
   .viewport {
-    min-width: 20.5rem;
+    min-width: 16.3rem;
   }
 
   .head {
@@ -217,17 +209,6 @@
   }
   .c-ch.sep {
     color: var(--ink-3);
-  }
-  .c-src {
-    font-size: 0.6875rem;
-    letter-spacing: 0.02em;
-    color: var(--ink-3);
-  }
-  .c-src.mbp {
-    color: var(--accent-ink);
-  }
-  .c-src.fix {
-    color: var(--ink);
   }
   .c-n {
     text-align: right;

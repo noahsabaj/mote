@@ -23,7 +23,6 @@ export interface Architecture {
   encoder_layers: number;
   decoder_layers: number;
   main: string;
-  mbp_layers: number;
 }
 
 export interface DeviceInfo {
@@ -41,7 +40,6 @@ export interface SamplingParams {
   temperature: number;
   top_p: number;
   max_bytes: number;
-  n_candidates: number;
 }
 
 export interface ModelInfo {
@@ -227,7 +225,6 @@ export interface TrainLogRecord extends LogRecordBase {
   bytes_per_sec: number;
   train_bpb: number;
   ce: number;
-  ce_mbp?: number;
   ratio: number;
   bpic: number;
   grad_norm: number;
@@ -238,7 +235,6 @@ export interface EvalPayload {
   val_bpic: number;
   target_ratio?: number;
   boundary_on_separator_frac: number;
-  mbp_top1_acc?: number;
   sample?: string;
 }
 
@@ -269,9 +265,8 @@ export function isTrainRecord(r: LogRecord): r is TrainRecord {
 
 // ---------------------------------------------------------------- websocket
 
-/** nbp: sampled from the next-byte head · mbp: a draft byte accepted by exact verification · fix: the
- *  correction drawn when a draft byte was rejected (still distributed exactly as the model would sample). */
-export type ByteSource = 'nbp' | 'mbp' | 'fix';
+/** nbp: sampled from the next-byte head · call: a byte of a tool call the model is writing (not reply text) */
+export type ByteSource = 'nbp' | 'call';
 
 /** folding (docs/context.md): 'auto' folds when the prompt would overflow, 'now' folds everything before
  *  the last user turn, 'off' is plain truncation (drop oldest) */
@@ -382,12 +377,6 @@ export interface StatsPayload {
   bytes_per_sec: number;
   chunks: number;
   bytes_per_chunk: number;
-  mbp_proposed: number;
-  mbp_accepted: number;
-  mbp_accept_rate: number;
-  spec_rounds?: number;
-  spec_fixes?: number;
-  spec_replays?: number;
   context_bytes: number;
   context_limit: number;
 }

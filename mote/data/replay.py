@@ -52,8 +52,7 @@ def passes(reply: str, rec: Dict) -> bool:
     return True
 
 
-def replay(eng: Engine, records: List[Dict], budget: int, temperature: float, max_bytes: int,
-           n_candidates: int = 0) -> Dict:
+def replay(eng: Engine, records: List[Dict], budget: int, temperature: float, max_bytes: int) -> Dict:
     """Roll out, filter, and return the survivors as {messages, reply} plus a report."""
     kept, tried = [], 0
     n_params = eng.info()["params"]
@@ -62,7 +61,7 @@ def replay(eng: Engine, records: List[Dict], budget: int, temperature: float, ma
         ev: List[dict] = []
         eng.generate(with_system_card(rec["messages"], n_params),
                      GenParams(temperature=temperature, top_p=1.0 if temperature <= 0 else 0.9,
-                               max_bytes=max_bytes, n_candidates=n_candidates),
+                               max_bytes=max_bytes),
                      ev.append, threading.Event())
         reply = ev[-1]["text"] if ev and ev[-1]["type"] == "done" else ""
         if passes(reply, rec):

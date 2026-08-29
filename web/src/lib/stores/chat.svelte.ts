@@ -122,7 +122,7 @@ function toMarkdown(title: string, turns: Turn[], modelName: string): string {
     }
     if (t.params) {
       const p = t.params;
-      meta.push(`T ${p.temperature} · top-p ${p.top_p} · n ${p.n_candidates}`);
+      meta.push(`T ${p.temperature} · top-p ${p.top_p}`);
     }
     if (t.checkpointStep !== undefined) meta.push(`step ${t.checkpointStep}`);
     if (t.error) meta.push(`error: ${t.error}`);

@@ -34,13 +34,13 @@ def main(run: str):
     train = [r for r in recs if "train_bpb" in r]
     evals = [r for r in recs if "eval" in r]
     print(f"{run}: {len(train)} train records, {len(evals)} evals, last step {recs[-1].get('step')} at {recs[-1].get('elapsed_min', 0):.1f} min")
-    for key, label in [("train_bpb", "train bpb"), ("bpic", "bytes/chunk"), ("ce_mbp", "mbp ce"), ("bytes_per_sec", "bytes/s"), ("grad_norm", "grad norm"), ("lr", "lr"), ("target_ratio", "target N")]:
+    for key, label in [("train_bpb", "train bpb"), ("bpic", "bytes/chunk"), ("bytes_per_sec", "bytes/s"), ("grad_norm", "grad norm"), ("lr", "lr"), ("target_ratio", "target N")]:
         xs = [r.get(key) for r in train]
         if any(x is not None for x in xs):
             vals = [x for x in xs if x is not None]
             print(f"  {label:12s} {spark(xs)}  {vals[0]:.4g} → {vals[-1]:.4g}")
     if evals:
-        for key, label in [("val_bpb", "val bpb"), ("val_bpic", "val bytes/chunk"), ("boundary_on_separator_frac", "boundary@sep"), ("mbp_top1_acc", "mbp top-1")]:
+        for key, label in [("val_bpb", "val bpb"), ("val_bpic", "val bytes/chunk"), ("boundary_on_separator_frac", "boundary@sep")]:
             xs = [r["eval"].get(key) for r in evals]
             vals = [x for x in xs if x is not None]
             if vals:

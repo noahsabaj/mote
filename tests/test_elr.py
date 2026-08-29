@@ -313,13 +313,6 @@ def test_qk_norm_reaches_the_model_through_the_config():
     assert MoteConfig.from_dict(cfg.to_dict()).main.qk_norm is True
 
 
-def test_attention_control_carries_qk_norm_too():
-    from mote.model.attention import CausalAttention
-
-    a = CausalAttention(32, 4, layer_idx=0, qk_norm=True)
-    assert hasattr(a, "q_norm") and a(torch.randn(1, 6, 32)).shape == (1, 6, 32)
-
-
 # ---- the horizon fit in ELR --------------------------------------------------------------------
 def test_lr_horizon_elr_slope_is_half_the_lr_slope():
     """At a fixed weight decay with the norms at equilibrium, ELR ∝ √lr, so the fit in ln ELR must have
@@ -378,7 +371,7 @@ def test_norm_collapse_holds_the_queue(tmp_path):
 
 
 def test_config_json_records_the_architecture_flags(tmp_path):
-    """config.json used to be written before --no-mbp / --qk-norm / --attention-main / --moe were applied,
+    """config.json used to be written before --qk-norm / --moe were applied,
     so the run's readable record disagreed with the model that ran. The checkpoint always carried the
     finished config, so resumes were right and only the file was wrong."""
     import json
@@ -388,11 +381,11 @@ def test_config_json_records_the_architecture_flags(tmp_path):
     out = tmp_path / "run"
     t = Trainer(["--preset", "smoke", "--data", "data/local_mix", "--out", str(out),
                  "--batch-size", "1", "--seq-len", "256", "--grad-accum", "1",
-                 "--optimizer", "muon", "--no-mbp", "--qk-norm", "--tau-s", "4.0", "--lambda-init", "1.0"])
+                 "--optimizer", "muon", "--qk-norm", "--tau-s", "4.0", "--lambda-init", "1.0",
+                 "--device", "cuda" if torch.cuda.is_available() else "cpu"])
     saved = json.loads((out / "config.json").read_text())
     assert saved["main"]["qk_norm"] is True
     assert saved["main"]["tau_s"] == 4.0 and saved["main"]["lambda_init"] == 1.0
-    assert saved["mbp"]["enabled"] is False
     assert saved == t.cfg.to_dict()
     t.close()
 
@@ -433,7 +426,7 @@ def test_retired_role_names_still_resolve():
     from mote.config import normalize_preset, resolve_preset
 
     assert normalize_preset("flagship") == "mote-96m"
-    assert normalize_preset("local") == "mote-35m"
+    assert normalize_preset("local") == "mote-32m"
     assert normalize_preset("mote_138m") == normalize_preset("138m") == "mote-138m"
     assert resolve_preset("flagship").main.n_layers == 12
     with pytest.raises(ValueError, match="unknown preset"):

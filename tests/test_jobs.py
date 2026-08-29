@@ -11,9 +11,11 @@ import numpy as np
 import torch
 
 import mote.serve.app as A
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.serve.engine import Engine
 from mote.serve.jobs import Ema, JobQueue, JobRecord
+
+DEV = "cuda" if torch.cuda.is_available() else "cpu"  # the trainer refuses a missing GPU; the tests ask for what is there
 
 TINY = dict(d_model_outer=32, encoder_layers=1, decoder_layers=1)
 
@@ -21,7 +23,6 @@ TINY = dict(d_model_outer=32, encoder_layers=1, decoder_layers=1)
 def _cfg():
     return MoteConfig(
         **TINY, main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
     )
 
@@ -37,7 +38,7 @@ def _fixture(tmp_path):
 
 
 def _argv(tmp, out, steps=4):
-    return ["--config", str(tmp / "tiny.json"), "--data", str(tmp / "tiny"), "--out", str(out),
+    return ["--config", str(tmp / "tiny.json"), "--data", str(tmp / "tiny"), "--out", str(out), "--device", DEV,
             "--batch-size", "2", "--seq-len", "64", "--grad-accum", "2", "--max-steps", str(steps),
             "--eval-every", "1000", "--eval-batches", "1", "--log-every", "1000",
             "--ckpt-minutes", "99999", "--max-minutes", "99999"]
@@ -207,6 +208,10 @@ def _fake_queue(tmp_path, monkeypatch, delays=(0.3, 0.3, 0.3), retries=3):
     monkeypatch.setattr(J, "make_trainer", _FakeTrainer)
     monkeypatch.setattr(J, "OOM_RETRY_DELAYS", delays)
     monkeypatch.setattr(J, "OOM_RETRIES", retries)
+    # a retry waits for the card to have room: without CUDA nothing is ever usable, so the queue tests
+    # (which are about ordering, delays and budgets) pretend an 8 GB card with nothing on it
+    monkeypatch.setattr(J, "gpu_peak_bytes", lambda: 0)
+    monkeypatch.setattr(J, "gpu_usable_bytes", lambda: float(8 << 30))
     _FakeTrainer.attempts.clear()
     _FakeTrainer.plans.clear()
     return JobQueue(tmp_path / "jobs.json", threading.Lock())
@@ -457,7 +462,7 @@ def test_the_trainer_refuses_to_fall_back_to_the_cpu(tmp_path, monkeypatch):
     tmp = _fixture(tmp_path)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(RuntimeError, match="CUDA is not available"):
-        Trainer(_argv(tmp, tmp / "runX"))
+        Trainer(_argv(tmp, tmp / "runX") + ["--device", "cuda"])
     t = Trainer(_argv(tmp, tmp / "runY") + ["--device", "cpu"])  # asked for on purpose: fine
     assert t.device.type == "cpu"
     t.close()

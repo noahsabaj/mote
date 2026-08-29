@@ -31,11 +31,11 @@ shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair
   "checkpoint": { "path": "runs/pilot_1h/last.pt", "step": 3100, "bytes_seen": 101580800,
                   "val_bpb": 1.63, "trained_minutes": 60.2, "created_at": "2026-08-22T14:05:11Z" },
   "architecture": { "outer_width": 256, "encoder_layers": 2, "decoder_layers": 2,
-                    "main": "Relation 6L/384/8 heads", "mbp_layers": 2 },
+                    "main": "Relation 6L/384/8 heads" },
   "context_limit_bytes": 2048,
   "device": { "name": "NVIDIA GeForce RTX 4060 Ti", "vram_total_mb": 8188, "vram_used_mb": 912 },
   "kernels": { "mamba3": true, "ssd": true },
-  "defaults": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "n_candidates": 3 },
+  "defaults": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512 },
   "probe": { "identity_acc": 0.83, "hold_rate": 0.5, "concede_rate": 0.75, "n_identity": 6, "n_facts": 8,
              "identity_acc_seen": 1.0, "hold_rate_seen": 0.875, "concede_rate_seen": 0.75, "n_identity_seen": 6, "n_facts_seen": 8 },
   "identity_card": "You are Mote, a small byte-level language model ...",
@@ -110,8 +110,8 @@ graphs. Parked stays parked across idle signals. 409 while a job owns the GPU or
 
 ### `GET /api/training/runs/{id}/log?since=<n>`
 Returns JSONL records from `runs/{id}/log.jsonl` starting at line `n` (see `mote/train/train.py` for the
-record shapes: train records carry `step, lr, target_ratio, bytes_per_sec, train_bpb, ce, ce_mbp, ratio, bpic,
-grad_norm`; eval records carry `eval: { val_bpb, val_bpic, boundary_on_separator_frac, mbp_top1_acc, sample }`).
+record shapes: train records carry `step, lr, target_ratio, bytes_per_sec, train_bpb, ce, ratio, bpic,
+grad_norm`; eval records carry `eval: { val_bpb, val_bpic, boundary_on_separator_frac, sample }`).
 `{ "records": [...], "next": <n + len(records)> }`
 
 ### `POST /v1/chat/completions` — OpenAI-compatible
@@ -128,7 +128,7 @@ Client → server
 ```json
 { "type": "generate",
   "messages": [{"role": "user", "content": "What does dynamic chunking do?"}],
-  "params": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512, "n_candidates": 3 },
+  "params": { "temperature": 0.8, "top_p": 0.9, "max_bytes": 512 },
   "context": { "fold": "auto" | "now" | "off", "card": null | "<the user's edited compaction card>",
                "prev": null | { "from": 6, "card": "..." },      // the last reply's fold, kept while it fits
                "verify_prefix": false } }                           // optional; verify: cold re-read + prefix_check
@@ -155,15 +155,12 @@ Server → client (in order)
   "p": 0.42, "entropy": 2.31, "boundary": true, "boundary_p": 0.93, "chunk": 0,
   "source": "nbp", "t_ms": 18.4 }
 
-`source` is `nbp` (sampled from the next-byte head), `mbp` (a byte drafted by the multi-byte head and accepted by
-exact speculative verification — Leviathan/Chen rejection sampling against the next-byte head's distribution, with
-temperature and top-p applied to both), or `fix` (the correction drawn when a draft byte was rejected). The byte
-stream is distributed exactly as plain sampling would be; `n_candidates` is the draft length (0 disables). The engine
-measures bytes/s of speculative rounds against plain steps within each reply and pauses drafting (`spec_paused`, plus a
-`diagnostics.note`) once it is slower — so a weak drafter can never slow a reply below plain decoding.
+`source` is `nbp` (sampled from the next-byte head) or `call` (a byte of a tool call the model is writing — not reply
+text; see the `tool` event). The multi-byte head and its speculative rounds were retired on 2026-08-29
+(docs/results/2026-08-29-housekeeping-prereg.md): every byte is one model step.
 // text: the completed UTF-8 character(s) this byte finished, or null while a multi-byte char is pending
 // pending: bytes currently buffered in UTF-8 assembly
-// source: "nbp" = sampled one byte at a time; "mbp" = accepted from the multi-byte head's parallel proposal
+// source: "nbp" = sampled one byte at a time; "call" = part of a tool call
 // boundary: the router opened a new chunk at this byte; chunk: index of the chunk this byte belongs to
 
 { "type": "chunk", "index": 3, "start": 14, "end": 19, "bytes": 6, "partial": false, "text": " tend" }   // a chunk closed
@@ -171,7 +168,7 @@ measures bytes/s of speculative rounds against plain steps within each reply and
 // partial: the chunk began inside the prompt (then start is clamped to 0 and bytes > end - start + 1).
 
 { "type": "stats", "bytes": 64, "elapsed_ms": 1730, "bytes_per_sec": 37.0, "chunks": 11,
-  "bytes_per_chunk": 5.8, "mbp_proposed": 30, "mbp_accepted": 12, "mbp_accept_rate": 0.40, "spec_rounds": 10, "spec_fixes": 7, "spec_replays": 3, "spec_paused": false,
+  "bytes_per_chunk": 5.8,
   "context_bytes": 125, "context_limit": 2048 }                                         // every 16 bytes
 
 { "type": "diagnostics",                                                                // at every chunk boundary

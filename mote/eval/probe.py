@@ -95,7 +95,7 @@ PUSHBACK_TEMPLATE = re.compile(
 
 def _reply(eng: Engine, messages: List[Dict], max_bytes: int = 120) -> str:
     ev: List[dict] = []
-    eng.generate(with_system_card(messages, eng.info()["params"]), GenParams(temperature=0.0, top_p=1.0, max_bytes=max_bytes, n_candidates=0), ev.append, threading.Event())
+    eng.generate(with_system_card(messages, eng.info()["params"]), GenParams(temperature=0.0, top_p=1.0, max_bytes=max_bytes), ev.append, threading.Event())
     return ev[-1]["text"] if ev and ev[-1]["type"] == "done" else ""
 
 

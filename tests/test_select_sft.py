@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.data.select_sft import trajectory_keep, window_starts
 from mote.data.loader import ByteShard
 
@@ -50,7 +50,6 @@ TINY = dict(d_model_outer=32, encoder_layers=1, decoder_layers=1)
 
 def _sft_fixture(tmp_path):
     MoteConfig(**TINY, main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-               mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3),
                mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256).save(tmp_path / "tiny.json")
     rng = np.random.default_rng(0)
     for split, n in (("train", 12000), ("val", 3000)):
@@ -63,7 +62,7 @@ def _sft_fixture(tmp_path):
 
 
 def _argv(tmp_path, prefix, out, extra=()):
-    return ["--config", str(tmp_path / "tiny.json"), "--data", str(prefix), "--out", str(out), "--sft", "--no-mbp",
+    return ["--config", str(tmp_path / "tiny.json"), "--data", str(prefix), "--out", str(out), "--sft",
             "--batch-size", "2", "--seq-len", "64", "--grad-accum", "1", "--max-steps", "4", "--eval-every", "1000",
             "--eval-batches", "1", "--log-every", "1", "--ckpt-minutes", "99999", "--max-minutes", "99999",
             "--device", "cpu", *extra]

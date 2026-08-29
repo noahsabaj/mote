@@ -6,7 +6,7 @@
 Each step: sample --tasks fresh tasks (seeds from --seed-base, never the probe's or the traces'), roll out
 --group replies per task through the engine's tool hook at --temperature (eager decoding on the live
 policy weights, the sim as the `sim` tool, the task's step budget as the call cap), reward 1 iff the goal
-holds at the end (+ --partial × the fraction of goal facts, 0 by default), build the advantages (below),
+holds at the end, build the advantages (below),
 and take ONE gradient step on
 
     −A · mean_t log π(y_t)  +  β_i · KL(π ‖ π_ref)    (KL: k3 estimator on the sampled bytes; π_ref = the initial policy)
@@ -56,7 +56,7 @@ import torch
 import torch.nn.functional as F
 
 from ..config import MoteConfig
-from ..model.hnet import HNetForCausalLM
+from ..model.hnet import HNetForCausalLM, strip_retired
 from ..serve.engine import Engine, GenParams
 from ..sim.tasks import TASK_DOMAINS, SimEnv, Task, heldout_tasks, make_task
 from ..tokenizer import PAD_ID
@@ -76,7 +76,6 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--kl", type=float, default=0.02, help="β of the KL-to-reference penalty")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--max-bytes", type=int, default=512, help="reply budget per rollout (calls + results + text)")
-    ap.add_argument("--partial", type=float, default=0.0, help="weight of the goal-fraction reward on top of the binary one")
     ap.add_argument("--micro", type=int, default=4, help="sequences per forward/backward")
     ap.add_argument("--clip", type=float, default=1.0)
     ap.add_argument("--locales", default="en,ru,ja")
@@ -196,7 +195,7 @@ class RlvrTrainer:
         ck = torch.load(args.init_from, map_location="cpu", weights_only=True)
         self.cfg = MoteConfig.from_dict(ck["config"])
         self.model = HNetForCausalLM(self.cfg, device=device)
-        self.model.load_state_dict(ck["model"])
+        self.model.load_state_dict(strip_retired(ck["model"]))
         self.ref = copy.deepcopy(self.model).eval()
         for p in self.ref.parameters():
             p.requires_grad_(False)
@@ -235,7 +234,7 @@ class RlvrTrainer:
     # --- rollouts -------------------------------------------------------------------------------------------
     def reward_of(self, env: SimEnv) -> Tuple[float, float]:
         ok, frac = env.score()
-        return float(ok) + self.args.partial * frac, frac
+        return float(ok), frac
 
     def rollout(self, task: Task, temperature: float, max_bytes: Optional[int] = None) -> Dict:
         env = SimEnv(task)
@@ -246,7 +245,7 @@ class RlvrTrainer:
             with torch.no_grad():
                 self.engine.generate([{"role": "user", "content": task.prompt}],
                                      GenParams(temperature=temperature, top_p=1.0, max_bytes=max_bytes or self.args.max_bytes,
-                                               n_candidates=0, max_calls=task.budget),
+                                               max_calls=task.budget),
                                      ev.append, threading.Event(), context={"want_ids": True, "fold": "off"})
             reward, frac = self.reward_of(env)
             done = ev[-1]

@@ -11,7 +11,7 @@
     type ParamSpec
   } from '../lib/stores/settings.svelte';
   import { chat } from '../lib/stores/chat.svelte';
-  import { num, pct } from '../lib/format';
+  import { num } from '../lib/format';
   import { tip } from '../lib/actions';
   import Icon from './Icon.svelte';
   import type { SamplingParams } from '../lib/types';
@@ -125,7 +125,6 @@
     const parts: string[] = [];
     if (trace && trace.size > 0) parts.push(`mean p ${num(trace.meanP, 2)}`);
     parts.push(`${t.stats.bytes} bytes`);
-    if (t.stats.mbp_proposed > 0) parts.push(`${pct(t.stats.mbp_accept_rate)} of drafts accepted`);
     if (t.reason === 'max_bytes') parts.push('reached the byte limit');
     // The sliders may have moved since. Naming what it was drawn at keeps the number true
     // instead of quietly attributing it to the settings now on screen.

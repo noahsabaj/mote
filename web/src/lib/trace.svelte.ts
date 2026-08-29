@@ -17,16 +17,7 @@ export interface ChunkRow {
   text: string;
 }
 
-/** A run of characters that shares one origin — used to draw legible structure, not per-byte boxes. */
-export interface Segment {
-  text: string;
-  mbp: boolean;
-}
-
 const FLAG_BOUNDARY = 1;
-const FLAG_MBP = 2;
-/** The byte that replaced a rejected draft byte. Still an exact sample, but not a plain step. */
-const FLAG_FIX = 4;
 
 export interface SerializedTrace {
   v: 1;
@@ -135,10 +126,7 @@ export class ByteTrace {
     this.#boundaryP[s] = ev.boundary_p;
     this.#chunk[s] = ev.chunk;
     this.#tMs[s] = ev.t_ms;
-    this.#flags[s] =
-      (ev.boundary ? FLAG_BOUNDARY : 0) |
-      (ev.source === 'mbp' ? FLAG_MBP : 0) |
-      (ev.source === 'fix' ? FLAG_FIX : 0);
+    this.#flags[s] = ev.boundary ? FLAG_BOUNDARY : 0;
     if (s === 0 || this.#chunk[s - 1] !== ev.chunk) this.#runStart.push(s);
     if (ev.text) this.#text += ev.text;
     this.#textEnd[s] = this.#text.length;
@@ -185,8 +173,6 @@ export class ByteTrace {
     chunk: number;
     tMs: number;
     boundary: boolean;
-    mbp: boolean;
-    fix: boolean;
     chars: string;
   } {
     const from = i > 0 ? this.#textEnd[i - 1] : 0;
@@ -199,8 +185,6 @@ export class ByteTrace {
       chunk: this.#chunk[i],
       tMs: this.#tMs[i],
       boundary: (this.#flags[i] & FLAG_BOUNDARY) !== 0,
-      mbp: (this.#flags[i] & FLAG_MBP) !== 0,
-      fix: (this.#flags[i] & FLAG_FIX) !== 0,
       chars: this.#text.slice(from, this.#textEnd[i])
     };
   }
@@ -210,35 +194,6 @@ export class ByteTrace {
     const from = Math.max(0, this.#n - last);
     const out: number[] = [];
     for (let i = from; i < this.#n; i++) out.push(this.#boundaryP[i]);
-    return out;
-  }
-
-  /** Fraction of bytes that came from the multi-byte head. */
-  mbpFraction(): number {
-    if (this.#n === 0) return 0;
-    let hits = 0;
-    for (let i = 0; i < this.#n; i++) if (this.#flags[i] & FLAG_MBP) hits++;
-    return hits / this.#n;
-  }
-
-  /**
-   * Split one chunk's characters into runs by origin. A character is attributed to the
-   * multi-byte head when the byte that completed it was accepted in parallel.
-   */
-  segmentsFor(start: number, end: number): Segment[] {
-    const lo = Math.max(0, start);
-    const hi = Math.min(this.#n, end);
-    const out: Segment[] = [];
-    for (let i = lo; i < hi; i++) {
-      const from = i > 0 ? this.#textEnd[i - 1] : 0;
-      const to = this.#textEnd[i];
-      if (to === from) continue;
-      const mbp = (this.#flags[i] & FLAG_MBP) !== 0;
-      const chars = this.#text.slice(from, to);
-      const tail = out[out.length - 1];
-      if (tail && tail.mbp === mbp) tail.text += chars;
-      else out.push({ text: chars, mbp });
-    }
     return out;
   }
 

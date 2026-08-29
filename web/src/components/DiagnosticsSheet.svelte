@@ -5,7 +5,6 @@
   import { model } from '../lib/stores/model.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { statusNote } from '../lib/status';
-  import { settings } from '../lib/stores/settings.svelte';
   import Sparkline from './Sparkline.svelte';
   import Bars from './Bars.svelte';
   import { num, pct } from '../lib/format';
@@ -13,12 +12,6 @@
   const s = $derived(diagnostics.stats);
   const d = $derived(diagnostics.latest);
   const contextFrac = $derived(s ? Math.min(1, s.context_bytes / s.context_limit) : 0);
-  // spec_* are optional in the wire format. An older backend that omits them has not measured
-  // zero rounds — it has not measured anything, and that is what this has to say.
-  const rounds = $derived.by(() => {
-    if (!s || s.spec_rounds === undefined) return '—';
-    return `${s.spec_rounds} rounds · ${s.spec_fixes ?? 0} corrections · ${s.spec_replays ?? 0} replays`;
-  });
   const status = $derived(
     auth.required ? 'locked' : model.error ? 'offline' : (model.info?.status ?? 'loading')
   );
@@ -47,8 +40,7 @@
   <section>
     <h3>Throughput</h3>
     <p class="meta">
-      Decoding speed of the loaded model on this machine. Every byte is one model step unless the
-      multi-byte head filled it in.
+      Decoding speed of the loaded model on this machine. Every byte is one model step.
     </p>
     <dl class="rows">
       <dt>Bytes/s</dt>
@@ -70,25 +62,6 @@
         />
       </div>
     {/if}
-  </section>
-
-  <section>
-    <h3>Multi-byte head</h3>
-    <p class="meta">
-      At every new chunk the head proposes the next n bytes at once. They are taken, left to
-      right, while its confidence is at least τ; the first doubtful byte and everything after it
-      go back to one byte per step.
-    </p>
-    <dl class="rows">
-      <dt>Accept rate</dt>
-      <dd>{s ? pct(s.mbp_accept_rate, 1) : '—'}</dd>
-      <dt>Proposed</dt>
-      <dd>{s ? `${s.mbp_accepted} accepted of ${s.mbp_proposed}` : '—'}</dd>
-      <dt>Verification</dt>
-      <dd>exact (rejection sampling) · draft length {settings.params.n_candidates}</dd>
-      <dt>Rounds</dt>
-      <dd>{rounds}</dd>
-    </dl>
   </section>
 
   <section>

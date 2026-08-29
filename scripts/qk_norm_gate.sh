@@ -23,7 +23,7 @@ OUT="${OUT:-runs/qk}"
 mkdir -p "$OUT" docs/results
 common=(--preset local --data data/local_mix --optimizer muon --lr 8e-4
         --batch-size 4 --seq-len 2048 --grad-accum 4
-        --eval-every 500 --ckpt-minutes 30 --no-mbp --eval-spread --seed 42)
+        --eval-every 500 --ckpt-minutes 30 --eval-spread --seed 42)
 
 echo "== the pair: same everything, 2 h each, default τ_s 2.0 / λ 0.5 =="
 python -m mote.cli train start -- "${common[@]}" --max-minutes 120 --out "$OUT/off"

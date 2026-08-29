@@ -8,7 +8,7 @@
   import ChunkedText from './ChunkedText.svelte';
   import CompareCard from './CompareCard.svelte';
   import Icon from './Icon.svelte';
-  import { ago, num, pct } from '../lib/format';
+  import { ago, num } from '../lib/format';
   import { showParam } from '../lib/stores/settings.svelte';
   import { displayName } from '../lib/checkpoints';
   import { copyText } from '../lib/clipboard';
@@ -294,9 +294,6 @@
               turn.stats.bytes_per_sec,
               0
             )} B/s
-            {#if turn.stats.mbp_proposed > 0}
-              · {pct(turn.stats.mbp_accept_rate)} of drafts accepted
-            {/if}
             {#if turn.ttfbMs !== undefined}· first byte in {num(turn.ttfbMs, 0)} ms{/if}
             {#if turn.prefix && turn.prefix.reused > 0}· {turn.prefix.reused} B reused{/if}
             {#if turn.prefixCheck}

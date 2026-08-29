@@ -19,19 +19,18 @@ from torch.profiler import ProfilerActivity, profile, record_function
 
 from ..config import PRESETS, MoteConfig, normalize_preset, resolve_preset
 from ..data.loader import ByteShard
-from ..model.hnet import HNetForCausalLM
+from ..model.hnet import HNetForCausalLM, strip_retired
 from .flops import flops_per_byte, peak_tflops_for
 from .train import compute_losses
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preset", default="mote-35m", type=normalize_preset, help=", ".join(PRESETS))
+    ap.add_argument("--preset", default="mote-32m", type=normalize_preset, help=", ".join(PRESETS))
     ap.add_argument("--data", required=True)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--seq-len", type=int, default=2048)
     ap.add_argument("--grad-accum", type=int, default=8)
-    ap.add_argument("--dense-mbp", action="store_true", help="dense masked attention in the multi-byte head (reference path)")
-    ap.add_argument("--no-mbp", action="store_true", help="build the model without the multi-byte head")
+    ap.add_argument("--no-mbp", action="store_true", help=argparse.SUPPRESS)  # the head is gone (2026-08-29); a no-op so recorded commands still run
     ap.add_argument("--warmup", type=int, default=4)
     ap.add_argument("--timed", type=int, default=6, help="unprofiled steps used for the throughput number")
     ap.add_argument("--ckpt-main", action="store_true", help="activation checkpointing on the Relation blocks")
@@ -40,30 +39,18 @@ def main(argv=None):
     ap.add_argument("--trace", default=None, help="write a Chrome trace json here")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--chunk-bytes", type=float, default=None, help="profiling only: force a boundary every N bytes, so a preset with no checkpoint is profiled at a realistic chunk count. With --init-from this DEFAULTS to the checkpoint's own measured val_bpic (mote/runinfo.py) — every profile in the repo used to pass a literal 6, which is ATDC's target and not any router's behaviour; three trained runs measured 3.2-3.45, and at Mote-138M/16384 that is 2.21x the FLOPs per byte")
-    ap.add_argument("--spine", default=None, choices=["off", "expand", "frac"], help="hyper-connection spine mode (mote/model/spine.py)")
-    ap.add_argument("--spine-n", type=int, default=None, help="streams (expand) or slices (frac)")
     ap.add_argument("--out", default=None, help="also write the result json here")
     ap.add_argument("--init-from", default=None, help="profile a trained checkpoint: a random router makes ~9 chunks per 2048 bytes, a trained one ~370, and the main network and dechunk costs scale with that")
     args = ap.parse_args(argv)
 
     device = torch.device(args.device)
     cfg: MoteConfig = resolve_preset(args.preset)
-    if args.spine is not None:
-        cfg.spine.mode = args.spine
-    if args.spine_n is not None:
-        cfg.spine.n = args.spine_n
     if args.bucket is not None:
         cfg.dc.chunk_bucket = args.bucket
     if args.no_flash:
         import mote.model.relation as R
 
         R.USE_FLASH = False
-    if args.dense_mbp:
-        import mote.model.mbp as MBP
-
-        MBP.USE_BLOCK_LOCAL = False
-    if args.no_mbp:
-        cfg.mbp.enabled = False
     torch.manual_seed(0)
     model = HNetForCausalLM(cfg, device=device)  # fp32 parameters under autocast, exactly like the trainer
     if args.init_from:
@@ -71,10 +58,8 @@ def main(argv=None):
         cfg = MoteConfig.from_dict(ck["config"])
         if args.bucket is not None:
             cfg.dc.chunk_bucket = args.bucket
-        if args.no_mbp:
-            cfg.mbp.enabled = False
         model = HNetForCausalLM(cfg, device=device)
-        model.load_state_dict(ck["model"], strict=False)
+        model.load_state_dict(strip_retired(ck["model"]), strict=False)
     if args.chunk_bytes is None and args.init_from:
         # The chunk rate is an observable of a trained router, not a setting. If the checkpoint's run
         # measured one, profile at that rather than at a number somebody typed.
@@ -121,7 +106,7 @@ def main(argv=None):
             ranges.pop(name).__exit__(None, None, None)
         return hook
 
-    for name in ["embeddings", "encoder", "routing_module", "chunk_layer", "main_network", "dechunk_layer", "decoder", "lm_head", "mbp_head"]:
+    for name in ["embeddings", "encoder", "routing_module", "chunk_layer", "main_network", "dechunk_layer", "decoder", "lm_head"]:
         mod = getattr(model, name, None)
         if mod is not None:
             mod.register_forward_pre_hook(pre("fwd:" + name))
@@ -135,7 +120,7 @@ def main(argv=None):
             batch = batch.to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 with record_function("forward+loss"):
-                    loss, n, stats, _ = compute_losses(model, batch, cfg.dc.target_ratio_init, cfg.mbp.loss_weight, cfg.dc.ratio_loss_weight, None)
+                    loss, n, stats, _ = compute_losses(model, batch, cfg.dc.target_ratio_init, cfg.dc.ratio_loss_weight, None)
             with record_function("backward"):
                 (loss / (n * args.grad_accum)).backward()
             bpic = bpic + stats["bpic"] / args.grad_accum
@@ -160,9 +145,8 @@ def main(argv=None):
     tflops = fl * bytes_per_step / sec / 1e12
     peak = peak_tflops_for(device) if device.type == "cuda" else None
     result = {
-        "preset": args.preset, "spine": cfg.spine.mode, "spine_n": cfg.spine.n, "params": model.num_params(), "batch": args.batch_size, "seq_len": args.seq_len,
+        "preset": args.preset, "params": model.num_params(), "batch": args.batch_size, "seq_len": args.seq_len,
         "grad_accum": args.grad_accum, "bucket": cfg.dc.chunk_bucket, "flash": not args.no_flash, "ckpt_main": args.ckpt_main,
-        "block_local_mbp": not args.dense_mbp, "mbp": not args.no_mbp,
         "sec_per_step": round(sec, 4), "bytes_per_sec": round(bytes_per_step / sec), "bytes_per_chunk": round(bpic, 2),
         "flops_per_byte_M": round(fl / 1e6, 1), "tflops": round(tflops, 2), "mfu": round(tflops / peak, 3) if peak else None,
         "chunk_bytes_forced": args.chunk_bytes,  # what the chunk rate was pinned to, so a profile is readable later

@@ -7,15 +7,16 @@ import json
 import numpy as np
 import torch
 
-from mote.config import MBPCfg, Mamba3Cfg, MoteConfig, RelationCfg
+from mote.config import Mamba3Cfg, MoteConfig, RelationCfg
 from mote.train.train import Trainer
+
+DEV = "cuda" if torch.cuda.is_available() else "cpu"  # the trainer refuses a missing GPU; the tests ask for what is there
 
 
 def _fixture(tmp_path):
     cfg = MoteConfig(
         d_model_outer=32, encoder_layers=1, decoder_layers=1,
         main=RelationCfg(n_layers=1, d_model=32, n_heads=2, d_ff=64),
-        mbp=MBPCfg(n_layers=1, n_heads=2, d_ff=64, n_candidates=3),
         mamba3=Mamba3Cfg(d_state=16, headdim=16, expand=2), max_seq_len=256,
     )
     cfg_path = tmp_path / "tiny.json"
@@ -33,7 +34,7 @@ def _argv(cfg_path, prefix, out, extra=()):
     return ["--config", str(cfg_path), "--data", str(prefix), "--out", str(out),
             "--batch-size", "2", "--seq-len", "64", "--grad-accum", "2", "--lr", "1e-3",
             "--eval-every", "1000", "--eval-batches", "1", "--log-every", "1",
-            "--ckpt-minutes", "99999", "--max-minutes", "99999", *extra]
+            "--ckpt-minutes", "99999", "--max-minutes", "99999", "--device", DEV, *extra]
 
 
 def test_drained_run_counts_slices_steps_and_checkpoints(tmp_path):

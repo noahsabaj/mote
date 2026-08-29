@@ -20,7 +20,7 @@ import torch
 
 from ..config import MoteConfig
 from ..data.loader import ByteShard
-from ..model.hnet import HNetForCausalLM
+from ..model.hnet import HNetForCausalLM, strip_retired
 from ..train.train import evaluate
 
 
@@ -37,7 +37,7 @@ def load_model(checkpoint: str | Path, device: torch.device):
     ck = torch.load(checkpoint, map_location="cpu", weights_only=True)
     cfg = MoteConfig.from_dict(ck["config"])
     model = HNetForCausalLM(cfg, device=device)
-    model.load_state_dict(ck["model"])
+    model.load_state_dict(strip_retired(ck["model"]))
     model.eval()
     return model, cfg, ck.get("step")
 
