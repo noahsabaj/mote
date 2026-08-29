@@ -532,6 +532,89 @@ def build_argparser() -> argparse.ArgumentParser:
     return ap
 
 
+def load_run_config(args, out_dir: Path):
+    """(the config the run starts from, the resume checkpoint or None). A resume continues the run as it was
+    built: the checkpoint's own config beats today's preset defaults AND the run's config.json — a resume
+    that failed under a new default had already rewritten config.json with that default (2026-08-24:
+    264 -> 272 vocab rows, twice)."""
+    if args.resume and ckpt_path_exists(out_dir):
+        ck = torch.load(out_dir / "last.pt", map_location="cpu", weights_only=True)
+        return MoteConfig.from_dict(ck["config"]), ck
+    return (MoteConfig.load(args.config) if args.config else resolve_preset(args.preset)), None
+
+
+def config_from_args(args, cfg: MoteConfig) -> MoteConfig:
+    """The CLI's overrides applied to `cfg`, in the order they have always been applied. The finished config
+    is what config.json records, what the checkpoint carries and what a resume rebuilds; `--no-flash` is a
+    process switch, not a config field, and stays in the trainer."""
+    cfg.max_seq_len = max(cfg.max_seq_len, args.seq_len)
+    if args.ratio_weight is not None:
+        cfg.dc.ratio_loss_weight = args.ratio_weight
+    if args.target_ratio is not None:
+        cfg.dc.target_ratio_init, cfg.dc.target_ratio_final = args.target_ratio
+    if args.adapt_threshold is not None:
+        cfg.dc.adapt_threshold = args.adapt_threshold
+    if args.adapt_rate is not None:
+        cfg.dc.adapt_rate = args.adapt_rate
+    if args.bound_ceiling is not None:
+        cfg.dc.bound_ceiling = args.bound_ceiling
+    if args.bound_floor is not None:
+        cfg.dc.bound_floor = args.bound_floor
+    if args.feedback is not None:
+        cfg.feedback.level = args.feedback
+    if args.feedback_jitter is not None:
+        cfg.feedback.jitter = args.feedback_jitter
+    if args.bucket is not None:
+        cfg.dc.chunk_bucket = args.bucket
+    if args.moe:
+        cfg.main.moe_experts = args.moe
+        cfg.main.moe_topk = args.moe_topk
+        cfg.main.moe_router = args.moe_router
+        cfg.main.moe_dense_first = args.moe_dense_first
+        if args.moe_ff is not None:
+            cfg.main.moe_d_ff = args.moe_ff
+        if args.moe_aux_weight is not None:
+            cfg.main.moe_aux_weight = args.moe_aux_weight
+        if args.moe_gamma is not None:
+            cfg.main.moe_bias_gamma = args.moe_gamma
+        if args.moe_gate_scale is not None:
+            cfg.main.moe_gate_scale = args.moe_gate_scale
+    if args.qk_norm:
+        cfg.main.qk_norm = True
+    if args.tau_s is not None:
+        cfg.main.tau_s = args.tau_s
+    if args.lambda_init is not None:
+        cfg.main.lambda_init = args.lambda_init
+    return cfg
+
+
+def build_shards(args):
+    """(the training shard — the mix when --mix is given, the main shard the selectors act on, the val shard)."""
+    aug = {"noise": args.aug_noise, "r2l": args.aug_r2l, "offset_max": args.aug_offset}
+    main_shard = ByteShard(args.data, "train", sft=args.sft, seed=args.seed, keep=args.keep, **aug)
+    val_shard = ByteShard(args.data, "val", sft=args.sft)
+    train_shard = main_shard
+    if args.mix:
+        extras = []
+        for spec in args.mix:
+            prefix, share, plain, fim = parse_mix_spec(spec)
+            extras.append((ByteShard(prefix, "train", sft=args.sft or plain, plain=plain, fim=fim,
+                                     seed=args.seed + len(extras) + 1, **aug), share))
+        main_w = max(1.0 - sum(w for _, w in extras), 0.0)
+        train_shard = MixedShard([main_shard] + [s for s, _ in extras], [main_w] + [w for _, w in extras])
+        print("training mix:", {args.data: main_w, **{spec: parse_mix_spec(spec)[1] for spec in args.mix}}, flush=True)
+    return train_shard, main_shard, val_shard
+
+
+def feedback_mix(args, cfg: MoteConfig):
+    """The 1-/2-/3-pass micro-batch probabilities of a latent-feedback run, normalised; None when feedback is off."""
+    if cfg.feedback.level == "off":
+        return None
+    mix = [float(v) for v in args.feedback_mix.split(",")]
+    assert len(mix) == 3 and all(v >= 0 for v in mix) and sum(mix) > 0, "--feedback-mix wants three non-negative weights"
+    return [v / sum(mix) for v in mix]
+
+
 class Trainer:
     """The training loop as a drivable object (decided 2026-08-23, docs/shape.md).
 
@@ -557,58 +640,12 @@ class Trainer:
         self.out_dir = out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        self._resume_ck = None
-        if args.resume and ckpt_path_exists(out_dir):
-            # A resume continues the run as it was built: the checkpoint's own config beats today's preset
-            # defaults AND the run's config.json — a resume that failed under a new default had already
-            # rewritten config.json with that default (2026-08-24: 264 -> 272 vocab rows, twice).
-            self._resume_ck = torch.load(out_dir / "last.pt", map_location="cpu", weights_only=True)
-            cfg = MoteConfig.from_dict(self._resume_ck["config"])
-        else:
-            cfg = MoteConfig.load(args.config) if args.config else resolve_preset(args.preset)
-        cfg.max_seq_len = max(cfg.max_seq_len, args.seq_len)
-        if args.ratio_weight is not None:
-            cfg.dc.ratio_loss_weight = args.ratio_weight
-        if args.target_ratio is not None:
-            cfg.dc.target_ratio_init, cfg.dc.target_ratio_final = args.target_ratio
-        if args.adapt_threshold is not None:
-            cfg.dc.adapt_threshold = args.adapt_threshold
-        if args.adapt_rate is not None:
-            cfg.dc.adapt_rate = args.adapt_rate
-        if args.bound_ceiling is not None:
-            cfg.dc.bound_ceiling = args.bound_ceiling
-        if args.bound_floor is not None:
-            cfg.dc.bound_floor = args.bound_floor
-        if args.feedback is not None:
-            cfg.feedback.level = args.feedback
-        if args.feedback_jitter is not None:
-            cfg.feedback.jitter = args.feedback_jitter
+        cfg, self._resume_ck = load_run_config(args, out_dir)
+        cfg = config_from_args(args, cfg)
         (out_dir / "run.json").write_text(json.dumps(
             {**vars(args), "determinism": determinism.state(), "code": mote.CODE_VERSION,
              "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
-
-        if args.bucket is not None:
-            cfg.dc.chunk_bucket = args.bucket
-        if args.moe:
-            cfg.main.moe_experts = args.moe
-            cfg.main.moe_topk = args.moe_topk
-            cfg.main.moe_router = args.moe_router
-            cfg.main.moe_dense_first = args.moe_dense_first
-            if args.moe_ff is not None:
-                cfg.main.moe_d_ff = args.moe_ff
-            if args.moe_aux_weight is not None:
-                cfg.main.moe_aux_weight = args.moe_aux_weight
-            if args.moe_gamma is not None:
-                cfg.main.moe_bias_gamma = args.moe_gamma
-            if args.moe_gate_scale is not None:
-                cfg.main.moe_gate_scale = args.moe_gate_scale
-        if args.qk_norm:
-            cfg.main.qk_norm = True
-        if args.tau_s is not None:
-            cfg.main.tau_s = args.tau_s
-        if args.lambda_init is not None:
-            cfg.main.lambda_init = args.lambda_init
-        if args.no_flash:
+        if args.no_flash:  # a process switch, not a config field: the materialized Relation for an A/B
             from ..model import relation as _relation
             _relation.USE_FLASH = False
         # after every architecture flag, not before them: config.json is the run's readable record and used
@@ -619,12 +656,68 @@ class Trainer:
         self.cfg = cfg
         # ATDC's proficiency trigger (2605.30080 Alg. 1 line 11) averages this window of LM loss
         self._loss_window: deque = deque(maxlen=max(int(cfg.dc.adapt_window), 1))
+        self._build_model_and_optimizer()
+        self._build_elr()
+
+        if args.reselect_every > 0 and not args.sft:
+            raise ValueError("--reselect-every selects assistant-byte windows: it needs --sft")
+        self.train_shard, self._main_shard, self.val_shard = build_shards(args)
+        self._reselect_next = 0.0 if args.reselect_every > 0 else None  # pass 0 at the start, then every FRAC
+        self._reselect_prev = None  # the previous pass's per-window losses
+        self._reselect_tau = None  # tau_m, fixed by pass 0
+        if args.init_from and not (args.resume and ckpt_path_exists(out_dir)):
+            _step, _ = load_checkpoint(Path(args.init_from), self.model, None, allow_new=("fusion.",))
+            print(f"initialized weights from {args.init_from} (step {_step})", flush=True)
+        # A per-schedule default, not a global one: `wsd` has always decayed to 0.1x and every lab arm on
+        # record was run that way, so changing its floor would silently make new arms incomparable to their
+        # own controls. Only the branches go to zero.
+        self.min_lr_ratio = args.min_lr_ratio if args.min_lr_ratio is not None else (
+            0.0 if args.schedule in BRANCH_SCHEDULES else 0.1)
+        self.gen = torch.Generator().manual_seed(args.seed)
+        # latent feedback: the 1-/2-/3-pass micro-batch mixture, drawn on the same generator (reproducible)
+        self.feedback_mix = feedback_mix(args, cfg)
+        self.feedback_window = int(args.feedback_window or 0)
+
+        self.step, self.t_start = 0, time.time()
+        self.sched_total = None  # step horizon of the trunk/branch schedules: fixed at the first probe, survives resume
+        self.ckpt_path = out_dir / "last.pt"
+        self._ema_state = None
+        if args.resume and self.ckpt_path.exists():
+            self._resume()
+
+        self.ema_decay = float(getattr(args, "eval_ema", 0.0) or 0.0)
+        self.ema = [p.detach().clone() for p in self.model.parameters()] if self.ema_decay > 0 else None
+        if self.ema is not None and self._ema_state:
+            for e, s in zip(self.ema, self._ema_state):
+                e.copy_(s.to(e.device))
+        self.fwd = torch.compile(self.model) if args.compile else self.model
+        if getattr(args, "tf32", False):
+            torch.set_float32_matmul_precision("high")  # TF32 for fp32 GEMMs; off (="highest") is the frozen default
+        self.log_f = open(self._log_path(), "a", encoding="utf-8")
+        self.tokens_per_step = args.batch_size * args.seq_len * args.grad_accum
+        # What the run is doing right now, read by the daemon for the studio ("train", "eval 3/16",
+        # "eval ema 3/16", "checkpoint") — a reply that waits on the GPU gate can say why (2026-08-25).
+        self.phase = "train"
+        self.total_steps = args.max_steps
+        self.time_driven = args.max_steps == 0  # schedules follow wall-clock progress; step count is only an estimate
+        self.budget_sec = args.max_minutes * 60
+        self._stop = False
+        self.stopped_reason = None
+
+    # ---- construction --------------------------------------------------------------------------------
+    def _build_model_and_optimizer(self) -> None:
+        """The model is the first thing to draw from the seeded RNG after `torch.manual_seed`: nothing may
+        move in front of it (the bitwise check reads the initial weights)."""
+        args, cfg, device = self.args, self.cfg, self.device
         self.model = model = HNetForCausalLM(cfg, device=device)
         if args.ckpt_main:
             model.main_network.grad_checkpoint = True
         self.n_params = model.num_params()
         self.peak_tflops = peak_tflops_for(device) if device.type == "cuda" else None
-        print(f"params: {self.n_params/1e6:.2f}M | device: {device} | kernels: mamba3={__import__('mote.model.mamba3', fromlist=['x']).HAS_MAMBA3_KERNEL} ssd={__import__('mote.model.dc', fromlist=['x']).HAS_SSD_KERNEL}", flush=True)
+        from ..model.dc import HAS_SSD_KERNEL
+        from ..model.mamba3 import HAS_MAMBA3_KERNEL
+
+        print(f"params: {self.n_params/1e6:.2f}M | device: {device} | kernels: mamba3={HAS_MAMBA3_KERNEL} ssd={HAS_SSD_KERNEL}", flush=True)
         self._moe = moe_modules(model)
         if self._moe:
             m0 = self._moe[0]
@@ -632,10 +725,12 @@ class Trainer:
                   f"active {_n_active(model)/1e6:.2f}M of {self.n_params/1e6:.2f}M params", flush=True)
         self.opt = build_optimizer(model, args.lr, args.weight_decay, args.stage_lr_mult, betas=(0.9, args.beta2), optimizer=args.optimizer)
 
-        # ELR (2608.24814): η/‖W‖_F is the coordinate loss dynamics actually follow, so every run logs it and
-        # any comparison across optimizers, weight decays or norm-control methods is read on it rather than on
-        # the nominal lr. Empty for an AdamW run, which switches all three features off.
-        self._elr_named = elr.muon_named_matrices(model, self.opt)
+    def _build_elr(self) -> None:
+        """ELR (2608.24814): η/‖W‖_F is the coordinate loss dynamics actually follow, so every run logs it and
+        any comparison across optimizers, weight decays or norm-control methods is read on it rather than on
+        the nominal lr. Empty for an AdamW run, which switches all three features off."""
+        args = self.args
+        self._elr_named = elr.muon_named_matrices(self.model, self.opt)
         self.norms = elr.NormTracker(self._elr_named)
         self.norm_guard = elr.NormGuard(slack=args.norm_guard_slack) if (self.norms and args.norm_guard != "off") else None
         self.elr_trace = elr.ELRTrace(meta={"lr": args.lr, "weight_decay": args.weight_decay,
@@ -652,86 +747,33 @@ class Trainer:
             print(f"elr: tracking {args.elr_match} — {len(self.elr_match.trace.samples)} samples over "
                   f"steps {self.elr_match.trace.samples[0].step}..{self.elr_match.trace.samples[-1].step}", flush=True)
 
-        if args.reselect_every > 0 and not args.sft:
-            raise ValueError("--reselect-every selects assistant-byte windows: it needs --sft")
-        aug = {"noise": args.aug_noise, "r2l": args.aug_r2l, "offset_max": args.aug_offset}
-        train_shard = ByteShard(args.data, "train", sft=args.sft, seed=args.seed, keep=args.keep, **aug)
-        self._main_shard = train_shard  # the shard --keep / --reselect-every select from (the mix wraps it)
-        self.val_shard = ByteShard(args.data, "val", sft=args.sft)
-        self._reselect_next = 0.0 if args.reselect_every > 0 else None  # pass 0 at the start, then every FRAC
-        self._reselect_prev = None  # the previous pass's per-window losses
-        self._reselect_tau = None  # tau_m, fixed by pass 0
-        if args.mix:
-            extras = []
-            for spec in args.mix:
-                prefix, share, plain, fim = parse_mix_spec(spec)
-                extras.append((ByteShard(prefix, "train", sft=args.sft or plain, plain=plain, fim=fim,
-                                         seed=args.seed + len(extras) + 1, **aug), share))
-            main_w = max(1.0 - sum(w for _, w in extras), 0.0)
-            train_shard = MixedShard([train_shard] + [s for s, _ in extras], [main_w] + [w for _, w in extras])
-            print("training mix:", {args.data: main_w, **{spec: parse_mix_spec(spec)[1] for spec in args.mix}}, flush=True)
-        self.train_shard = train_shard
-        if args.init_from and not (args.resume and ckpt_path_exists(out_dir)):
-            _step, _ = load_checkpoint(Path(args.init_from), model, None, allow_new=("fusion.",))
-            print(f"initialized weights from {args.init_from} (step {_step})", flush=True)
-        # A per-schedule default, not a global one: `wsd` has always decayed to 0.1x and every lab arm on
-        # record was run that way, so changing its floor would silently make new arms incomparable to their
-        # own controls. Only the branches go to zero.
-        self.min_lr_ratio = args.min_lr_ratio if args.min_lr_ratio is not None else (
-            0.0 if args.schedule in BRANCH_SCHEDULES else 0.1)
-        self.gen = torch.Generator().manual_seed(args.seed)
-        # latent feedback: the 1-/2-/3-pass micro-batch mixture, drawn on the same generator (reproducible)
-        self.feedback_mix = None
-        if cfg.feedback.level != "off":
-            mix = [float(v) for v in args.feedback_mix.split(",")]
-            assert len(mix) == 3 and all(v >= 0 for v in mix) and sum(mix) > 0, "--feedback-mix wants three non-negative weights"
-            self.feedback_mix = [v / sum(mix) for v in mix]
-        self.feedback_window = int(args.feedback_window or 0)
+    def _resume(self) -> None:
+        """Continue the run from `last.pt`: the step, the optimizer, the schedule's horizon, the generator, the
+        EMA and the wall clock (max-minutes, the wsd progress and elapsed_min continue instead of restarting;
+        checkpoints from before 2026-08-24 carry no clock — the log's last line is theirs)."""
+        args = self.args
+        self.step, extra = load_checkpoint(self.ckpt_path, self.model, self.opt, ck=self._resume_ck)
+        self._resume_ck = None
+        if args.schedule != "wsd":
+            self.sched_total = extra.get("sched_total") or extra.get("total_steps")
+        if "generator_state" in extra:
+            self.gen.set_state(torch.tensor(extra["generator_state"], dtype=torch.uint8))
+        self._ema_state = extra.get("ema")
+        elapsed = extra.get("elapsed_sec")
+        if elapsed is None:
+            elapsed = runinfo.last_elapsed_sec(self.out_dir)
+        self.t_start = time.time() - float(elapsed or 0.0)
+        print(f"resumed from step {self.step} at {(elapsed or 0.0) / 60:.1f} min", flush=True)
 
-        self.step, self.t_start = 0, time.time()
-        self.sched_total = None  # step horizon of the trunk/branch schedules: fixed at the first probe, survives resume
-        self.ckpt_path = out_dir / "last.pt"
-        if args.resume and self.ckpt_path.exists():
-            self.step, extra = load_checkpoint(self.ckpt_path, model, self.opt, ck=self._resume_ck)
-            self._resume_ck = None
-            if args.schedule != "wsd":
-                self.sched_total = extra.get("sched_total") or extra.get("total_steps")
-            if "generator_state" in extra:
-                self.gen.set_state(torch.tensor(extra["generator_state"], dtype=torch.uint8))
-            self._ema_state = extra.get("ema")
-            # the wall clock survives a resume too (max-minutes, the wsd progress and elapsed_min continue
-            # instead of restarting); checkpoints from before 2026-08-24 carry no clock — read the log's last
-            elapsed = extra.get("elapsed_sec")
-            if elapsed is None:
-                elapsed = runinfo.last_elapsed_sec(out_dir)
-            self.t_start = time.time() - float(elapsed or 0.0)
-            print(f"resumed from step {self.step} at {(elapsed or 0.0) / 60:.1f} min", flush=True)
-
-        self.ema_decay = float(getattr(args, "eval_ema", 0.0) or 0.0)
-        self.ema = [p.detach().clone() for p in model.parameters()] if self.ema_decay > 0 else None
-        if self.ema is not None and getattr(self, "_ema_state", None):
-            for e, s in zip(self.ema, self._ema_state):
-                e.copy_(s.to(e.device))
-        self.fwd = torch.compile(model) if args.compile else model
-        if getattr(args, "tf32", False):
-            torch.set_float32_matmul_precision("high")  # TF32 for fp32 GEMMs; off (="highest") is the frozen default
-        log_path = out_dir / "log.jsonl"
-        if not (args.resume and self.step > 0) and log_path.exists() and log_path.stat().st_size > 0:
-            # a fresh start into a used directory keeps the old run's log aside instead of appending to it
+    def _log_path(self) -> Path:
+        """`log.jsonl`; a fresh start into a used directory keeps the old run's log aside instead of appending to it."""
+        log_path = self.out_dir / "log.jsonl"
+        if not (self.args.resume and self.step > 0) and log_path.exists() and log_path.stat().st_size > 0:
             n = 1
-            while (out_dir / f"log.{n}.jsonl").exists():
+            while (self.out_dir / f"log.{n}.jsonl").exists():
                 n += 1
-            log_path.rename(out_dir / f"log.{n}.jsonl")
-        self.log_f = open(log_path, "a", encoding="utf-8")
-        self.tokens_per_step = args.batch_size * args.seq_len * args.grad_accum
-        # What the run is doing right now, read by the daemon for the studio ("train", "eval 3/16",
-        # "eval ema 3/16", "checkpoint") — a reply that waits on the GPU gate can say why (2026-08-25).
-        self.phase = "train"
-        self.total_steps = args.max_steps
-        self.time_driven = args.max_steps == 0  # schedules follow wall-clock progress; step count is only an estimate
-        self.budget_sec = args.max_minutes * 60
-        self._stop = False
-        self.stopped_reason = None
+            log_path.rename(self.out_dir / f"log.{n}.jsonl")
+        return log_path
 
     # ------------------------------------------------------------------------------
     def log(self, rec: Dict):
@@ -927,21 +969,8 @@ class Trainer:
         self.model.train()
         if self._reselect_next is not None and self.step == 0:
             yield from self._reselect()  # pass 0: tau_m and the first keep, before any training
-
         if self.total_steps == 0:
-            probe_steps = 5
-            set_lr(self.opt, args.lr * 0.01)
-            torch.cuda.synchronize() if device.type == "cuda" else None
-            t0 = time.time()
-            for _ in range(probe_steps):
-                yield from self._train_step(cfg.dc.target_ratio_init)
-                yield ("step", None)
-            torch.cuda.synchronize() if device.type == "cuda" else None
-            sec_per_step = (time.time() - t0) / probe_steps
-            budget_sec = args.max_minutes * 60 - (time.time() - self.t_start)
-            self.total_steps = max(int(budget_sec / sec_per_step * 0.9), 50)
-            self.log({"probe_sec_per_step": sec_per_step, "bytes_per_sec": self.tokens_per_step / sec_per_step, "total_steps": self.total_steps})
-
+            yield from self._probe_throughput()
         if self.sched_total is None:
             self.sched_total = self.total_steps
         last_ckpt = time.time()
@@ -950,31 +979,7 @@ class Trainer:
         snapped_at = args.snapshot_at is not None and (self.sched_total or 0) and self.step >= args.snapshot_at * self.sched_total
 
         while self._running() and not self._stop:
-            # wsd follows wall-clock progress (arms compare at equal wall-clock); trunk/branch follow
-            # the step horizon fixed at the first probe, so a resume continues the schedule instead of
-            # restarting it
-            pr = self._progress() if args.schedule == "wsd" else min(self.step / max(self.sched_total, 1), 1.0)
-            horizon = 1000
-            sched_step = int(pr * horizon)
-            # a branch starts from a trunk that finished its ATDC ramp: hold the final target
-            if args.schedule in BRANCH_SCHEDULES:
-                target_ratio = cfg.dc.target_ratio_final
-            else:
-                target_ratio = atdc_target_ratio(
-                    sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final,
-                    cfg.dc.schedule_warmup_frac,
-                    loss_window=(sum(self._loss_window) / len(self._loss_window)
-                                 if len(self._loss_window) >= cfg.dc.adapt_window else None),
-                    threshold=cfg.dc.adapt_threshold, rate=cfg.dc.adapt_rate)
-            # the router prices its own budget off the live target (mote/model/dc.py::_bound)
-            self.model.routing_module.target_ratio = target_ratio
-            lr = schedule_lr(args.schedule, sched_step, horizon, args.lr, min_ratio=self.min_lr_ratio,
-                             decay_frac=args.branch_decay_frac)
-            set_lr(self.opt, lr)
-            if self.elr_match is not None:
-                # after set_lr, which would otherwise overwrite it: param_lr wins for Muon's matrices, the
-                # schedule still drives the AdamW groups (they are identical between the arms being compared)
-                lr = self.elr_match.apply(self.opt, self.step) or lr
+            pr, target_ratio, lr = self._schedule()
             stats = yield from self._train_step(target_ratio)
             self._loss_window.append(float(stats["ce"]))  # ATDC's proficiency trigger reads this window
             self.step += 1
@@ -988,30 +993,7 @@ class Trainer:
             if self.step % args.log_every == 0:
                 dt = time.time() - t_log
                 t_log = time.time()
-                stats = {k: float(v) for k, v in stats.items()}  # the one sync per logging interval
-                rec = {"lr": lr, "target_ratio": target_ratio, "bytes_per_sec": self.tokens_per_step * args.log_every / dt, "train_bpb": stats["ce"] / LN2}
-                rec.update(stats)
-                rec["tflops"] = flops_per_byte(self.model, args.seq_len, stats.get("bpic", 1.0)) * rec["bytes_per_sec"] / 1e12
-                if self.peak_tflops:
-                    rec["mfu"] = rec["tflops"] / self.peak_tflops
-                if self.norms:
-                    sample = self.norms.sample(self.step, lr, self.args.weight_decay)  # 61 norms in one device->host transfer
-                    rec.update(self.norms.record(sample))
-                    if self.elr_match is not None:
-                        self.elr_match.refresh(sample)
-                    if self.elr_trace is not None:
-                        # rewritten whole, so not on every sample: a 2-h run logs ~3,000 of them and
-                        # saving each one would push several GB through the disk for a 2 MB file
-                        self.elr_trace.add(sample)
-                        if len(self.elr_trace.samples) % elr.SAVE_EVERY == 0:
-                            self.elr_trace.save(self._elr_trace_path)
-                    if self.norm_guard is not None:
-                        tripped = self.norm_guard.update(sample)
-                        if tripped:
-                            rec["norm_guard"] = tripped
-                            if args.norm_guard == "stop":
-                                self.request_stop(tripped)  # already prefixed "norm collapse"; jobs.py holds the queue on it
-                self.log(rec)
+                self._log_train(stats, lr, target_ratio, dt)
             if self.step % args.eval_every == 0:
                 ev = yield from self._evaluate(target_ratio)
                 ev["sample"] = chunk_sample(self.model, "The router compares each byte with the one before it. Where they stop looking alike, it draws a boundary.", device)
@@ -1039,6 +1021,81 @@ class Trainer:
         self.save()
         self.log({"done": True, "final_step": self.step, "interrupted": self.stopped_reason == "interrupted"})
 
+    # ---- the pieces of a step ------------------------------------------------------------------------
+    def _probe_throughput(self):
+        """Five warm-up steps at 1 % of the lr fix the step horizon of a wall-clock budget (`--max-steps 0`)."""
+        args, cfg, device = self.args, self.cfg, self.device
+        probe_steps = 5
+        set_lr(self.opt, args.lr * 0.01)
+        torch.cuda.synchronize() if device.type == "cuda" else None
+        t0 = time.time()
+        for _ in range(probe_steps):
+            yield from self._train_step(cfg.dc.target_ratio_init)
+            yield ("step", None)
+        torch.cuda.synchronize() if device.type == "cuda" else None
+        sec_per_step = (time.time() - t0) / probe_steps
+        budget_sec = args.max_minutes * 60 - (time.time() - self.t_start)
+        self.total_steps = max(int(budget_sec / sec_per_step * 0.9), 50)
+        self.log({"probe_sec_per_step": sec_per_step, "bytes_per_sec": self.tokens_per_step / sec_per_step, "total_steps": self.total_steps})
+
+    def _schedule(self):
+        """(progress, ATDC target ratio, lr) for the coming step, with the lr set on the optimizer.
+
+        wsd follows wall-clock progress (arms compare at equal wall-clock); trunk/branch follow the step
+        horizon fixed at the first probe, so a resume continues the schedule instead of restarting it."""
+        args, cfg = self.args, self.cfg
+        pr = self._progress() if args.schedule == "wsd" else min(self.step / max(self.sched_total, 1), 1.0)
+        horizon = 1000
+        sched_step = int(pr * horizon)
+        # a branch starts from a trunk that finished its ATDC ramp: hold the final target
+        if args.schedule in BRANCH_SCHEDULES:
+            target_ratio = cfg.dc.target_ratio_final
+        else:
+            target_ratio = atdc_target_ratio(
+                sched_step, horizon, cfg.dc.target_ratio_init, cfg.dc.target_ratio_final,
+                cfg.dc.schedule_warmup_frac,
+                loss_window=(sum(self._loss_window) / len(self._loss_window)
+                             if len(self._loss_window) >= cfg.dc.adapt_window else None),
+                threshold=cfg.dc.adapt_threshold, rate=cfg.dc.adapt_rate)
+        # the router prices its own budget off the live target (mote/model/dc.py::_bound)
+        self.model.routing_module.target_ratio = target_ratio
+        lr = schedule_lr(args.schedule, sched_step, horizon, args.lr, min_ratio=self.min_lr_ratio,
+                         decay_frac=args.branch_decay_frac)
+        set_lr(self.opt, lr)
+        if self.elr_match is not None:
+            # after set_lr, which would otherwise overwrite it: param_lr wins for Muon's matrices, the
+            # schedule still drives the AdamW groups (they are identical between the arms being compared)
+            lr = self.elr_match.apply(self.opt, self.step) or lr
+        return pr, target_ratio, lr
+
+    def _log_train(self, stats: Dict, lr: float, target_ratio: float, dt: float) -> None:
+        """One train record: the step's stats (materialised here — the one sync per logging interval),
+        throughput, TFLOPS/MFU, the norms and ELR, the trace, and the norm guard's verdict."""
+        args = self.args
+        stats = {k: float(v) for k, v in stats.items()}
+        rec = {"lr": lr, "target_ratio": target_ratio, "bytes_per_sec": self.tokens_per_step * args.log_every / dt, "train_bpb": stats["ce"] / LN2}
+        rec.update(stats)
+        rec["tflops"] = flops_per_byte(self.model, args.seq_len, stats.get("bpic", 1.0)) * rec["bytes_per_sec"] / 1e12
+        if self.peak_tflops:
+            rec["mfu"] = rec["tflops"] / self.peak_tflops
+        if self.norms:
+            sample = self.norms.sample(self.step, lr, args.weight_decay)  # 61 norms in one device->host transfer
+            rec.update(self.norms.record(sample))
+            if self.elr_match is not None:
+                self.elr_match.refresh(sample)
+            if self.elr_trace is not None:
+                # rewritten whole, so not on every sample: a 2-h run logs ~3,000 of them and
+                # saving each one would push several GB through the disk for a 2 MB file
+                self.elr_trace.add(sample)
+                if len(self.elr_trace.samples) % elr.SAVE_EVERY == 0:
+                    self.elr_trace.save(self._elr_trace_path)
+            if self.norm_guard is not None:
+                tripped = self.norm_guard.update(sample)
+                if tripped:
+                    rec["norm_guard"] = tripped
+                    if args.norm_guard == "stop":
+                        self.request_stop(tripped)  # already prefixed "norm collapse"; jobs.py holds the queue on it
+        self.log(rec)
     def close(self):
         self.log_f.close()
         determinism.apply(True)  # restore the default for whatever runs next in this process
