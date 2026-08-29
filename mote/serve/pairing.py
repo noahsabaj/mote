@@ -27,8 +27,8 @@ LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
 class Pairing:
-    def __init__(self, state: dict, public_url: Optional[str] = None):
-        self.state = state  # shares the app's STATE (token lives there)
+    def __init__(self, studio, public_url: Optional[str] = None):
+        self.studio = studio  # the app's Studio: the token lives there
         self.public_url = public_url
         self._codes: dict[str, float] = {}  # code -> expiry
         self._attempts: list[float] = []
@@ -36,7 +36,7 @@ class Pairing:
     # ---- helpers --------------------------------------------------------------------------
     @property
     def token(self) -> Optional[str]:
-        return self.state.get("token")
+        return self.studio.token
 
     def new_code(self) -> tuple[str, float]:
         now = time.time()

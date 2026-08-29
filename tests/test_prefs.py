@@ -80,10 +80,10 @@ def _tiny_ckpt(tmp_path):
 
 def test_routes_vote_challenger_and_socket_engine(tmp_path, monkeypatch):
     ck = _tiny_ckpt(tmp_path)
-    monkeypatch.setitem(A.STATE, "engine", Engine(ck, device="cpu"))
-    monkeypatch.setitem(A.STATE, "challenger", None)
-    monkeypatch.setitem(A.STATE, "token", None)
-    monkeypatch.setitem(A.STATE, "device", "cpu")
+    monkeypatch.setattr(A.STUDIO, "engine", Engine(ck, device="cpu"))
+    monkeypatch.setattr(A.STUDIO, "challenger", None)
+    monkeypatch.setattr(A.STUDIO, "token", None)
+    monkeypatch.setattr(A.STUDIO.policy, "configured", "cpu")
     monkeypatch.setattr(A, "PREFS", _store(tmp_path))
     c = TestClient(A.app)
 

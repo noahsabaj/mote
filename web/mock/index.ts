@@ -9,6 +9,7 @@ import type { Plugin, ViteDevServer } from 'vite';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { CHECKPOINTS, checkpointList, modelPayload, runLog, runs, state } from './data';
 import { previewContext, runGeneration, type Session } from './generate';
+import type { TrainingJob } from '../src/lib/types';
 
 const SWAP_MS = 1400;
 
@@ -33,8 +34,7 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 }
 
 // Training jobs (docs/shape.md): an in-memory queue so the Training tab's controls work offline.
-type MockJob = { id: string; argv: string[]; state: string; created_at: number; started_at: number | null; ended_at: number | null; error: string | null; resumed: boolean };
-const MOCK_JOBS: MockJob[] = [];
+const MOCK_JOBS: TrainingJob[] = [];
 let jobSeq = 0;
 
 function jobsStatus() {
@@ -160,7 +160,7 @@ async function handle(
   if (path === '/api/training/start' && req.method === 'POST') {
     const body = await readJson(req);
     const argv = (body.args ?? []) as string[];
-    const rec = { id: `j${(jobSeq += 1)}`, argv, state: 'queued', created_at: Date.now() / 1000, started_at: null as number | null, ended_at: null as number | null, error: null, resumed: false };
+    const rec: TrainingJob = { id: `j${(jobSeq += 1)}`, argv, state: 'queued', created_at: Date.now() / 1000, started_at: null, ended_at: null, error: null, resumed: false };
     MOCK_JOBS.push(rec);
     setTimeout(() => {
       if (rec.state === 'queued' && !MOCK_JOBS.some((j) => j.state === 'running')) {

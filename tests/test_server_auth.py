@@ -9,8 +9,8 @@ import mote.serve.app as A
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setitem(A.STATE, "token", "s3cret")
-    monkeypatch.setitem(A.STATE, "engine", None)
+    monkeypatch.setattr(A.STUDIO, "token", "s3cret")
+    monkeypatch.setattr(A.STUDIO, "engine", None)
     return TestClient(A.app)
 
 
@@ -25,8 +25,8 @@ def test_http_routes_require_bearer_token(client):
 
 
 def test_no_token_means_open(monkeypatch):
-    monkeypatch.setitem(A.STATE, "token", None)
-    monkeypatch.setitem(A.STATE, "engine", None)
+    monkeypatch.setattr(A.STUDIO, "token", None)
+    monkeypatch.setattr(A.STUDIO, "engine", None)
     assert TestClient(A.app).get("/api/model").status_code == 503
     with TestClient(A.app).websocket_connect("/ws/generate") as ws:
         ws.send_json({"type": "auth", "token": "anything"})  # answered even when no token is configured
@@ -34,8 +34,8 @@ def test_no_token_means_open(monkeypatch):
 
 
 def test_pairing_page_is_loopback_only_and_codes_work_once(monkeypatch):
-    monkeypatch.setitem(A.STATE, "token", "s3cret")
-    monkeypatch.setitem(A.STATE, "engine", None)
+    monkeypatch.setattr(A.STUDIO, "token", "s3cret")
+    monkeypatch.setattr(A.STUDIO, "engine", None)
     A.PAIRING.public_url = "https://example.ts.net"
     remote = TestClient(A.app, client=("10.0.0.7", 1234))
     assert remote.get("/pair").status_code == 403
@@ -51,7 +51,7 @@ def test_pairing_page_is_loopback_only_and_codes_work_once(monkeypatch):
 
 
 def test_pairing_is_rate_limited(monkeypatch):
-    monkeypatch.setitem(A.STATE, "token", "s3cret")
+    monkeypatch.setattr(A.STUDIO, "token", "s3cret")
     A.PAIRING._attempts.clear()
     c = TestClient(A.app, client=("10.0.0.7", 1234))
     codes = [c.post("/api/pair", json={"code": "999999"}).status_code for _ in range(11)]

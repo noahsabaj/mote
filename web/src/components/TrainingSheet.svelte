@@ -1,67 +1,25 @@
 <script lang="ts">
   // Runs are read from the log files on disk. One run is the "primary" (details, probe sample);
-  // any number can be selected to overlay their curves and compare final numbers.
-  import { untrack } from 'svelte';
-  import { api, ApiError } from '../lib/api';
-  import {
-    isEvalRecord,
-    isTrainRecord,
-    type EvalRecord,
-    type LogRecord,
-    type TrainRecord,
-    type TrainingRun
-  } from '../lib/types';
-  import type { JobsStatus, TrainingJob } from '../lib/types';
+  // any number can be selected to overlay their curves and compare final numbers. The fetching,
+  // polling and log cursors live in the training store; this sheet renders and asks.
+  import { training } from '../lib/stores/training.svelte';
+  import { isEvalRecord, isTrainRecord, type EvalRecord, type LogRecord, type TrainRecord } from '../lib/types';
+  import type { TrainingJob } from '../lib/types';
   import Curve from './Curve.svelte';
   import type { Series } from '../lib/chart';
   import Icon from './Icon.svelte';
   import { count, minutes, num, pct, when } from '../lib/format';
 
-  const POLL_MS = 3000;
   const PALETTE = ['var(--accent)', '#4f86e0', '#3aa37a', '#b35cc9', '#c9a227', '#7c8590'];
 
-  let runs = $state<TrainingRun[]>([]);
-  // the daemon's job queue (docs/shape.md): training runs the studio owns
-  let jobs = $state<JobsStatus | null>(null);
-  let jobBusy = $state(false);
-  let jobError = $state<string | null>(null);
-
-  async function loadJobs() {
-    try {
-      jobs = await api.trainingQueue();
-      jobError = null;
-    } catch (e) {
-      jobError = e instanceof ApiError ? e.message : String(e);
-    }
-  }
-
-  // Jobs are started from the terminal (`mote train start … --serve`); the sheet is for watching them,
-  // stopping them, and choosing which one is on the air (R8 + R1, signed 2026-08-25).
-  async function serveJob(id: string | null, on: boolean) {
-    if (jobBusy) return;
-    jobBusy = true;
-    try {
-      jobs = await api.trainingServe(id, on);
-      jobError = null;
-    } catch (e) {
-      jobError = e instanceof ApiError ? e.message : String(e);
-    } finally {
-      jobBusy = false;
-    }
-  }
-
-  async function stopJob(id: string | null = null) {
-    if (jobBusy) return;
-    jobBusy = true;
-    try {
-      jobs = await api.trainingStop(id);
-      jobError = null;
-    } catch (e) {
-      jobError = e instanceof ApiError ? e.message : String(e);
-    } finally {
-      jobBusy = false;
-    }
-  }
+  const runs = $derived(training.runs);
+  const jobs = $derived(training.jobs);
+  const jobBusy = $derived(training.jobBusy);
+  const jobError = $derived(training.jobError);
+  const runsError = $derived(training.runsError);
+  const selected = $derived(training.selected);
+  const logs = $derived(training.logs);
+  const logError = $derived(training.logError);
 
   const argline = (j: TrainingJob) => j.argv.join(' ');
   // The run is what a line is about; a dozen queued arms that all began `--preset flagship --data …` were
@@ -70,81 +28,9 @@
     const i = j.argv.indexOf('--out');
     return i >= 0 && j.argv[i + 1] ? j.argv[i + 1].replace(/^runs\//, '') : argline(j);
   };
-  let runsError = $state<string | null>(null);
-  let selected = $state<string[]>([]);
-  let logs = $state<Record<string, LogRecord[]>>({});
-  let logError = $state<string | null>(null);
-  const cursors: Record<string, number> = {};
-  const pulling = new Set<string>();
 
-  async function loadRuns() {
-    try {
-      runs = await api.runs();
-      runsError = null;
-      if (!selected.length && runs.length) selected = [runs[0].id];
-    } catch (e) {
-      runsError = e instanceof ApiError ? e.message : String(e);
-    }
-  }
-
-  async function pull(id: string) {
-    if (pulling.has(id)) return;
-    pulling.add(id);
-    try {
-      const page = await api.runLog(id, cursors[id] ?? 0);
-      if (page.records.length) logs = { ...logs, [id]: [...(logs[id] ?? []), ...page.records] };
-      cursors[id] = page.next;
-      logError = null;
-    } catch (e) {
-      logError = e instanceof ApiError ? e.message : String(e);
-    } finally {
-      pulling.delete(id);
-    }
-  }
-
-  function toggle(id: string) {
-    if (selected.includes(id)) {
-      if (selected.length > 1) selected = selected.filter((x) => x !== id);
-    } else {
-      selected = [...selected, id];
-    }
-  }
-
-  $effect(() => {
-    void loadRuns();
-    void loadJobs();
-  });
-
-  $effect(() => {
-    const timer = setInterval(() => {
-      void loadJobs();
-      if (jobs?.current) void loadRuns();
-    }, POLL_MS * 2);
-    return () => clearInterval(timer);
-  });
-
-  // First selection of a run starts its log; later pulls only ask for what is new.
-  $effect(() => {
-    const ids = selected;
-    untrack(() => {
-      for (const id of ids) {
-        if (cursors[id] === undefined) {
-          cursors[id] = 0;
-          void pull(id);
-        }
-      }
-    });
-  });
-
-  $effect(() => {
-    const live = selected.filter((id) => runs.find((r) => r.id === id)?.running);
-    if (!live.length) return;
-    const timer = setInterval(() => {
-      for (const id of live) void pull(id);
-      void loadRuns();
-    }, POLL_MS);
-    return () => clearInterval(timer);
-  });
+  // open sheet = refresh now and poll; closing releases the poll
+  $effect(() => training.watch());
 
   const single = $derived(selected.length === 1);
   const primary = $derived(selected[0] ?? null);
@@ -224,7 +110,7 @@
   <div class="jobrow head">
     <h3>Jobs</h3>
     {#if jobs?.current}
-      <button class="btn" disabled={jobBusy} onclick={() => stopJob()}>Stop</button>
+      <button class="btn" disabled={jobBusy} onclick={() => training.stopJob()}>Stop</button>
     {/if}
   </div>
   {#if jobError}<p class="fail"><Icon name="alert" size={13} />{jobError}</p>{/if}
@@ -238,7 +124,7 @@
       <button
         class="quiet"
         disabled={jobBusy}
-        onclick={() => serveJob(jobs?.current?.id ?? null, !jobs?.current?.serve)}
+        onclick={() => training.serveJob(jobs?.current?.id ?? null, !jobs?.current?.serve)}
         title={jobs.current.serve
           ? 'Stop answering chats from this run; the pinned checkpoint takes over'
           : 'Answer chats from this run’s EMA while it trains; its final checkpoint becomes the pin'}
@@ -258,10 +144,10 @@
       <span class="mono">{runOf(j)}</span>
       {#if j.serve}<span class="air">on the air</span>{/if}
       <span class="meta args">{argline(j)}</span>
-      <button class="quiet" disabled={jobBusy} onclick={() => serveJob(j.id, !j.serve)} aria-label="{j.serve ? 'Take' : 'Put'} {runOf(j)} {j.serve ? 'off' : 'on'} the air">
+      <button class="quiet" disabled={jobBusy} onclick={() => training.serveJob(j.id, !j.serve)} aria-label="{j.serve ? 'Take' : 'Put'} {runOf(j)} {j.serve ? 'off' : 'on'} the air">
         {j.serve ? 'Off the air' : 'On the air'}
       </button>
-      <button class="quiet" disabled={jobBusy} onclick={() => stopJob(j.id)} aria-label="Cancel {runOf(j)}">Cancel</button>
+      <button class="quiet" disabled={jobBusy} onclick={() => training.stopJob(j.id)} aria-label="Cancel {runOf(j)}">Cancel</button>
     </p>
   {/each}
   {#each (jobs?.recent ?? []).slice(0, 3) as j (j.id)}
@@ -280,7 +166,7 @@
   <div class="picker" role="group" aria-label="Training runs">
     {#each runs as r (r.id)}
       {@const i = selected.indexOf(r.id)}
-      <button class="run" class:on={i >= 0} aria-pressed={i >= 0} onclick={() => toggle(r.id)}>
+      <button class="run" class:on={i >= 0} aria-pressed={i >= 0} onclick={() => training.toggle(r.id)}>
         <span class="name">
           {#if i >= 0 && !single}<span class="dot" style:background={colorOf(i)}></span>{/if}
           {r.id}

@@ -203,6 +203,8 @@ export function modelPayload(): ModelInfo {
       top_p: 0.9,
       max_bytes: 512
     },
+    prefix_cache: { snapshots: 3, branches: 1, cache_bytes: 9_437_184, cache_budget: 1_073_741_824, hits: 12, misses: 2 },
+    arena: { chunks: 512, bytes: 150_994_944, hot_branch: 'b1', hot_chunks: 140, graph_decode: false, released: false },
     // The backend sends these whenever a probe.json sits beside the checkpoint; the mock
     // reports them for the loaded run so the measured rendering is visible in dev, and leaves
     // the 1200-step checkpoint without one so the "not measured" branch is reachable too.

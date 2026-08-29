@@ -80,7 +80,7 @@ def test_a_new_eval_record_invalidates_even_though_the_checkpoint_did_not_change
 def test_rows_are_described_without_an_engine(run, monkeypatch):
     """The description comes from the run's own log (mote.runinfo), not from a loaded model: the sheet
     is complete before the engine is, and a row never waits on a swap."""
-    monkeypatch.setitem(A.STATE, "engine", None)
+    monkeypatch.setattr(A.STUDIO, "engine", None)
     log = run.parent / "log.jsonl"
     log.write_text(json.dumps({"step": 2000, "elapsed_min": 12.5, "eval": {"val_bpb": 0.954}}) + "\n", encoding="utf-8")
     (run.parent / "run.json").write_text(json.dumps({"batch_size": 2, "seq_len": 64, "grad_accum": 1}))

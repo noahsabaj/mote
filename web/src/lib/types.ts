@@ -42,6 +42,24 @@ export interface SamplingParams {
   max_bytes: number;
 }
 
+export interface PrefixCacheInfo {
+  snapshots: number;
+  branches: number;
+  cache_bytes: number;
+  cache_budget: number;
+  hits: number;
+  misses: number;
+}
+
+export interface ArenaInfo {
+  chunks: number;
+  bytes: number;
+  hot_branch: string | null;
+  hot_chunks: number;
+  graph_decode: boolean;
+  released: boolean;
+}
+
 export interface ModelInfo {
   name: string;
   params: number;
@@ -53,6 +71,10 @@ export interface ModelInfo {
   device: DeviceInfo;
   kernels: Kernels;
   defaults: SamplingParams;
+  /** the prefix store (docs/context.md): anchors and arena pages kept across turns under a byte budget */
+  prefix_cache: PrefixCacheInfo;
+  /** the resident Relation decode arena (docs/shape.md § serving root); `released` while a job owns the GPU */
+  arena: ArenaInfo;
   /** identity / pushback probe (mote.eval.probe), measured on this checkpoint; absent until run */
   probe?: {
     /** primary scores: held-out prompts, facts and pushback wordings absent from the identity training data */
@@ -81,7 +103,8 @@ export interface ModelInfo {
 export interface TrainingJob {
   id: string;
   argv: string[];
-  state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
+  /** `held`: a norm-guard trip or a repeated death before the first logged step; the queue halts until `mote train release` */
+  state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted' | 'held';
   created_at: number;
   started_at: number | null;
   ended_at: number | null;
@@ -94,6 +117,11 @@ export interface TrainingJob {
   retry_of?: string | null;
   not_before?: number;
   needs_bytes?: number;
+  /** process deaths before this lineage logged a step, and the step it started from (the breaker's baseline) */
+  deaths?: number;
+  start_step?: number;
+  /** why a queued job is not starting, in words (retry delay, memory), or null */
+  waiting?: string | null;
 }
 
 export interface JobsStatus {
@@ -102,6 +130,10 @@ export interface JobsStatus {
   phase?: string | null;
   queued: TrainingJob[];
   recent: TrainingJob[];
+  /** the queue is stopped on this (a norm-guard trip) until `mote train release` */
+  halted?: string | null;
+  /** the daemon is starting nothing for this reason (no CUDA yet) */
+  paused?: string | null;
 }
 
 export interface ChallengerInfo {

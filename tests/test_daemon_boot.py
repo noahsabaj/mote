@@ -57,18 +57,18 @@ def _tiny_engine():
 
 def test_parking_the_engine_keeps_it_on_the_cpu_across_idle_signals(tmp_path, monkeypatch):
     moves = []
-    monkeypatch.setattr(A, "_move_engine", lambda device, warm: moves.append((device, warm)))
-    monkeypatch.setitem(A.STATE, "engine", _tiny_engine())
-    monkeypatch.setitem(A.STATE, "jobs", JobQueue(tmp_path / "jobs.json", threading.Lock()))
-    monkeypatch.setitem(A.STATE, "device", "cuda")
-    monkeypatch.setitem(A.STATE, "parked", False)
-    monkeypatch.setitem(A.STATE, "cuda_missing", None)
+    monkeypatch.setattr(A.STUDIO, "move_engine", lambda device, warm: moves.append((device, warm)))
+    monkeypatch.setattr(A.STUDIO, "engine", _tiny_engine())
+    monkeypatch.setattr(A.STUDIO, "jobs", JobQueue(tmp_path / "jobs.json", threading.Lock()))
+    monkeypatch.setattr(A.STUDIO.policy, "configured", "cuda")
+    monkeypatch.setattr(A.STUDIO.policy, "parked", False)
+    monkeypatch.setattr(A.STUDIO.policy, "cuda_missing", None)
     c = TestClient(A.app)
-    assert A._serve_device() == "cuda"
+    assert A.STUDIO.serve_device() == "cuda"
     r = c.post("/api/engine/device", json={"device": "cpu"})
     assert r.status_code == 200 and r.json()["parked"] is True and moves == [("cpu", False)]
-    assert A._serve_device() == "cpu"
-    A._queue_idle()  # the queue going idle used to bring the engine back to the GPU unconditionally
+    assert A.STUDIO.serve_device() == "cpu"
+    A.STUDIO.queue_idle()  # the queue going idle used to bring the engine back to the GPU unconditionally
     assert moves[-1] == ("cpu", True)
     r = c.post("/api/engine/device", json={"device": "cuda"})
     assert r.status_code == 200 and r.json()["parked"] is False and moves[-1] == ("cuda", True)
@@ -76,11 +76,11 @@ def test_parking_the_engine_keeps_it_on_the_cpu_across_idle_signals(tmp_path, mo
 
 
 def test_without_cuda_the_engine_cannot_be_asked_onto_the_gpu(tmp_path, monkeypatch):
-    monkeypatch.setattr(A, "_move_engine", lambda device, warm: None)
-    monkeypatch.setitem(A.STATE, "engine", _tiny_engine())
-    monkeypatch.setitem(A.STATE, "jobs", JobQueue(tmp_path / "jobs.json", threading.Lock()))
-    monkeypatch.setitem(A.STATE, "device", "cuda")
-    monkeypatch.setitem(A.STATE, "cuda_missing", "no device")
-    assert A._serve_device() == "cpu"
+    monkeypatch.setattr(A.STUDIO, "move_engine", lambda device, warm: None)
+    monkeypatch.setattr(A.STUDIO, "engine", _tiny_engine())
+    monkeypatch.setattr(A.STUDIO, "jobs", JobQueue(tmp_path / "jobs.json", threading.Lock()))
+    monkeypatch.setattr(A.STUDIO.policy, "configured", "cuda")
+    monkeypatch.setattr(A.STUDIO.policy, "cuda_missing", "no device")
+    assert A.STUDIO.serve_device() == "cpu"
     r = TestClient(A.app).post("/api/engine/device", json={"device": "cuda"})
     assert r.status_code == 409 and "no device" in r.json()["detail"]

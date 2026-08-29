@@ -18,7 +18,7 @@ import threading
 import traceback
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # The caching allocator grows segments instead of fragmenting them (native Linux; signed 2026-08-24):
 # must be set before torch initialises CUDA. The supervisor sets it too; this covers a direct start.
@@ -37,45 +37,13 @@ from ..infer.context import context_report
 from ..infer.engine import Engine, GenParams, describe_checkpoint, discover_checkpoints
 from ..paths import CONFIG_FILE, JOBS_FILE, ROOT, run_id
 from .prefs import PrefStore, rubric as rubric_info
+from .schemas import (CheckpointRowOut, HealthOut, JobsStatusOut, LogPageOut, PrefsSummaryOut, ReleaseOut, RunOut,
+                      SubmitOut)
 from .jobs import JobQueue
 from .pairing import Pairing, router as pairing_router
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 app = FastAPI(title="Mote Studio")
-STATE: dict = {"engine": None, "swapping": False, "lock": threading.Lock(), "token": None,
-               "challenger": None, "challenger_loading": False,  # challenger: a second Engine for blind A/B (docs/prefs.md)
-               "jobs": None, "gate": None,  # the training job queue and the GPU gate it shares with serving (docs/shape.md)
-               "parked": False,  # a person moved the engine to the CPU (POST /api/engine/device) and it stays there
-               "cuda_missing": None,  # launched --device cuda but CUDA never came up: serving on the CPU, queue paused
-               "config_file": CONFIG_FILE}  # where the pin (the boot checkpoint) lives
-
-
-def _serve_sync(cfg_dict: dict, state_dict, name: str, step: int) -> None:
-    """A running job's EMA becomes the served weights (called under the GPU gate). The swap drops every
-    anchor (they were computed under the old weights), so the recent conversations are re-read right
-    away — the next message finds them warm (decided 2026-08-24)."""
-    e = STATE["engine"]
-    if e is not None and not STATE["swapping"]:
-        e.apply_run_weights(cfg_dict, state_dict, name, step)
-        try:
-            rep = e.rewarm()
-            if rep["branches"]:
-                print(f"swap {name}@{step}: re-warmed {rep['branches']} conversation(s), {rep['bytes']} B in {rep['ms']:.0f} ms", flush=True)
-        except Exception as ex:  # a cold next turn is the only cost
-            print(f"rewarm after swap failed: {ex!r}", flush=True)
-
-
-def _serve_device() -> str:
-    """Where the studio's engine belongs right now: the CPU while any job runs or is about to, the configured
-    device (the GPU) when the queue idles (signed 2026-08-25: training gets the whole card, replies never wait
-    for it; ~45 B/s on the CPU vs 85–190 on the GPU, a cold 4.6 KB read is 10 s)."""
-    if STATE.get("cuda_missing") or STATE.get("parked"):
-        return "cpu"
-    jobs = STATE["jobs"]
-    busy = jobs is not None and (jobs.current() is not None or jobs.has_runnable())
-    return "cpu" if busy else (STATE.get("device") or "cpu")
-
-
 CUDA_WAIT_S = float(os.environ.get("MOTE_CUDA_WAIT", 180.0))
 CUDA_REPROBE_S = float(os.environ.get("MOTE_CUDA_REPROBE", 30.0))
 
@@ -115,97 +83,147 @@ def wait_for_cuda(timeout: float, probe=cuda_probe, interval: float = 5.0, clock
         sleep(min(interval, max(timeout - waited, 0.0)))
 
 
-def _self_heal() -> None:
-    """Without CUDA the daemon serves on the CPU with the queue paused; every `CUDA_REPROBE_S` a fresh interpreter
-    asks again, and the first yes restarts this process — SIGTERM is the graceful path systemd uses, the
-    supervisor relaunches, and the new process sees the device from the start."""
-    while STATE.get("cuda_missing"):
-        time.sleep(CUDA_REPROBE_S)
-        ok, _why = cuda_probe()
-        if ok:
-            print("CUDA is available now: restarting to use it", flush=True)
-            os.kill(os.getpid(), signal.SIGTERM)
+class DevicePolicy:
+    """Where the studio's engine belongs right now (signed 2026-08-25): the CPU while any job runs or is about
+    to, the configured device (the GPU) when the queue idles — training gets the whole card and a reply never
+    waits for it (~45 B/s on the CPU vs 85–190 on the GPU; a cold 4.6 KB read is 10 s). Parked stays parked
+    across idle signals until "cuda" is asked for; without CUDA the answer is always the CPU."""
+
+    def __init__(self, configured: Optional[str] = None):
+        self.configured = configured  # the --device the daemon was launched with (None = whatever there is)
+        self.parked = False  # a person moved the engine to the CPU (POST /api/engine/device) and it stays there
+        self.cuda_missing: Optional[str] = None  # launched --device cuda but CUDA never came up: CPU, queue paused
+
+    def where(self, jobs) -> str:
+        if self.cuda_missing or self.parked:
+            return "cpu"
+        busy = jobs is not None and (jobs.current() is not None or jobs.has_runnable())
+        return "cpu" if busy else (self.configured or "cpu")
+
+
+class Studio:
+    """The server's object graph: the served engine, the challenger, the job queue, the GPU gate the two
+    share, the device policy, the access token and the pin. One per process (`STUDIO`); the routes read it
+    and the queue's hooks call back into it. It replaced a module-level dict read from 24 routes (2026-08-29)."""
+
+    def __init__(self, config_file: Path = CONFIG_FILE):
+        self.engine: Optional[Engine] = None
+        self.swapping = False  # a weight swap or a load is in flight: routes answer 503 rather than a half-built engine
+        self.lock = threading.Lock()
+        self.token: Optional[str] = None
+        self.challenger: Optional[Engine] = None  # a second Engine for blind A/B (docs/prefs.md)
+        self.challenger_loading = False
+        self.jobs: Optional[JobQueue] = None  # the training job queue (docs/shape.md)
+        self.gate = threading.Lock()  # the GPU gate: the queue takes it per slice, serving around weight swaps
+        self.policy = DevicePolicy()
+        self.config_file = Path(config_file)  # where the pin (the boot checkpoint) lives
+
+    # ---- device ---------------------------------------------------------------------------------------
+    def serve_device(self) -> str:
+        return self.policy.where(self.jobs)
+
+    def move_engine(self, device: str, warm: bool) -> None:
+        e = self.engine
+        if e is None or e.device.type == torch.device(device).type:
             return
+        with self.lock:
+            self.swapping = True
+            try:
+                moved = e.moved(device)
+                self.engine = moved
+                if warm:
+                    print(f"serving on {device}: warm-up {moved.warmup():.1f} s", flush=True)
+                else:
+                    print(f"serving on {device}", flush=True)
+            except Exception as ex:
+                print(f"moving the engine to {device} failed: {ex!r}", flush=True)
+            finally:
+                self.swapping = False
 
+    def load_engine(self, path: Path) -> Engine:
+        """A fresh engine for `path` on the device serving belongs on right now; warmed only on the GPU."""
+        eng = Engine(path, device=self.serve_device())
+        eng.gpu_gate = self.gate
+        if eng.device.type == "cuda":
+            eng.warmup()
+        return eng
 
-def _move_engine(device: str, warm: bool) -> None:
-    e = STATE["engine"]
-    if e is None or e.device.type == torch.device(device).type:
-        return
-    with STATE["lock"]:
-        STATE["swapping"] = True
+    # ---- the pin --------------------------------------------------------------------------------------
+    def pin_path(self) -> Optional[str]:
         try:
-            moved = e.moved(device)
-            STATE["engine"] = moved
-            if warm:
-                print(f"serving on {device}: warm-up {moved.warmup():.1f} s", flush=True)
-            else:
-                print(f"serving on {device}", flush=True)
-        except Exception as ex:
-            print(f"moving the engine to {device} failed: {ex!r}", flush=True)
-        finally:
-            STATE["swapping"] = False
+            return json.loads(self.config_file.read_text(encoding="utf-8")).get("checkpoint")
+        except Exception:
+            return None
 
-
-def _job_started(rec) -> None:
-    """A job owns the GPU: serving moves to the CPU (same weights, fresh prefix store)."""
-    _move_engine("cpu", warm=False)
-
-
-def _queue_idle() -> None:
-    """Nothing runnable is queued: serving comes back to the GPU with its arena + graphs (one warm-up) —
-    unless a person parked it on the CPU, or there is no GPU to come back to."""
-    _move_engine(_serve_device(), warm=True)
-
-
-def _pin_path() -> Optional[str]:
-    try:
-        return json.loads(Path(STATE["config_file"]).read_text(encoding="utf-8")).get("checkpoint")
-    except Exception:
-        return None
-
-
-def _write_pin(path: Path) -> None:
-    """The pin is the boot default in .mote/config.json: a manual load or a finished --serve job sets it."""
-    f = Path(STATE["config_file"])
-    try:
-        cfg = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
-    except Exception:
-        cfg = {}
-    cfg["checkpoint"] = ckpt_id(path)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-    tmp.replace(f)
-
-
-def _load_engine(path: Path) -> Engine:
-    """A fresh engine for `path` on the device serving belongs on right now; warmed only on the GPU."""
-    device = _serve_device()
-    eng = Engine(path, device=device)
-    eng.gpu_gate = STATE["gate"]
-    if eng.device.type == "cuda":
-        eng.warmup()
-    return eng
-
-
-def _job_finished(rec) -> None:
-    """A finished job that was on the air pins its final checkpoint and serves it; anything else leaves the
-    served model alone (a queue of screening arms used to replace the chat model every time one ended)."""
-    out = rec.out_dir
-    path = (ROOT / out / "last.pt") if out else None
-    if rec.state != "done" or not rec.serve or path is None or not path.exists():
-        return
-    with STATE["lock"]:
-        STATE["swapping"] = True
+    def write_pin(self, path: Path) -> None:
+        """The pin is the boot default in .mote/config.json: a manual load or a finished --serve job sets it."""
+        f = self.config_file
         try:
-            STATE["engine"] = _load_engine(path)
-            _write_pin(path)
-            print(f"job {rec.id} finished on the air: pinned and serving {ckpt_id(path)}", flush=True)
-        except Exception as ex:
-            print(f"serving the finished job's checkpoint failed: {ex!r}", flush=True)
-        finally:
-            STATE["swapping"] = False
+            cfg = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+        except Exception:
+            cfg = {}
+        cfg["checkpoint"] = ckpt_id(path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+        tmp.replace(f)
+
+    # ---- the queue's hooks ----------------------------------------------------------------------------
+    def serve_sync(self, cfg_dict: dict, state_dict, name: str, step: int) -> None:
+        """A running job's EMA becomes the served weights (called under the GPU gate). The swap drops every
+        anchor (they were computed under the old weights), so the recent conversations are re-read right
+        away — the next message finds them warm (decided 2026-08-24)."""
+        e = self.engine
+        if e is not None and not self.swapping:
+            e.apply_run_weights(cfg_dict, state_dict, name, step)
+            try:
+                rep = e.rewarm()
+                if rep["branches"]:
+                    print(f"swap {name}@{step}: re-warmed {rep['branches']} conversation(s), {rep['bytes']} B in {rep['ms']:.0f} ms", flush=True)
+            except Exception as ex:  # a cold next turn is the only cost
+                print(f"rewarm after swap failed: {ex!r}", flush=True)
+
+    def job_started(self, rec) -> None:
+        """A job owns the GPU: serving moves to the CPU (same weights, fresh prefix store)."""
+        self.move_engine("cpu", warm=False)
+
+    def queue_idle(self) -> None:
+        """Nothing runnable is queued: serving comes back to the GPU with its arena + graphs (one warm-up) —
+        unless a person parked it on the CPU, or there is no GPU to come back to."""
+        self.move_engine(self.serve_device(), warm=True)
+
+    def job_finished(self, rec) -> None:
+        """A finished job that was on the air pins its final checkpoint and serves it; anything else leaves the
+        served model alone (a queue of screening arms used to replace the chat model every time one ended)."""
+        out = rec.out_dir
+        path = (ROOT / out / "last.pt") if out else None
+        if rec.state != "done" or not rec.serve or path is None or not path.exists():
+            return
+        with self.lock:
+            self.swapping = True
+            try:
+                self.engine = self.load_engine(path)
+                self.write_pin(path)
+                print(f"job {rec.id} finished on the air: pinned and serving {ckpt_id(path)}", flush=True)
+            except Exception as ex:
+                print(f"serving the finished job's checkpoint failed: {ex!r}", flush=True)
+            finally:
+                self.swapping = False
+
+    def self_heal(self) -> None:
+        """Without CUDA the daemon serves on the CPU with the queue paused; every `CUDA_REPROBE_S` a fresh interpreter
+        asks again, and the first yes restarts this process — SIGTERM is the graceful path systemd uses, the
+        supervisor relaunches, and the new process sees the device from the start."""
+        while self.policy.cuda_missing:
+            time.sleep(CUDA_REPROBE_S)
+            ok, _why = cuda_probe()
+            if ok:
+                print("CUDA is available now: restarting to use it", flush=True)
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+
+
+STUDIO = Studio()
 PREFS = PrefStore()
 
 # --- access token -----------------------------------------------------------------
@@ -216,12 +234,12 @@ PREFS = PrefStore()
 # without a token unless --no-auth is given explicitly.
 PROTECTED_PREFIXES = ("/api/", "/v1/")
 OPEN_PATHS = {"/api/health", "/api/pair"}  # /api/pair is how a device obtains the token
-PAIRING = Pairing(STATE)
+PAIRING = Pairing(STUDIO)
 app.include_router(pairing_router(PAIRING))
 
 
 def token_ok(presented) -> bool:
-    tok = STATE["token"]
+    tok = STUDIO.token
     if not tok:
         return True
     return isinstance(presented, str) and secrets.compare_digest(presented.encode(), tok.encode())
@@ -230,7 +248,7 @@ def token_ok(presented) -> bool:
 @app.middleware("http")
 async def require_token(request: Request, call_next):
     path = request.url.path
-    if STATE["token"] and path.startswith(PROTECTED_PREFIXES) and path not in OPEN_PATHS:
+    if STUDIO.token and path.startswith(PROTECTED_PREFIXES) and path not in OPEN_PATHS:
         auth = request.headers.get("authorization", "")
         presented = auth[7:] if auth[:7].lower() == "bearer " else None
         if not token_ok(presented):
@@ -240,8 +258,8 @@ async def require_token(request: Request, call_next):
 
 
 def engine() -> Engine:
-    e = STATE["engine"]
-    if e is None or STATE["swapping"]:
+    e = STUDIO.engine
+    if e is None or STUDIO.swapping:
         raise HTTPException(status_code=503, detail="model not available (loading)")
     return e
 
@@ -249,20 +267,20 @@ def engine() -> Engine:
 def engine_for(role: Optional[str]) -> Engine:
     """'current' (default) or 'challenger' — the second engine the studio compares against."""
     if role == "challenger":
-        ch = STATE["challenger"]
-        if ch is None or STATE["challenger_loading"]:
+        ch = STUDIO.challenger
+        if ch is None or STUDIO.challenger_loading:
             raise HTTPException(status_code=503, detail="no challenger loaded")
         return ch
     return engine()
 
 
 def challenger_info() -> Optional[dict]:
-    ch = STATE["challenger"]
+    ch = STUDIO.challenger
     if ch is None:
         return None
     c = ch.info_ckpt
     return {"id": ckpt_id(ch.ckpt_path), "name": ch.ckpt_name, "step": c.step, "val_bpb": c.val_bpb,
-            "loading": STATE["challenger_loading"]}
+            "loading": STUDIO.challenger_loading}
 
 
 def ckpt_id(p: Path) -> str:
@@ -270,9 +288,9 @@ def ckpt_id(p: Path) -> str:
 
 
 # --- HTTP --------------------------------------------------------------------------
-@app.get("/api/health")
+@app.get("/api/health", response_model=HealthOut)
 def health():
-    return {"ok": True, "model_loaded": STATE["engine"] is not None and not STATE["swapping"]}
+    return {"ok": True, "model_loaded": STUDIO.engine is not None and not STUDIO.swapping}
 
 
 @app.get("/api/model")
@@ -281,9 +299,9 @@ def model_info():
     info = e.info()
     info["challenger"] = challenger_info()
     # what is answering and why (signed 2026-08-25): the pin, the device, and the job on the air if any
-    info["pin"] = _pin_path()
+    info["pin"] = STUDIO.pin_path()
     info["serving_device"] = e.device.type
-    jobs = STATE["jobs"]
+    jobs = STUDIO.jobs
     cur = jobs.current() if jobs is not None else None
     info["following"] = (cur.out_dir or cur.id) if cur is not None and cur.serve else None
     return info
@@ -320,10 +338,10 @@ def _checkpoint_row(p: Path) -> dict:
     return row
 
 
-@app.get("/api/checkpoints")
+@app.get("/api/checkpoints", response_model=List[CheckpointRowOut])
 def checkpoints():
-    cur = STATE["engine"].ckpt_path.resolve() if STATE["engine"] else None
-    ch = STATE["challenger"].ckpt_path.resolve() if STATE["challenger"] else None
+    cur = STUDIO.engine.ckpt_path.resolve() if STUDIO.engine else None
+    ch = STUDIO.challenger.ckpt_path.resolve() if STUDIO.challenger else None
     out = []
     for p in discover_checkpoints(ROOT):
         out.append({
@@ -343,20 +361,20 @@ def load_checkpoint(body: LoadBody):
     path = (ROOT / body.id).resolve()
     if not path.exists():
         raise HTTPException(404, "checkpoint not found")
-    with STATE["lock"]:
-        STATE["swapping"] = True
+    with STUDIO.lock:
+        STUDIO.swapping = True
         try:
-            old = STATE["engine"]
-            STATE["engine"] = None
+            old = STUDIO.engine
+            STUDIO.engine = None
             del old
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            STATE["engine"] = _load_engine(path)
-            _write_pin(path)  # the pick is the new pin
+            STUDIO.engine = STUDIO.load_engine(path)
+            STUDIO.write_pin(path)  # the pick is the new pin
         finally:
-            STATE["swapping"] = False
+            STUDIO.swapping = False
     # The pick wins: a job that was on the air stops following for the rest of its life (signed 2026-08-25).
-    jobs = STATE["jobs"]
+    jobs = STUDIO.jobs
     unfollowed = None
     if jobs is not None:
         cur = jobs.current()
@@ -385,10 +403,10 @@ class TrainServeBody(BaseModel):
     on: bool = True
 
 
-@app.post("/api/training/serve")
+@app.post("/api/training/serve", response_model=JobsStatusOut)
 def training_serve(body: TrainServeBody):
     """Put a running or queued job on the air, or take it off ("Put on the air" in the Training sheet)."""
-    jobs = STATE["jobs"]
+    jobs = STUDIO.jobs
     if jobs is None:
         raise HTTPException(503, "job queue not running")
     rec = jobs.set_serve(body.id, body.on)
@@ -397,10 +415,10 @@ def training_serve(body: TrainServeBody):
     return jobs.status()
 
 
-@app.post("/api/training/start")
+@app.post("/api/training/start", response_model=SubmitOut)
 def training_start(body: TrainStartBody):
     """Enqueue a training job (docs/shape.md): args exactly as `python -m mote.train.train` takes them."""
-    jobs = STATE["jobs"]
+    jobs = STUDIO.jobs
     if jobs is None:
         raise HTTPException(503, "job queue not running")
     try:
@@ -410,9 +428,9 @@ def training_start(body: TrainStartBody):
     return {"submitted": rec.id, **jobs.status()}
 
 
-@app.post("/api/training/stop")
+@app.post("/api/training/stop", response_model=JobsStatusOut)
 def training_stop(body: TrainStopBody):
-    jobs = STATE["jobs"]
+    jobs = STUDIO.jobs
     if jobs is None:
         raise HTTPException(503, "job queue not running")
     rec = jobs.cancel(body.id)
@@ -421,11 +439,11 @@ def training_stop(body: TrainStopBody):
     return jobs.status()
 
 
-@app.post("/api/training/release")
+@app.post("/api/training/release", response_model=ReleaseOut)
 def training_release():
     """Clear a norm-guard halt. The queue stops dead when a run's parameter norm collapses (a checkpoint
     nothing downstream should build on), and only a person restarts it."""
-    jobs = STATE["jobs"]
+    jobs = STUDIO.jobs
     if jobs is None:
         raise HTTPException(503, "job queue not running")
     was = jobs.release()
@@ -445,28 +463,28 @@ def engine_device(body: EngineDeviceBody):
     Parked stays parked across idle signals until "cuda" is asked for."""
     if body.device not in ("cpu", "cuda"):
         raise HTTPException(400, "device must be cpu or cuda")
-    if STATE["engine"] is None:
+    if STUDIO.engine is None:
         raise HTTPException(503, "no engine")
-    jobs = STATE["jobs"]
+    jobs = STUDIO.jobs
     if body.device == "cuda":
-        if STATE.get("cuda_missing"):
-            raise HTTPException(409, f"CUDA is not available: {STATE['cuda_missing']}")
+        if STUDIO.policy.cuda_missing:
+            raise HTTPException(409, f"CUDA is not available: {STUDIO.policy.cuda_missing}")
         if jobs is not None and jobs.current() is not None:
             raise HTTPException(409, "a job owns the GPU; the engine comes back when the queue idles")
-        STATE["parked"] = False
+        STUDIO.policy.parked = False
     else:
-        STATE["parked"] = True
-    _move_engine(body.device, warm=(body.device == "cuda"))
-    return {"parked": bool(STATE["parked"]), **STATE["engine"].info()}
+        STUDIO.policy.parked = True
+    STUDIO.move_engine(body.device, warm=(body.device == "cuda"))
+    return {"parked": bool(STUDIO.policy.parked), **STUDIO.engine.info()}
 
 
-@app.get("/api/training/queue")
+@app.get("/api/training/queue", response_model=JobsStatusOut)
 def training_queue():
-    jobs = STATE["jobs"]
+    jobs = STUDIO.jobs
     return jobs.status() if jobs is not None else {"current": None, "queued": [], "recent": [], "halted": None, "paused": None}
 
 
-@app.get("/api/training/runs")
+@app.get("/api/training/runs", response_model=List[RunOut])
 def training_runs():
     runs = []
     for d in sorted((ROOT / "runs").glob("*")):
@@ -479,7 +497,7 @@ def training_runs():
     return runs
 
 
-@app.get("/api/training/runs/{run_id}/log")
+@app.get("/api/training/runs/{run_id}/log", response_model=LogPageOut)
 def training_log(run_id: str, since: int = 0):
     log = ROOT / "runs" / run_id / "log.jsonl"
     if not log.exists():
@@ -504,24 +522,24 @@ def load_challenger(body: LoadBody):
     path = (ROOT / body.id).resolve()
     if not path.exists():
         raise HTTPException(404, "checkpoint not found")
-    with STATE["lock"]:
-        STATE["challenger_loading"] = True
+    with STUDIO.lock:
+        STUDIO.challenger_loading = True
         try:
-            STATE["challenger"] = None
+            STUDIO.challenger = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            eng = Engine(path, device=STATE.get("device"))
+            eng = Engine(path, device=STUDIO.policy.configured)
             eng.warmup()
-            STATE["challenger"] = eng
+            STUDIO.challenger = eng
         finally:
-            STATE["challenger_loading"] = False
+            STUDIO.challenger_loading = False
     return model_info()
 
 
 @app.delete("/api/challenger")
 def drop_challenger():
-    with STATE["lock"]:
-        STATE["challenger"] = None
+    with STUDIO.lock:
+        STUDIO.challenger = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     return model_info()
@@ -543,7 +561,7 @@ class VoteBody(BaseModel):
     reason: str = ""
 
 
-@app.post("/api/prefs/vote")
+@app.post("/api/prefs/vote", response_model=PrefsSummaryOut)
 def prefs_vote(body: VoteBody):
     try:
         rec = PREFS.add_pair(body.pair.messages, body.pair.a, body.pair.b, body.pair.a_source, body.pair.b_source, body.pair.origin)
@@ -562,7 +580,7 @@ class MarkBody(BaseModel):
     reason: str = ""
 
 
-@app.post("/api/prefs/mark")
+@app.post("/api/prefs/mark", response_model=PrefsSummaryOut)
 def prefs_mark(body: MarkBody):
     """One thumb on one reply — the collection path that does not need a second generation or a comparison.
     KTO (mote.train.kto) trains on these directly; docs/prefs.md."""
@@ -573,7 +591,7 @@ def prefs_mark(body: MarkBody):
     return {"mark": rec["id"], **PREFS.summary()}
 
 
-@app.get("/api/prefs/summary")
+@app.get("/api/prefs/summary", response_model=PrefsSummaryOut)
 def prefs_summary():
     return PREFS.summary()
 
@@ -667,7 +685,7 @@ async def chat_completions(body: ChatBody):
 @app.websocket("/ws/generate")
 async def ws_generate(ws: WebSocket):
     await ws.accept()
-    if STATE["token"]:
+    if STUDIO.token:
         try:
             first = await asyncio.wait_for(ws.receive_json(), timeout=15)
         except Exception:
@@ -773,42 +791,41 @@ def main(argv=None):
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
     if not loopback and not args.token and not args.no_auth:
         raise SystemExit(f"refusing to bind {args.host} without a token: pass --token (or MOTE_TOKEN), or --no-auth to override")
-    STATE["token"] = args.token or None
+    STUDIO.token = args.token or None
     PAIRING.public_url = args.public_url
-    if STATE["token"]:
+    if STUDIO.token:
         print(f"pair a device: open http://127.0.0.1:{args.port}/pair on this machine", flush=True)
-    print("access token: " + ("required" if STATE["token"] else "none" + ("" if loopback else " (--no-auth)")), flush=True)
+    print("access token: " + ("required" if STUDIO.token else "none" + ("" if loopback else " (--no-auth)")), flush=True)
     ck = Path(args.checkpoint) if args.checkpoint else (discover_checkpoints(ROOT) or [None])[0]
     if ck is None:
         raise SystemExit("no checkpoint found; train one first or pass --checkpoint")
     if args.device == "cuda":  # before anything here asks torch.cuda: the first answer is the process's forever
         missing = wait_for_cuda(CUDA_WAIT_S)
         if missing:
-            STATE["cuda_missing"] = missing
+            STUDIO.policy.cuda_missing = missing
             print(f"CUDA not available after {CUDA_WAIT_S:.0f} s ({missing}): serving on the CPU with the queue "
                   f"paused; re-probing every {CUDA_REPROBE_S:.0f} s and restarting when it appears", flush=True)
     print(f"loading {ck} ...", flush=True)
-    STATE["device"] = args.device
-    gate = threading.Lock()
-    STATE["gate"] = gate
-    jobs = JobQueue(JOBS_FILE, gate, on_serve_sync=_serve_sync, on_finished=_job_finished,
-                    on_started=_job_started, on_idle=_queue_idle)
-    STATE["jobs"] = jobs
-    if STATE["cuda_missing"]:
-        jobs.pause(f"waiting for CUDA: {STATE['cuda_missing']}")
+    STUDIO.policy.configured = args.device
+    gate = STUDIO.gate
+    jobs = JobQueue(JOBS_FILE, gate, on_serve_sync=STUDIO.serve_sync, on_finished=STUDIO.job_finished,
+                    on_started=STUDIO.job_started, on_idle=STUDIO.queue_idle)
+    STUDIO.jobs = jobs
+    if STUDIO.policy.cuda_missing:
+        jobs.pause(f"waiting for CUDA: {STUDIO.policy.cuda_missing}")
     # A queued job starts right away and owns the GPU: serving starts on the CPU and moves to the GPU when the
     # queue idles (signed 2026-08-25). No warm-up on the CPU: there is nothing to JIT there.
-    device = _serve_device()
+    device = STUDIO.serve_device()
     eng = Engine(ck, device=device)
     eng.gpu_gate = gate
     if eng.device.type == "cuda":
         print(f"warming up kernels ... ({eng.warmup():.1f} s)", flush=True)
     else:
         print(f"training queued: serving on the {device} until the queue idles", flush=True)
-    STATE["engine"] = eng
+    STUDIO.engine = eng
     jobs.start()
-    if STATE["cuda_missing"]:
-        threading.Thread(target=_self_heal, name="mote-cuda-probe", daemon=True).start()
+    if STUDIO.policy.cuda_missing:
+        threading.Thread(target=STUDIO.self_heal, name="mote-cuda-probe", daemon=True).start()
     print(json.dumps(eng.info(), indent=1), flush=True)
     # uvicorn captures SIGTERM/SIGINT for its graceful shutdown, then restores the handlers it found and
     # re-raises the signal — with the default handlers that killed the process (exit -15) before the hook
