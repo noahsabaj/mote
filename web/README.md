@@ -24,7 +24,7 @@ tree you get is not the locked one.
 
 ## How it talks to the backend
 
-Same origin, always. In production the FastAPI app (`mote.serve.app`, port 7860) serves
+Same origin, always. In production the FastAPI app (`mote.serve.app`, port 7861) serves
 `web/dist` at `/` and answers `/api`, `/v1` and `/ws/generate` itself, so no proxy or base URL
 is configured anywhere.
 
@@ -38,10 +38,8 @@ loaded…` and is printed verbatim in the Diagnostics sheet; the device is named
 itself contains no placeholder values: a field the backend has not sent renders as `—`, never
 as a zero.
 
-The mock streams at 26–57 bytes/s, opens chunks on word-like units, accepts runs of bytes from
-the multi-byte head — cutting a draft short sometimes, so the `fix` source and the
-`spec_rounds` / `spec_fixes` / `spec_replays` counters are exercised the way the engine reports
-them — includes a multi-byte UTF-8 character in every reply so the `pending` path is exercised,
+The mock streams at 26–57 bytes/s, opens chunks on word-like units, includes a multi-byte UTF-8
+character in every reply so the `pending` path is exercised,
 and emits `stats` every 16 bytes and `diagnostics` at each chunk boundary. One
 training run reports `running: true` and its log genuinely grows while the dev server is up, so
 the polling path is real. One checkpoint reports `val_bpb: null`, which the backend does for any
@@ -66,6 +64,10 @@ src/
     persist.ts              # failure-tolerant localStorage
     download.ts             # hand a generated file to the browser
     brand.ts                # the model's name, mirroring mote/identity.py
+    checkpoints.ts          # sorting, filtering and family chips for the checkpoint sheet
+    clipboard.ts            # copy with the selection fallback for non-secure contexts
+    layout.svelte.ts        # viewport breakpoints (popover vs bottom sheet)
+    status.ts               # the honesty strip's wording
     clock.svelte.ts         # one 30 s tick shared by every relative timestamp
     actions.ts              # dismissable, autosize, tip (tooltips)
     commands.ts             # /clear and /help: parsing, escaping, the menu's contents
@@ -75,6 +77,10 @@ src/
       model.svelte.ts       # /api/model + checkpoints + hot swap
       settings.svelte.ts    # sampling params as overrides on the model's defaults
       diagnostics.svelte.ts # live values for the reply in flight
+      training.svelte.ts    # the job queue and the runs on disk: fetching, polling, log cursors
+      auth.svelte.ts        # the access token: unlock sheet, pairing
+      ckptview.svelte.ts    # the checkpoint sheet's sort and filters (persisted)
+      prefs.svelte.ts       # votes, marks and the challenger
       notice.svelte.ts      # the undo bar's one transient message
       queue.svelte.ts       # what is waiting behind the reply in flight (memory only)
       ui.svelte.ts          # view preferences, edit target, switcher state
@@ -87,12 +93,17 @@ src/
     QueuedTurn.svelte       # one waiting item: edit, remove, reorder, interrupt
     ChunkedText.svelte      # plain reply, or the same reply with structure marked
     Composer.svelte         # textarea, sampling popover, context line, send/queue/stop
+    CheckpointPicker.svelte # the composer pill: recent checkpoints, the challenger line
+    CheckpointsSheet.svelte # every checkpoint: sort, search, chips (docs/checkpoints.md)
+    CompareCard.svelte      # two replies side by side, blind, with the vote
+    FoldLine.svelte         # where Mote's view starts; the editable compaction card
+    TokenPrompt.svelte      # the unlock sheet: paste a token or type a pairing code
     CommandMenu.svelte      # the list that opens on a leading slash
     HelpPanel.svelte        # what /help shows, above the composer
     SamplingControls.svelte
     Sheet.svelte            # right-hand panel (bottom sheet under 40rem), focus-trapped
     ModelSheet.svelte       # checkpoint, architecture, device, checkpoint list + swap
-    DiagnosticsSheet.svelte # throughput, multi-byte head, context, retention, exchange mass
+    DiagnosticsSheet.svelte # throughput, context, retention, exchange mass
     TrainingSheet.svelte    # run picker, curves, last evaluation
     ByteInspector.svelte    # every byte of one reply, windowed
     Curve.svelte, Sparkline.svelte, Bars.svelte, Icon.svelte, Wordmark.svelte
@@ -172,11 +183,11 @@ honoured for anything you have not touched.
 
 **Keyboard.** Enter sends — or queues, while a reply is running — Shift+Enter opens a line, and
 Up on an empty composer edits the last prompt. Esc cancels an edit, then closes a layer, then stops a reply, then returns focus to the
-composer — in that order. Ctrl/⌘+K opens the conversation switcher; Alt/⌥+1/2/3 open the three
-panels. In an edit box Enter makes a line and Ctrl/⌘+Enter saves, because a prompt being
-rewritten is usually several paragraphs. Modifiers only, never a bare letter: the composer is a
-prose field. Alt rather than Ctrl for the digits, because the browser reserves Ctrl+1..8 for its
-own tabs. Sheets trap Tab and restore focus on close.
+composer — in that order. Ctrl/⌘+K opens the conversation switcher; the sheets open from the
+header's menu (the Alt+1/2/3 shortcuts went with the four-button nav, docs/checkpoints.md). In an
+edit box Enter makes a line and Ctrl/⌘+Enter saves, because a prompt being rewritten is usually
+several paragraphs. Modifiers only, never a bare letter: the composer is a prose field. Sheets
+trap Tab and restore focus on close.
 
 **Theme and motion.** Both schemes are authored as tokens and chosen by `prefers-color-scheme`;
 all text pairs clear WCAG AA (the faintest is 5.07:1 dark, 5.16:1 light). Animation is limited to

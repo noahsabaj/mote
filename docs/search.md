@@ -5,14 +5,14 @@ yet; the order at the bottom says what lands when.
 
 ## Why
 
-Mote knows almost nothing — 35M parameters now, ~105M for the flagship — so retrieval is its only
+Mote knows almost nothing — 32M parameters now, 96M for the flagship — so retrieval is its only
 route to facts, which makes search matter *more* for it than for a frontier model. The constraint is
-the window: 2048 bytes, of which the identity card takes ~300 and the question and answer a few
-hundred, leaving about 1 KB for what it reads. Everything below is sized to that.
+the window: 2048 bytes on the 32M, of which the identity card takes 479 and the question and answer a
+few hundred, leaving about 1 KB for what it reads (the flagship's 16384 relaxes this). Everything below is sized to that.
 
 ## Protocol
 
-* Two spare vocab ids (the embedding is padded 262 → 264, so nothing changes shape):
+* Two vocab ids (the embedding is padded 271 → 272, so nothing changes shape):
   `CALL_ID = 262` (`<|call|>`), `RESULT_ID = 263` (`<|result|>`). Generalised 2026-08-24 (docs/shape.md
   § pipeline): one call id for every tool, the tool named in the bytes — `<|call|>search: query` here,
   `<|call|>sim: take candle` in the RL environment. The server dispatches on the name before the colon.
@@ -66,13 +66,14 @@ live loop waits for the flagship — a model that cannot copy the span cannot us
 
 * "Searching: …" inline while a search runs; source chips with links under the reply.
 * Grounded bytes: bytes inside a ≥ 12-byte match with a snippet are tinted as a fourth
-  `ByteSource` (`web`), next to nbp / mbp / fix — what was copied versus made up is visible.
+  `ByteSource` (`web`), next to nbp / call — what was copied versus made up is visible.
 * Diagnostics: queries, hits, latency, searches per reply.
 
 ## Order
 
 1. Reading probe on the 35M (when tonight's SFT lands); the index and the dialogues are built
    CPU-side by agents meanwhile.
-2. Rename → Fedora move.
-3. Tool ids, server loop, SearXNG, studio surfaces; search eval; the SFT-share A/B in `mote lab`.
+2. ~~Rename → Fedora move.~~ Done 2026-08-23.
+3. Tool ids and the server loop (done 2026-08-24), SearXNG, studio surfaces; search eval; the SFT-share A/B as
+   queued arms (`mote train start`).
 4. The flagship SFT inherits the data.

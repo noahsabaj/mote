@@ -64,3 +64,40 @@ summarised where a decision rests on it.
 
 GPU tests → the bitwise check → a fixed-seed serving diff (old engine vs new, CPU) → `mote build` →
 launch on Noah's word.
+
+## Landed (addendum, 2026-08-29 01:50)
+
+Steps 0–5 are on main, each as its own commit under the CPU bar (the GPU half of the bar — 100 matched-seed
+steps at the flagship shape, `58e8672` vs HEAD — waits for Tuesday's gap, as signed):
+
+| step | commit | what the suite said |
+|---|---|---|
+| 0 disk | 99b43e6 | 34.8 GB reclaimed by manifest |
+| 1 deletions | 8a89fd3 | 320 passed / 58 skipped (GPU) |
+| 2 boundaries | 364f341 (+ fb1bc8e) | 320 / 58 |
+| 3 Trainer split | d2c7c0a | 320 / 58 |
+| 4 Studio + contract | cff1dec | 322 / 58 |
+| 5 docs | (this commit) | — |
+
+**Deviations from the signed design, stated:**
+
+* `types.ts` is not generated from the OpenAPI schema. Generation would have discarded the hand-written
+  comments that document the contract; instead the response shapes are declared once (`mote/serve/schemas.py`)
+  and `tests/test_api_contract.py` holds them field for field against `types.ts`, plus the live keys of
+  `/api/model`. The first run found the drift the survey had found by hand (`prefix_cache`, `arena`, the
+  job's `held` / `deaths` / `start_step` / `waiting`, the queue's `halted` / `paused`).
+* The suite's first CPU-only pass had 18 failures, all environmental — trainer tests defaulting to `--device
+  cuda`, queue tests that need a card to say memory is usable, no `data/` in the worktree — fixed in the tests
+  (they ask for the device that exists; the queue tests pretend an empty 8 GB card; the worktree links `data/`).
+* The step-1 commit swept the worktree's `web/node_modules` symlink into the tree (`git add -A <dir>`), and the
+  fast-forward replaced the main checkout's real `node_modules` with it; fb1bc8e untracked the link, `bun
+  install` restored the directory from the lock, and the rule is recorded (`git add -u` + new files by name).
+
+**The throughput guard, read honestly.** The arm's 10-minute mean fell from 122.4 KB/s (60–70 min) to 118.3
+(120–130 min), but the slope is the run's own — −0.6 %/10 min from before the tests started (60 → 90 min:
+−1.25 %) as during them (90 → 130 min: −1.65 % over 30 min). One pinned niced core beside a 4-batch 2048
+arm is within that drift's noise; the guard's baseline is not a constant, and a future reading should
+compare slopes, not levels.
+
+**Open for the gap (Tuesday ~19:30):** GPU tests → the bitwise check → the fixed-seed serving diff → `mote
+build` → launch on Noah's word with `--serve`, the argv without `--no-mbp`.

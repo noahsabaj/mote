@@ -84,7 +84,7 @@ moved under `mock/` so the run names carry realistic families while the path sti
 
 ## Verified
 
-`svelte-check` and `vite build` clean, 49 Python tests passing, no console errors. In the browser at
+`svelte-check` and `vite build` clean, the Python suite passing, no console errors. In the browser at
 1280px and at 320/375px: no horizontal overflow, both themes, the sort rules above, chips composing to
 `5 of 14 shown`, the mobile bottom sheet, the Panels menu, and a real swap through the picker updating
 the pill and reordering the shortlist off `recents`.

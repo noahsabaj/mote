@@ -1,6 +1,6 @@
 # Mote Studio — backend API contract (v1)
 
-Served by FastAPI (`mote.serve.app`) on `http://127.0.0.1:7860`. The built frontend (`web/dist`)
+Served by FastAPI (`mote.serve.app`) on `http://127.0.0.1:7861` (`.mote/config.json`; the daemon's default). The built frontend (`web/dist`)
 is served at `/`. All values are real: they come from the loaded checkpoint, live tensors, or run logs.
 There is no decorative data anywhere.
 
@@ -39,6 +39,8 @@ shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair
   "probe": { "identity_acc": 0.83, "hold_rate": 0.5, "concede_rate": 0.75, "n_identity": 6, "n_facts": 8,
              "identity_acc_seen": 1.0, "hold_rate_seen": 0.875, "concede_rate_seen": 0.75, "n_identity_seen": 6, "n_facts_seen": 8 },
   "identity_card": "You are Mote, a small byte-level language model ...",
+  "prefix_cache": { "snapshots": 5, "branches": 2, "cache_bytes": 52428800, "cache_budget": 1073741824, "hits": 12, "misses": 2 },
+  "arena": { "chunks": 4964, "bytes": 150994944, "hot_branch": "b1", "hot_chunks": 140, "graph_decode": true, "released": false },
   "live": null | "t3l_dense_8e-4/ema@12508",   // a job on the air: its EMA is answering
   "pin": "runs/overnight_sft/last.pt",          // the boot default in .mote/config.json (null if none)
   "serving_device": "cuda" | "cpu",             // cpu while any training job runs, the configured device when the queue idles
@@ -46,11 +48,8 @@ shows a QR of `<public-url>/#token=<token>` plus a 6-digit code; `POST /api/pair
 }
 ```
 
-Serving policy (signed 2026-08-25): what answers chats is the **pin** unless a job is **on the air** — a job submitted
-with `--serve` (or switched on with `/api/training/serve`) whose EMA answers while it runs and whose final checkpoint
-becomes the pin when it finishes. Every other job (a screening arm) leaves the served model alone. Serving lives on
-the CPU while any job runs (the GPU is training's) and moves back to the GPU with its arena + graphs when the queue
-idles; the CPU path is ~45 bytes/s and a cold read of a long prompt takes seconds (the `waiting` frame below).
+Serving policy and device: `docs/shape.md` § "The daemon" is the one statement of it (the pin, a job on the air, the
+CPU while any job runs); this file only names the fields that carry it (`pin`, `following`, `serving_device`).
 
 ### `POST /api/context`  body `{ "messages": [...], "max_bytes": 512, "fold": "auto", "card": null, "prev": null | { "from", "card" } }`
 What the next prompt would look like, without generating — for the studio's meter and fold line:
@@ -66,6 +65,10 @@ Loads (or drops) a second engine beside the served one for blind side-by-side co
 ### `POST /api/prefs/vote`  body `{ "pair": { "messages", "a", "b", "a_source", "b_source", "origin" }, "vote": "a" | "b" | "tie" | "both_bad" | null, "reason": "" }`
 Stores a pair of replies and your verdict (`null` keeps the pair unrated); a source is `{ "checkpoint", "step", "engine",
 "params" }`. Returns the summary below plus `"pair": "<id>"`. Identical replies are refused (400).
+
+### `POST /api/prefs/mark`  body `{ "messages": [...], "reply": "...", "source": {...}, "mark": "up" | "down", "reason": "" }`
+One thumb on one reply — the collection path that needs no second sample and no comparison (docs/prefs.md);
+`mote.train.kto` trains on these directly. Answers `{ "mark": "<id>", ...the prefs summary }`.
 
 ### `GET /api/prefs/summary` · `GET /api/prefs/rubric`
 `{ "pairs", "votes": { "user", "claude" }, "unrated_by_claude", "table": [{ "a", "b", "a_wins", "b_wins", "ties", "both_bad", "n" }],

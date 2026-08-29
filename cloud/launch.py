@@ -1,4 +1,5 @@
-"""Lightning.ai driver for the flagship run. NOTHING here starts a machine unless you pass --go.
+"""Lightning.ai driver for experiments — arms, probes, kernel tuning; the flagship trains locally (docs/shape.md,
+2026-08-24). NOTHING here starts a machine unless you pass --go.
 
     python cloud/launch.py plan                         # print what would happen (default machine, budget math)
     python cloud/launch.py up --go                      # create/start the studio on a CPU machine, sync, bootstrap

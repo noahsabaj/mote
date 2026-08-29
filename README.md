@@ -1,186 +1,119 @@
 # Mote
 
-A byte-level language model that learns its own tokenizer, and a studio for chatting with it and
-looking inside. Working name; the package is `mote/`.
+A byte-level language model that learns its own tokenizer, and a studio for chatting with it and looking
+inside. One resident process on one consumer GPU trains it and serves it.
 
-**Architecture** — a Mamba/Relation hybrid: a one-stage H-Net (Hwang, Wang & Gu, 2025) over raw UTF-8 bytes, Mamba-3 at byte
-resolution outside, Transformer-style blocks with the Relation mixer (in place of attention) at chunk resolution inside:
+**Architecture** — a one-stage H-Net (Hwang, Wang & Gu, 2025) over raw UTF-8 bytes: Mamba-3 at byte
+resolution outside, blocks with the Relation mixer (Ge, Yang & Nie, 2026 — in place of attention) at chunk
+resolution inside, and a learned dynamic chunker between them.
 
 ```
 bytes ─▶ Mamba-3 encoder ─▶ dynamic chunking ─▶ Relation main network ─▶ dechunk (EMA) ─▶ Mamba-3 decoder ─▶ next byte
-                                           └──────────────────────────────────────────▶ multi-byte head (LCA) ─▶ several bytes at once
 ```
 
-* **Encoder / decoder**: official Mamba-3 SISO mixers (`state-spaces/mamba`, Triton kernels on Linux/WSL2;
-  a weight-compatible pure-PyTorch path everywhere else, including a recurrent decode step) — `mote/model/mamba3.py`.
+* **Encoder / decoder**: Mamba-3 SISO mixers (the official Triton kernels on Linux; a weight-compatible pure-PyTorch
+  path everywhere else, including a recurrent decode step) — `mote/model/mamba3.py`.
 * **Dynamic chunking**: cosine-similarity router, straight-through boundaries, EMA dechunking, ratio loss with the
-  ATDC target schedule — `mote/model/dc.py`.
-* **Main network**: Full Relation (Ge, Yang & Nie, 2026): Self/Exchange relations, count calibration λ, Givens head mixing,
-  `{P2, Ĩ}` decode cache — `mote/model/relation.py`.
-* **Multi-byte prediction**: Latent-Causal-Attention head (Owodunni et al., 2026) that proposes the rest of a chunk
-  in parallel; bytes are accepted while the head's confidence ≥ τ — `mote/model/mbp.py`.
-* **Tokenizer**: none. 256 byte values + `<|bos|> <|eos|> <|pad|> <|system|> <|user|> <|assistant|>` — `mote/tokenizer.py`.
+  ATDC target schedule; bounded routing as the serving arena's guardrail — `mote/model/dc.py`. The chunk rate is an
+  observable of a trained model (about 3.3 bytes a chunk), not a setting.
+* **Main network**: Full Relation — Self/Exchange relations, count calibration λ, Givens head mixing, a `{P2, Ĩ}`
+  decode cache; the fused Triton kernel `FlashRelation` is exact to the reference — `mote/model/relation.py`,
+  `mote/model/flash_relation.py`.
+* **Tokenizer**: none. 256 byte values plus 15 protocol ids (chat roles, tool call/result, fill-in-the-middle, thinking,
+  reversal and offset markers) — `mote/tokenizer.py`.
 
-Every number the studio shows is real: checkpoint metadata, live tensors, run logs. Undertrained checkpoints are
-labelled as such.
+**Sizes** (`mote/config.py`, named by parameter count): Mote-1M, Mote-11M, Mote-32M, **Mote-96M** — the flagship, a
+16384-byte window, frozen 2026-08-24 — and Mote-138M. Every number the studio shows is real: checkpoint metadata,
+live tensors, run logs; undertrained checkpoints are labelled as such.
 
-## Status (2026-08-22)
+## What is where
 
-* Model, trainer, serving engine and API are implemented and tested (`tests/`, incl. prefill+step decoding
-  reproducing the full forward logits).
-* Local pilot (12.7M params, RTX 4060 Ti, WSL2): dynamic chunking finds word-like boundaries within minutes;
-  see `runs/pilot_*/log.jsonl`.
-* Flagship training on Lightning.ai (`cloud/`) has **not** been run yet.
-* Frontend (`web/`, Vite + Svelte 5) in progress.
+* `mote/model` — the model. `mote/train` — the trainer (bf16 autocast, Muon + AdamW, WSD/trunk/branch schedules,
+  ELR logging and a norm guard, atomic checkpoints, bitwise-reproducible by default), the post-training stages
+  (`dpo`, `kto`, `rlvr`) and the lr-vs-horizon fit.
+* `mote/infer` — inference: the generation engine, one CUDA graph per byte for decoding, the prefix store that
+  keeps conversations warm, context folding. `mote/identity.py` — what the model is told about itself.
+* `mote/serve` — the resident daemon: a FastAPI app, the training job queue that drives the trainer one accumulation
+  slice at a time between replies, the preference store, device pairing. `mote/cli.py` — `mote …`.
+* `mote/data` — shard builders (pretraining mixes, SFT, identity and spec documents, on-policy replay).
+  `mote/sim` — a small ECS world simulator: the tool environment for RLVR and its expert traces. `mote/eval` —
+  the probes and the branch gate.
+* `web/` — the studio: Vite + Svelte 5 + TypeScript, built with Bun, served by the daemon at `/`.
+* `docs/shape.md` — the design and its current state; `docs/api.md` — the HTTP/WebSocket contract;
+  `docs/runbook.md` — running it; `docs/results/` and `docs/research/` — dated records and reading notes.
 
-## Setup
+## Setup (Linux)
 
-Python ≥ 3.11. Two environments are useful on Windows:
+Python ≥ 3.11, a CUDA GPU for training (serving runs on the CPU too), [Bun](https://bun.com/install) for the studio.
 
-* **Windows venv** (`.venv`): tests, data building, serving with the pure-PyTorch paths.
-  `uv pip install -e . --python .venv/Scripts/python.exe`
-* **WSL2 Ubuntu** (`~/hnet-venv`): the official Mamba-3 Triton kernels for training. Once:
-  ```bash
-  uv venv ~/hnet-venv --python 3.12
-  uv pip install --python ~/hnet-venv/bin/python torch --index-url https://download.pytorch.org/whl/cu126
-  uv pip install --python ~/hnet-venv/bin/python "triton>=3.5" einops numpy huggingface_hub transformers datasets fastapi "uvicorn[standard]" websockets pytest
-  MAMBA_SKIP_CUDA_BUILD=TRUE uv pip install --python ~/hnet-venv/bin/python -e /mnt/d/Code/Storage/mamba --no-deps --no-build-isolation
-  ```
-  `cloud/bootstrap.sh` does the same on a Lightning studio.
+```bash
+uv venv .venv && uv pip install --python .venv/bin/python -e .
+uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu126   # or the wheel for your driver
+# the Mamba-3 Triton kernels (optional; the pure-PyTorch paths are used without them):
+git clone https://github.com/state-spaces/mamba.git ~/Development/mamba && git -C ~/Development/mamba checkout e9594ce
+MAMBA_SKIP_CUDA_BUILD=TRUE uv pip install --python .venv/bin/python -e ~/Development/mamba --no-deps --no-build-isolation
+uv pip install --python .venv/bin/python "triton>=3.5" einops
+git config core.hooksPath .githooks        # refuses profiler blobs and credential-shaped strings
+```
 
 ## Data
 
 ```bash
-python -m mote.data.build_bytes --out data/fineweb_edu_pilot --target-mb 300 --val-mb 8     # pilot: FineWeb-Edu ≤4 KB docs
-python -m mote.data.build_mix   --out data/pretrain_mix --target-gb 10 --val-mb 64           # flagship mix (mote/data/sources.py)
-python -m mote.data.build_sft   --out data/sft_mix --target-mb 300 --val-mb 8                # chat SFT mix with loss masks
+.venv/bin/python -m mote.data.build_mix   --out data/flagship_mix --list flagship --target-gb 10 --val-mb 128   # the trunk's mix A (mote/data/sources.py)
+.venv/bin/python -m mote.data.build_sft   --out data/sft_mix --target-mb 300 --val-mb 8                           # chat SFT with loss masks
+.venv/bin/python -m mote.data.build_local --out data/local_mix                                                       # the small local mix the arms use
 ```
 
-Shards are uint16 ids (bytes + specials) with BOS/EOS separators; SFT shards add a uint8 mask (1 on assistant bytes).
+Shards are uint16 ids (bytes + protocol ids) with BOS/EOS separators; SFT shards add a uint8 mask (1 on assistant
+bytes). `data/` is gitignored.
 
 ## Train
 
 ```bash
-# in WSL2 (kernels). Do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True under WSL2: it makes the
-# driver fail with "CUDA driver error: device not ready" mid-run (reproduced 3 times; fine on native Linux).
-python -m mote.train.train \
-  --preset pilot --data ~/data/fineweb_edu_pilot --out runs/pilot_1h --batch-size 4 --grad-accum 4 --seq-len 2048 --max-minutes 60
-# SFT from a pretrained checkpoint:
-python -m mote.train.train --preset pilot --sft --init-from runs/pilot_1h/last.pt --data data/sft_mix --out runs/pilot_sft --max-minutes 20
+.venv/bin/python -m mote.train.train --preset mote-32m --data data/local_mix --out runs/local --batch-size 4 \
+    --grad-accum 4 --seq-len 2048 --optimizer muon --max-minutes 60
+# SFT from a checkpoint:
+.venv/bin/python -m mote.train.train --preset mote-32m --sft --init-from runs/local/last.pt --data data/sft_mix --out runs/local_sft --max-minutes 20
 ```
 
-Multi-byte head options (A/B knobs from the 2026 speculative-decoding review, `docs/research/speculative-decoding-2026-08-23.md`):
-`--mbp-weight 0.3` (loss weight), `--mbp-gamma 3` (position weighting exp(-offset/γ)), `--mbp-transition` (a 264×264
-byte-transition bias so each draft slot conditions on the draft byte sampled before it), `--no-mbp` (no head at all).
+`log.jsonl` records train bits/byte, bytes per chunk, the ratio loss, throughput, TFLOPS/MFU, the parameter norms and
+ELR, and periodic evals (val bits/byte, boundary/separator alignment, a chunked text sample). `last.pt` is written
+atomically every `--ckpt-minutes`; `--resume` continues, clock included. With `--max-steps 0` (the default) the
+schedules follow wall-clock progress toward `--max-minutes`. `python -m mote.train.train --help` lists every flag;
+`python -m mote.train.profile_step` prints where a step's time goes.
 
-`log.jsonl` records train loss/BPB, bytes-per-chunk, ratio loss, multi-byte-head loss, and periodic evals
-(val BPB, boundary/separator alignment, MBP top-1, a chunked text sample). `last.pt` is written atomically
-every `--ckpt-minutes`; `--resume` continues. With `--max-steps 0` (default) the LR and ratio schedules follow
-wall-clock progress toward `--max-minutes`.
+On the resident daemon the same args go through the queue: `mote train start -- <args>` (see the runbook).
 
-Notes learned the hard way: on the 8 GB card under WSL2 use **batch 2 × accum 8** at 2048 bytes — batch 4 sits at the
-memory ceiling and the default allocator fragments across the ever-changing chunk counts (13 kB/s vs 80 kB/s measured);
-`expandable_segments` would fix the fragmentation but crashed mid-run under WSL2: the error is WDDM refusing residency
-below the apparent free memory (WSL issue #41176), not the VMM bug of pytorch#192330 (this card reports attribute 110 = 0),
-so a retry with `per_process_memory_fraction` headroom is a legitimate experiment; native Linux has neither limit. At initialization the router fires on
-~50% of bytes, so the materialized Relation attention is ~6× larger than after convergence. The Triton SSD kernel
-re-autotunes for every new chunk count, so the EMA dechunk uses a chunked pure-PyTorch scan instead.
-
-## Speed
-
-Measured on the RTX 4060 Ti before this work: ~9 % MFU (42 kB/s on the 35M model, 91 W of 160 W). Every run now logs
-`tflops` and `mfu` (analytic FLOPs/byte from `mote/train/flops.py`). The levers, all bit-neutral (bf16 math unchanged):
-
-* **Chunk-count bucketing** (`cfg.dc.chunk_bucket`, `--bucket`, default 64): the main network's length is padded to a
-  multiple of 64 so shapes repeat across steps (autotune caches hit, the allocator stops fragmenting, CUDA graphs become
-  possible). The padded tail is causal-invisible and never read back; `prefill` uses exact lengths so decode caches stay exact.
-* **FlashRelation** (`mote/model/flash_relation.py`): fused Triton kernel for the Relation mixer, forward from the
-  paper's Appendix A.3 and a backward derived here (FlashAttention-2 style, tiles recomputed). Verified against the
-  fp32 materialized reference to 2e-4 at head widths 48/64/96; 1.7× faster and 2.6× less memory than the materialized
-  layer at T=576 on this GPU. On automatically on CUDA (`relation.USE_FLASH`); the materialized path is the reference.
-* **Activation checkpointing** on the Relation blocks (`--ckpt-main`) to afford bigger micro-batches.
-* **Muon** (`--optimizer muon`): Newton-Schulz updates for hidden 2-D matrices, AdamW for the rest, RMS-matched so the
-  same LR applies. An A/B, not a default.
-* `python -m mote.train.profile_step --preset local --data ~/data/local_mix` prints TFLOPS/MFU, per-module forward
-  time, backward/optimizer time and the top CUDA kernels for one step.
-* **No per-step GPU syncs**: losses and stats stay on the device and are materialised once per logging interval
-  (the old loop had ~40 `.item()` syncs per optimizer step, each draining the launch queue).
-* **Block-local multi-byte head**: the LCA mask is exactly a contiguous causal window (own chunk + previous chunk),
-  so the head attends over two 64-byte blocks per query block instead of the whole sequence — identical result, O(L·W)
-  instead of O(L²) (`mote/model/mbp.py`, dense path kept as the reference; `--dense-mbp` in the profiler).
-* **Gradient accumulation normalises once** over the total token count (sum-of-losses / sum-of-tokens); the old
-  mean-of-means silently up-weighted SFT windows with few assistant bytes. Pretraining is unchanged.
-* Muon leaves Mamba-3's stacked `in_proj` on AdamW (measured worse under Muon on Mamba, 2608.03941); `out_proj`,
-  Relation and head matrices get Muon.
-* `TRITON_CACHE_AUTOTUNING=1` persists Triton autotune choices across processes (never on before; ~3 s → 0.3 s per
-  kernel per process). The benchmark chain sets it; put it in `~/.bashrc` on the training box.
-* Research log with the 2026 evidence behind these: `docs/research/efficiency-campaign-2026-08-23.md`.
-
-## Identity and pushback
-
-Mote is told what it is two ways: a short identity card (`mote/identity.py`) is prepended as the system message
-at serve time, and `python -m mote.data.build_identity --out data/sft_identity --params <n>` generates identity
-dialogues plus *balanced* pushback dialogues (user wrong → hold with a one-line check; user right → concede) and DPO
-pairs. Mix the shard into SFT with `--mix data/sft_identity:0.05`, then optionally run
-`python -m mote.train.dpo --init-from <sft.pt> --pairs data/sft_identity.dpo.jsonl --out <dir>`.
-`python -m mote.eval.probe --checkpoint <pt>` measures identity accuracy, hold rate and concede rate with greedy
-decoding on *held-out* prompts (phrasings, facts, numbers and pushback wordings absent from the training data; the
-training-style set is reported as `*_seen`) and writes `probe.json` next to the checkpoint; the studio's Model sheet
-shows it. The pilot scores 0/0/0.
-
-## Run the studio
+## Serve
 
 ```bash
-.\mote service install      # once: token file, config, login item (no admin); starts the studio now
-.\mote build                # after changes: web build + tests + restart + pair link
-.\mote pair                 # QR / 6-digit code page for phones
-.\mote status | logs | restart | config --checkpoint runs/x/last.pt
+mote service install     # once: the token, .mote/config.json, a systemd user unit; starts the studio
+mote build               # after changes: svelte-check + build + tests + restart + the pairing link
+mote status | logs | restart | pair
 ```
 
-`mote` (a `.cmd` shim at the repo root, or the console script in the venv) runs a supervisor that keeps the
-server alive and re-reads `.mote/config.json` on every restart; the access token lives in `.mote/token`.
-On Linux `service install` writes a systemd user unit instead. Manual form, if you want it:
+The studio is at `http://127.0.0.1:7861`; `docs/remote-access.md` is how a phone reaches it (Tailscale). The API
+(`docs/api.md`) is `/api/model`, `/api/checkpoints` (+ hot-swap), `/api/training/*` (the queue), `/api/context`,
+`/api/prefs/*`, `/v1/chat/completions` (OpenAI-compatible SSE) and `/ws/generate`, which streams every byte with its
+probability, entropy, chunk boundary, live Mamba-3 retention and Relation exchange mass. A manual form:
 
 ```bash
-python -m mote.serve.app --checkpoint runs/pilot_1h/last.pt --port 7860
+.venv/bin/python -m mote.serve.app --checkpoint runs/local/last.pt --port 7861
 ```
 
-`docs/prefs.md` is the preference loop: Retry / Compare / arena votes in the studio, a challenger checkpoint for blind A/B, the rubric (`docs/rubric.md`) and the export/import round trip with Claude as the second rater. `docs/context.md` is context management: the engine keeps a prefix cache so each turn reads only the new bytes
-(`mote/infer/prefix_cache.py`, verified by `mote.eval.prefix_probe`), and the studio folds the oldest turns into an editable compaction card when a
-conversation outgrows the window (`POST /api/context` previews it), and the flagship window is 16384 bytes gated on a
-memory profile. `docs/search.md` is the settled design for web search (learned `<|search|>` call, SearXNG + an offline Wikipedia-intro
-index, snippets only, gated on a measured reading probe); nothing of it is live yet. `docs/api.md` is the contract: `/api/model`, `/api/checkpoints` (+ hot-swap), `/api/training/runs`,
-`/v1/chat/completions` (OpenAI-compatible SSE), and `/ws/generate` streaming per-byte events (probabilities,
-entropy, chunk boundaries, multi-byte acceptances, UTF-8 assembly, live Mamba-3 retention and Relation exchange mass).
-The built frontend (`web/dist`) is served at `/`.
-
-`--token <secret>` (or `MOTE_TOKEN`) gates the API and the generation socket; the server refuses to bind a
-non-loopback `--host` without one. `docs/remote-access.md` is the runbook for reaching the studio from a phone
-(Tailscale, recommended) or the home LAN.
-
-## Frontend
-
-`web/` is a Vite + Svelte 5 + TypeScript app built with Bun (see `web/README.md`): `bun install`, `bun run dev`
-(standalone against a clearly-labelled dev mock), `bun run build` (→ `web/dist`, served by the backend at `/`),
-`bun run check`. One page: the
-conversation, a one-line honesty strip, and Structure/Bytes toggles under each reply; Model, Diagnostics and Training
-open as sheets. Everything it shows comes from the API above. It is installable (web-app manifest + icons,
-`web/icons/make_icons.py` renders them; no service worker) — see `docs/remote-access.md`.
-
-## Cloud (Lightning.ai)
-
-`cloud/launch.py` drives a studio through the SDK; nothing starts without `--go`. `plan` prints the budget math.
-Training runs on an interruptible H100 and auto-resumes from the studio disk.
+`docs/prefs.md` is the preference loop (votes, marks, a challenger checkpoint for blind A/B, Claude as the second
+rater under `docs/rubric.md`); `docs/context.md` is the prefix store and context folding; `docs/checkpoints.md` the
+checkpoint picker; `docs/search.md` a designed, not built, web-search tool.
 
 ## Tests
 
 ```bash
-python -m pytest -q tests/
+.venv/bin/python -m pytest -q tests/          # the GPU tests skip without a card
 ```
 
 ## References
 
-H-Net 2507.07955 · Mamba-3 2603.15569 · Relation 2608.20172 · LCA multi-byte prediction 2608.15454 · ATDC 2605.30080.
+H-Net 2507.07955 · Mamba-3 2603.15569 · Relation 2608.20172 · ATDC 2605.30080 · Muon-SW 2607.23777 · ELR 2608.24814.
 
 ## License
 

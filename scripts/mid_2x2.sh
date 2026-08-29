@@ -52,7 +52,7 @@ echo "== 0b. the extras — identical in both branches, so they are not a variab
 # --typo-frac is 2606.16246's answer to repetition applied where the repetition is: 3 % of an 8 GB branch
 # is ~240 MB generated from about 12 KB of distinct prose.
 python -m mote.data.build_spec_docs --out data/spec_docs.jsonl --n 400000 --params "$PARAMS" \
-    --typo-frac 0.3 --typo-rate 0.012 --spec-out docs/mote-spec.md
+    --typo-frac 0.3 --typo-rate 0.012 --spec-out data/mote-spec.md
 python -m mote.data.build_local --out data/spec_plain --text data/spec_docs.jsonl
 
 # The extras budget, 15 % of each branch (docs/shape.md § mid). Identity is documents now, not Q&A: the

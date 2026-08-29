@@ -1,6 +1,9 @@
-# Flagship run on Lightning.ai — runbook
+# Lightning.ai — runbook for experiments
 
-Nothing in here runs until you type `--go`. Budget: 25 credits total.
+The roles were fixed on 2026-08-24 (docs/shape.md § kernels): **the flagship trains locally**; the H100 is for
+experimentation — arms, probes, kernel tuning (the H100 probe ran the frozen recipe at 4.8× the 4060 Ti; the
+MoE T2 screen ran on an L4). The `train`/`sft` commands below still work as a way to run a recipe there, but the
+7-day trunk is not one of them. Nothing in here runs until you type `--go`. Budget: 25 credits total.
 
 ## 0. Before spending anything
 1. Check the **interruptible H100** hourly rate on the machine picker. Third-party trackers list the on-demand H100 at

@@ -72,25 +72,7 @@ continue, and `Engine._read_prompt` reads only the bytes after the longest ancho
 
 ## Flagship: the window
 
-* **16384 bytes from the first step** (decided; ~1.94× per-byte cost; at the fused-norm 68 KB/s that is
-  ~5.9 GB/day, a ≈7-day trunk — docs/shape.md § pipeline). ~3000 chunks in the main network; positions
-  trained to that length.
-* **Gate — passed 2026-08-23**: `profile_step --preset flagship --chunk-bytes 6 --seq-len 16384 --batch-size 1
-  --ckpt-main` on the 4060 Ti: **6.34 GB peak**, 42 KB/s, 19.3 TFLOPS (≈ 44 % MFU) — 8192 was 4.17 GB at the
-  same 42 KB/s, 4096 3.06 GB at 29 KB/s. The preset now says 16384. (Fallback 8192 stays on paper.)
-* **Long documents**: a ~10 % shard of documents ≥ 8 KB (full Wikipedia articles, Project Gutenberg
-  books, long fineweb-edu pages; code when an ungated source is picked) mixed in with `--mix`; SFT
-  packs multi-turn conversations to the window.
-* **Windowed-main A/B on the 35M before the flagship config is frozen**: Relation restricted to the
-  last W chunks (with the Mamba state carried) vs full attention, equal bytes, val bpb at 1× / 2× /
-  4× the training length. A win makes the window a compute knob instead of a capability limit
-  (conversations never hard-overflow; forgetting becomes gradual). Needs a key-window in the
-  FlashRelation kernels first — GPU work, after the rename and the Fedora move.
-
-## Order
-
-1. Now: folding in the server and studio, the needle probe. Done 2026-08-23, plus the prefix cache and batch folding.
-2. When the GPU frees: the 16384 profile (decides 16384 vs 8192); the long-document shard builds
-   CPU-side meanwhile.
-3. After rename + Fedora: key-window in FlashRelation, the windowed-vs-full A/B, then the flagship
-   preset is frozen and the run starts.
+Decided and gated 2026-08-23, frozen 2026-08-24: **16384 bytes from the first step** (`mote/config.py`
+`mote_96m`; ~3000 chunks in the main network; the memory profile that passed it is in docs/shape.md § "The
+model", and the windowed-main alternative was measured and rejected there — long-range chunk lookups are
+load-bearing). Long documents (≥ 8 KB) are ~10 % of the mix; SFT packs multi-turn conversations to the window.
