@@ -123,3 +123,11 @@ build` → launch on Noah's word with `--serve`, the argv without `--no-mbp`.
 - **A GPU-only test was stale on main**: `tests/test_graph_decode.py` still unpacked `step()`'s fourth
   (MBP) return that step 1 removed; found by the cloud `pytest` (138 passed, 1 failed), fixed in `c7cc1d9`,
   verified in Monday's GPU-tests slot.
+- **CPU bisect, 14:04 EDT:** on the CPU reference path at `mote-96m` (`--lr 0 --max-steps 2`, one pinned
+  niced core), housekeeping 1/6 and 5/6 are **bitwise identical** to `58e8672` in the init tensors and both
+  forward losses (435.97964120391646 / 417.9373237913147); only renamed config keys differ. At `mote-13m`
+  every step from 1/6 on differs — the MBP head leaving the ≤35M presets shifts the init RNG, the signed
+  deletion. So the L4's 1.4e-5 is in the GPU kernel dispatch (a branch of the flash dispatch guard went with
+  the window knob), not in the Python; it is inside the envelope and nothing reverts. A five-forward GPU
+  bisect on Sunday's cloud session names the commit for the record; Monday's gap keeps only the ≥3-run
+  envelope and one local forward against `58e8672`.
