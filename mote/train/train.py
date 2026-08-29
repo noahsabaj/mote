@@ -202,14 +202,17 @@ def _targets(batch: torch.Tensor, loss_mask: Optional[torch.Tensor]):
     # tail where t+i runs past the window is dropped from the loss. Nothing happens when the flag is off,
     # which is every run to date and the mid-training 2x2.
     if batch.shape[1] > 2 and bool((batch[:, 0] == OFFSET_ID).any()):
-        i = int(batch[0, 1].item() - ord("0"))
-        if i > 1:
-            L = inputs.shape[1]
-            idx = torch.arange(L, device=batch.device) + i
+        # Per ROW, not from row 0: a MixedShard draws each row from its own shard with its own offset, so one
+        # batch can carry several offsets (found 2026-08-29; the augmentation is off in every run to date).
+        L = inputs.shape[1]
+        digit = torch.where(batch[:, 0] == OFFSET_ID, batch[:, 1] - ord("0"), torch.ones_like(batch[:, 1]))
+        off = digit.clamp(min=1)  # [B]
+        if bool((off > 1).any()):
+            pos = torch.arange(L, device=batch.device)[None, :]
+            idx = pos + off[:, None]  # [B, L]
             valid = idx < batch.shape[1]
-            targets = batch[:, idx.clamp(max=batch.shape[1] - 1)]
-            keep = valid[None, :].expand_as(targets)
-            tmask = keep.to(targets.dtype) if tmask is None else tmask * keep.to(tmask.dtype)
+            targets = torch.gather(batch, 1, idx.clamp(max=batch.shape[1] - 1))
+            tmask = valid.to(targets.dtype) if tmask is None else tmask * valid.to(tmask.dtype)
     return inputs, targets, tmask
 
 
@@ -776,6 +779,8 @@ class Trainer:
             self.sched_total = extra.get("sched_total") or extra.get("total_steps")
         if "generator_state" in extra:
             self.gen.set_state(torch.tensor(extra["generator_state"], dtype=torch.uint8))
+        if "shard_rng" in extra:  # checkpoints before 2026-08-29 carry none: the augmentation stream restarts
+            self.train_shard.set_rng_state(extra["shard_rng"])
         self._ema_state = extra.get("ema")
         elapsed = extra.get("elapsed_sec")
         if elapsed is None:
@@ -819,7 +824,9 @@ class Trainer:
         extra = {"generator_state": self.gen.get_state().tolist(), "total_steps": self.total_steps,
                  "sched_total": self.sched_total, "schedule": self.args.schedule,
                  "n_params": self.n_params, "bytes_seen": self.step * self.tokens_per_step,
-                 "elapsed_sec": time.time() - self.t_start}
+                 "elapsed_sec": time.time() - self.t_start,
+                 # the augmentation / FIM RNG (numpy) beside the torch generator: a resume continues both streams
+                 "shard_rng": self.train_shard.rng_state()}
         if self.ema is not None:
             extra["ema"] = self.ema
         save_checkpoint(self.ckpt_path, self.model, self.opt, self.step, self.cfg, extra)

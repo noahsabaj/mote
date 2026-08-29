@@ -107,6 +107,9 @@ class DCCfg:
     bound_floor: int = 0  # K_min: boundaries per max_seq_len bytes, scaled to the window it is applied to (0 = no floor).
     # 2026-08-29: read as an absolute count it forced every byte of a served continuation to be a boundary.
     bound_ceiling: float | None = None  # ρ_max: ceiling as a multiple of the target rate L/N (None = unbounded)
+    # A ceiling is window-dependent twice over (2026-08-29): it binds hardest on short served continuations, and
+    # serving evaluates L/N at target_ratio_init (the router is built with it) while training ended at
+    # target_ratio_final. Both are reasons it stays a guardrail; a rate controller is `decode_threshold`.
     # Decode sees one byte and has no sequence to project over, so it keeps a plain threshold. 0.5 is
     # H-Net's (cos_sim < 0 — consecutive states more than 90° apart); a bounded-routing run calibrates
     # this to the rate its projection actually produces and logs it beside val_bpic.

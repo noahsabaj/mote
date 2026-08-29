@@ -27,8 +27,12 @@ ways the correction is dated beside it.
   carries them. Runs go under `runs/<model>/<experiment>-<arm>`; the flat directories are dated records.
 * **The chunk rate is an observable, not a setting** (2026-08-27): three trained runs measured 3.2–3.45 bytes
   a chunk; the arena and the profiler read it from the run (`mote/runinfo.py`), never from ATDC's target.
-* **Runs are bitwise reproducible by default** (2026-08-28: cuBLAS pinned to a fixed workspace plus the
-  two-pass Relation backward); `--fast` gives that up for ~20 % throughput and is recorded in `run.json`.
+* **Runs are reproducible to an envelope, not bitwise** (corrected 2026-08-29: the 2026-08-28 rule said bitwise —
+  cuBLAS is pinned and the Relation backward is two-pass, but the Mamba-3/SSD backward reduces with atomics, so
+  two runs of the same code differ from step 1 in the backward — the L4 control measured `grad_norm` 1388.8065 vs
+  1388.7786). The forward IS bitwise across runs and processes, and an interrupt + resume is bitwise the straight
+  run (`tests/test_resume_bitwise.py`). Any trajectory comparison is read inside a ≥3-run same-code envelope;
+  `--fast` widens it for ~20 % throughput and is recorded in `run.json`.
 * **A timed arm is read at matched steps, and nothing heavy runs beside it** (2026-08-28): a 28-thread CPU
   sweep cost a 2-h arm 16 % of its throughput. CPU tests run on one pinned niced core; the full suite and GPU
   tests wait for an idle card (`docs/runbook.md`).

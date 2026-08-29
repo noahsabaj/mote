@@ -124,6 +124,15 @@ class MixedShard:
         self.meta = {"mixed": [getattr(s, "meta", {}) for s in shards], "weights": self.weights}
         self.n = sum(s.n for s in shards)
 
+    def rng_state(self):
+        """The augmentation RNG of every shard, for the checkpoint (2026-08-29: a resumed run with an augmentation
+        on replayed the augmentation stream from its seed while the torch generator continued)."""
+        return [s.rng_state() for s in self.shards]
+
+    def set_rng_state(self, states) -> None:
+        for s, st in zip(self.shards, states):
+            s.set_rng_state(st)
+
     def sample_batch(self, batch_size: int, seq_len: int, generator: torch.Generator):
         ids, masks = [], []
         for _ in range(batch_size):
@@ -185,6 +194,12 @@ class ByteShard:
         self.fim = fim
         self.noise, self.r2l, self.offset_max = noise, r2l, max(1, offset_max)
         self._rng = np.random.default_rng(seed)
+
+    def rng_state(self):
+        return self._rng.bit_generator.state
+
+    def set_rng_state(self, state) -> None:
+        self._rng.bit_generator.state = state
 
     def _window(self, s: int, seq_len: int, fim: bool = False, offset: int = 1) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         ids = self.data[s : s + seq_len + 1].astype(np.int64)
