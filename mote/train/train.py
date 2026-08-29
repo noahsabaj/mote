@@ -39,6 +39,7 @@ import mote
 
 from .. import determinism
 from .flops import _n as _n_active
+from ..model.feedback import feedback_from
 from ..model.hnet import HNetForCausalLM
 from ..tokenizer import OFFSET_ID, ByteTokenizer
 from .flops import flops_per_byte, peak_tflops_for
@@ -197,11 +198,8 @@ def _masked_ce_sum(logits: torch.Tensor, targets: torch.Tensor, loss_mask: Optio
     return (per * w).sum(), w.sum()
 
 
-def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: float, mbp_weight: float, ratio_weight: float, loss_mask: Optional[torch.Tensor] = None):
-    """Returns (loss_unnormalised, n_tokens, stats, out). The loss is a SUM over counted tokens (plus the
-    ratio loss scaled by the token count), so that gradient accumulation normalises ONCE by the total
-    token count across micro-batches — a mean of per-micro-batch means would up-weight windows with few
-    assistant bytes (SFT). Every stat is a 0-dim device tensor: nothing here synchronises."""
+def _targets(batch: torch.Tensor, loss_mask: Optional[torch.Tensor]):
+    """(inputs, targets, target mask) for a window, honouring the 2606.16246 offset marker."""
     inputs, targets = batch[:, :-1], batch[:, 1:]
     tmask = loss_mask[:, 1:] if loss_mask is not None else None  # mask is per target position
     # Target offset prediction (2606.16246 §2.3), read back off the window rather than passed in: a window
@@ -217,7 +215,11 @@ def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: fl
             targets = batch[:, idx.clamp(max=batch.shape[1] - 1)]
             keep = valid[None, :].expand_as(targets)
             tmask = keep.to(targets.dtype) if tmask is None else tmask * keep.to(tmask.dtype)
-    out = model(inputs)
+    return inputs, targets, tmask
+
+
+def _pass_loss(model, out, inputs, targets, tmask, target_ratio: float, mbp_weight: float, ratio_weight: float):
+    """The loss of one forward pass: CE sum + ratio (+ MoE, + multi-byte head). Every stat a 0-dim tensor."""
     ce_sum, n = _masked_ce_sum(out.logits, targets, tmask)
     mask = torch.ones_like(inputs, dtype=torch.bool)
     lr_ = ratio_loss(out.routing.boundary_prob, out.routing.boundary_mask, mask, target_ratio)
@@ -234,15 +236,53 @@ def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: fl
         ce_m_sum, _ = _masked_ce_sum(out.mbp_logits, targets, tmask, pw)
         loss = loss + mbp_weight * ce_m_sum
         stats["ce_mbp_sum"] = ce_m_sum.detach()
+    return loss, n_safe, stats
+
+
+def iter_pass_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: float, mbp_weight: float, ratio_weight: float,
+                     loss_mask: Optional[torch.Tensor] = None, passes: int = 1, gen: Optional[torch.Generator] = None, detach: bool = False):
+    """Latent feedback's multi-pass teacher forcing (2608.08888 §3.3), one pass at a time: pass 1 is the
+    ordinary forward; pass k fuses pass k−1's top states, shifted right, into the plain inputs (prefix
+    mixin sampled on `gen`) and re-runs the stack in parallel. Yields (loss, n, stats, out) per pass so a
+    caller may back-propagate each pass as it goes (`detach=True`: the memory fallback — one pass of
+    activations alive at a time)."""
+    inputs, targets, tmask = _targets(batch, loss_mask)
+    out = model(inputs)
+    yield (*_pass_loss(model, out, inputs, targets, tmask, target_ratio, mbp_weight, ratio_weight), out)
+    prev = out
+    for _ in range(passes - 1):
+        fb = feedback_from(prev, gen, detach=detach, mixin=True)
+        prev = model(inputs, feedback=fb)
+        yield (*_pass_loss(model, prev, inputs, targets, tmask, target_ratio, mbp_weight, ratio_weight), prev)
+
+
+def compute_losses(model: HNetForCausalLM, batch: torch.Tensor, target_ratio: float, mbp_weight: float, ratio_weight: float,
+                   loss_mask: Optional[torch.Tensor] = None, passes: int = 1, gen: Optional[torch.Generator] = None):
+    """Returns (loss_unnormalised, n_tokens, stats, out). The loss is a SUM over counted tokens (plus the
+    ratio loss scaled by the token count), so that gradient accumulation normalises ONCE by the total
+    token count across micro-batches — a mean of per-micro-batch means would up-weight windows with few
+    assistant bytes (SFT). Every stat is a 0-dim device tensor: nothing here synchronises.
+
+    `passes` > 1 adds the latent-feedback passes (λ = 1, averaged over the extra passes as in the paper's
+    eq. 12); `n` stays pass 1's token count, so a feedback micro-batch weighs about twice a plain one."""
+    it = iter_pass_losses(model, batch, target_ratio, mbp_weight, ratio_weight, loss_mask, passes, gen, detach=False)
+    loss, n_safe, stats, out = next(it)
+    if passes > 1:
+        extra, ce_fb = 0.0, 0.0
+        for lk, _, sk, _ in it:
+            extra = extra + lk
+            ce_fb = ce_fb + sk["ce_sum"]
+        loss = loss + extra / (passes - 1)
+        stats["ce_fb_sum"] = ce_fb / (passes - 1)
     return loss, n_safe, stats, out
 
 
 def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len: int, max_batches: int, device, target_ratio: float,
-             spread: bool = False):
+             spread: bool = False, feedback_passes: int = 0):
     """`spread=False` reads the head of the val shard = its first source only (fineweb_edu on the mixes);
     `spread=True` spaces the windows over the whole shard. Off by default so every arm in a queue is
     measured like its control; the trunk and the branches run with --eval-spread."""
-    gen = evaluate_batches(model, shard, batch_size, seq_len, max_batches, device, target_ratio, spread)
+    gen = evaluate_batches(model, shard, batch_size, seq_len, max_batches, device, target_ratio, spread, feedback_passes)
     while True:
         try:
             next(gen)
@@ -252,12 +292,16 @@ def evaluate(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len:
 
 @torch.no_grad()
 def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, seq_len: int, max_batches: int, device,
-                     target_ratio: float, spread: bool = False):
+                     target_ratio: float, spread: bool = False, feedback_passes: int = 0):
     """`evaluate` as a generator that yields after every window: the daemon runs each window as its own
     slice under the GPU gate, so a chat waits for one window instead of the whole evaluation (a 16-window
     EMA eval held the gate for minutes and a reply showed no first byte for as long, QA 2026-08-24)."""
     model.eval()
     tot_nll, tot_tok, tot_bytes, tot_chunks, mbp_correct, mbp_tot = 0.0, 0, 0, 0, 0, 0
+    # latent feedback: k fused prefill passes over the same windows (2608.08888 eqs. 10-11) — pass k fuses
+    # pass k−1's top states, shifted right, into the plain inputs; val_bpb_fb1 is what the gate reads
+    n_fb = feedback_passes if getattr(model, "feedback_level", "off") != "off" else 0
+    fb_nll = [0.0] * n_fb
     word_hits, boundary_count = 0, 0
     bp_all = []
     moe_loads, moe_batches = {}, 0
@@ -266,15 +310,21 @@ def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, 
         inputs, targets = batch[:, :-1], batch[:, 1:]
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
             out = model(inputs)
+            fb_outs, prev = [], out
+            for _ in range(n_fb):
+                prev = model(inputs, feedback=feedback_from(prev, None, detach=True, mixin=False))
+                fb_outs.append(prev)
         V = out.logits.shape[-1]
-        nll = F.cross_entropy(out.logits.reshape(-1, V).float(), targets.reshape(-1), reduction="none")
-        if lmask is not None:
-            w = lmask[:, 1:].to(device).reshape(-1).float()
-            tot_nll += (nll * w).sum().item()
-            tot_tok += int(w.sum().item())
-        else:
-            tot_nll += nll.sum().item()
-            tot_tok += targets.numel()
+        w = lmask[:, 1:].to(device).reshape(-1).float() if lmask is not None else None
+
+        def nll_sum(logits):
+            nll = F.cross_entropy(logits.reshape(-1, V).float(), targets.reshape(-1), reduction="none")
+            return (nll * w).sum().item() if w is not None else nll.sum().item()
+
+        tot_nll += nll_sum(out.logits)
+        tot_tok += int(w.sum().item()) if w is not None else targets.numel()
+        for k, o in enumerate(fb_outs):
+            fb_nll[k] += nll_sum(o.logits)
         bm = out.routing.boundary_mask
         tot_bytes += bm.numel()
         tot_chunks += bm.sum().item()
@@ -304,6 +354,7 @@ def evaluate_batches(model: HNetForCausalLM, shard: ByteShard, batch_size: int, 
     model.train()
     res = {
         "val_bpb": tot_nll / max(tot_tok, 1) / LN2,
+        **{f"val_bpb_fb{k + 1}": v / max(tot_tok, 1) / LN2 for k, v in enumerate(fb_nll)},
         "val_bpic": tot_bytes / max(tot_chunks, 1),
         "target_ratio": target_ratio,
         "boundary_on_separator_frac": word_hits / max(boundary_count, 1),
@@ -396,11 +447,19 @@ def pad_vocab_rows(sd: Dict, model) -> Dict:
     return out
 
 
-def load_checkpoint(path: Path, model, opt=None, ck: Optional[Dict] = None):
+def load_checkpoint(path: Path, model, opt=None, ck: Optional[Dict] = None, allow_new: tuple = ()):
     """`ck`: the checkpoint if the caller already read it (a resume reads it first for its config)."""
     if ck is None:
         ck = torch.load(path, map_location="cpu", weights_only=True)
-    model.load_state_dict(pad_vocab_rows(ck["model"], model))
+    sd = pad_vocab_rows(ck["model"], model)
+    if allow_new:  # modules the checkpoint predates (an --init-from into a latent-feedback config) start fresh
+        res = model.load_state_dict(sd, strict=False)
+        stray = [k for k in res.missing_keys if not k.startswith(tuple(allow_new))]
+        assert not stray and not res.unexpected_keys, f"checkpoint/model mismatch: missing {stray}, unexpected {res.unexpected_keys}"
+        if res.missing_keys:
+            print(f"fresh modules not in {path}: {sorted({k.split('.')[0] for k in res.missing_keys})}", flush=True)
+    else:
+        model.load_state_dict(sd)
     if opt is not None and "optimizer" in ck:
         opt.load_state_dict(ck["optimizer"])
     return ck["step"], ck.get("extra", {})
@@ -508,6 +567,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--aug-r2l", type=float, default=0.0, help="reverse this share of training windows over codepoints, marked with <|r2l|> (-> 3.910 at 0.5; reversing raw bytes would be corruption, not reversal)")
     ap.add_argument("--aug-offset", type=int, default=1, help="largest target offset i for x_{t+i} prediction, sampled exponentially per micro-batch (-> 3.870 at 5, and the highest downstream mean of any single method). 1 = ordinary next-byte prediction")
     ap.add_argument("--eval-spread", action="store_true", help="evaluate on windows spread over the whole val shard instead of its head (= first source only); use for the trunk and branches, never mid-queue")
+    ap.add_argument("--feedback", choices=["off", "byte", "chunk"], default=None, help="latent feedback (2608.08888; docs/results/2026-08-28-latent-feedback-prereg.md): fuse the previous position's top state into the next input — `byte` (decoder top -> next byte's encoder input) or `chunk` (main top -> next chunk's main input). Sets the config's feedback level on a fresh run or --init-from; a resume keeps the checkpoint's")
+    ap.add_argument("--feedback-mix", default="0.75,0.22,0.03", help="probabilities of 1-, 2-, 3-pass micro-batches (the paper's whole-run mixture; the 3 %% three-pass batches are what makes the feedback map a contraction)")
+    ap.add_argument("--feedback-window", type=int, default=0, help="bytes per multi-pass micro-batch (0 = the full --seq-len): the first memory fallback — pass-1 activations stay alive through the extra passes")
+    ap.add_argument("--feedback-detach", action="store_true", help="detach the carried state and back-propagate each pass on its own (one pass of activations at a time): the second memory fallback; loses the auxiliary gradient into the earlier pass")
+    ap.add_argument("--feedback-jitter", type=float, default=None, help="override FeedbackCfg.jitter (uniform ±σ on the carried state in training passes; paper 0.02)")
+    ap.add_argument("--eval-feedback-passes", type=int, default=0, help="also evaluate with k fused prefill passes (2608.08888 eqs. 10-11; logs val_bpb_fb1..k) — the gate reads k=1")
     ap.add_argument("--eval-ema", type=float, default=0.0, help="also evaluate an EMA of the weights (per-step decay; 0 = off): the decayed-quality stand-in for constant-LR runs that the LR-vs-horizon fit reads (2608.20061 §2.2.1; mote/train/lr_horizon.py); logs val_bpb_ema")
     return ap
 
@@ -559,6 +624,10 @@ class Trainer:
             cfg.dc.bound_ceiling = args.bound_ceiling
         if args.bound_floor is not None:
             cfg.dc.bound_floor = args.bound_floor
+        if args.feedback is not None:
+            cfg.feedback.level = args.feedback
+        if args.feedback_jitter is not None:
+            cfg.feedback.jitter = args.feedback_jitter
         (out_dir / "run.json").write_text(json.dumps(
             {**vars(args), "determinism": determinism.state(), "code": mote.CODE_VERSION,
              "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2))
@@ -687,7 +756,7 @@ class Trainer:
             print("training mix:", {args.data: main_w, **{spec: parse_mix_spec(spec)[1] for spec in args.mix}}, flush=True)
         self.train_shard = train_shard
         if args.init_from and not (args.resume and ckpt_path_exists(out_dir)):
-            _step, _ = load_checkpoint(Path(args.init_from), model, None)
+            _step, _ = load_checkpoint(Path(args.init_from), model, None, allow_new=("fusion.",))
             print(f"initialized weights from {args.init_from} (step {_step})", flush=True)
         # A per-schedule default, not a global one: `wsd` has always decayed to 0.1x and every lab arm on
         # record was run that way, so changing its floor would silently make new arms incomparable to their
@@ -695,6 +764,13 @@ class Trainer:
         self.min_lr_ratio = args.min_lr_ratio if args.min_lr_ratio is not None else (
             0.0 if args.schedule in BRANCH_SCHEDULES else 0.1)
         self.gen = torch.Generator().manual_seed(args.seed)
+        # latent feedback: the 1-/2-/3-pass micro-batch mixture, drawn on the same generator (reproducible)
+        self.feedback_mix = None
+        if cfg.feedback.level != "off":
+            mix = [float(v) for v in args.feedback_mix.split(",")]
+            assert len(mix) == 3 and all(v >= 0 for v in mix) and sum(mix) > 0, "--feedback-mix wants three non-negative weights"
+            self.feedback_mix = [v / sum(mix) for v in mix]
+        self.feedback_window = int(args.feedback_window or 0)
 
         self.step, self.t_start = 0, time.time()
         self.sched_total = None  # step horizon of the trunk/cooldown schedules: fixed at the first probe, survives resume
@@ -800,7 +876,7 @@ class Trainer:
 
         def windows():
             return evaluate_batches(self.model, self.val_shard, args.batch_size, args.seq_len, args.eval_batches, device,
-                                    target_ratio, spread=args.eval_spread)
+                                    target_ratio, spread=args.eval_spread, feedback_passes=args.eval_feedback_passes)
 
         def drain(gen, label):
             i = 0
@@ -839,16 +915,37 @@ class Trainer:
             batch, lmask = self.train_shard.sample_batch(args.batch_size, args.seq_len, self.gen)
             batch = batch.to(device, non_blocking=True)
             lmask = lmask.to(device, non_blocking=True) if lmask is not None else None
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                loss, n, stats, out_fwd = compute_losses(self.fwd, batch, target_ratio, self.cfg.mbp.loss_weight, self.cfg.dc.ratio_loss_weight, lmask)
-                if self.jepa is not None:
-                    aux, jstats = self.jepa(batch[:, :-1], self._enc_h)
-                    loss = loss + args.jepa_weight * aux * n  # same sum-normalisation as CE
-                    bp = out_fwd.routing.boundary_prob
-                    pb = (bp[..., 1] if bp.dim() == 3 else bp).float().clamp(1e-6, 1 - 1e-6)
-                    jstats["jepa_bent"] = (-(pb * pb.log() + (1 - pb) * (1 - pb).log())).mean().detach()
-                    stats = {**stats, **jstats}
-            loss.backward()  # unnormalised sum; normalised once below
+            n_pass = self._feedback_passes()
+            if n_pass > 1 and self.feedback_window and batch.shape[1] > self.feedback_window + 1:
+                batch = batch[:, : self.feedback_window + 1]  # the memory fallback: shorter multi-pass windows
+                lmask = lmask[:, : self.feedback_window + 1] if lmask is not None else None
+            if n_pass > 1 and args.feedback_detach:
+                # one pass of activations alive at a time: back-propagate each pass as it is produced
+                assert self.jepa is None, "latent feedback and the JEPA aux are separate arms"
+                stats = {}
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                    it = iter_pass_losses(self.fwd, batch, target_ratio, self.cfg.mbp.loss_weight, self.cfg.dc.ratio_loss_weight, lmask,
+                                          passes=n_pass, gen=self.gen, detach=True)
+                    for j, (lk, nk, sk, _o) in enumerate(it):
+                        (lk if j == 0 else lk / (n_pass - 1)).backward()
+                        if j == 0:
+                            n, stats = nk, sk
+                        else:
+                            stats["ce_fb_sum"] = stats.get("ce_fb_sum", 0.0) + sk["ce_sum"] / (n_pass - 1)
+            else:
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                    loss, n, stats, out_fwd = compute_losses(self.fwd, batch, target_ratio, self.cfg.mbp.loss_weight, self.cfg.dc.ratio_loss_weight, lmask,
+                                                             passes=n_pass, gen=self.gen)
+                    if self.jepa is not None:
+                        aux, jstats = self.jepa(batch[:, :-1], self._enc_h)
+                        loss = loss + args.jepa_weight * aux * n  # same sum-normalisation as CE
+                        bp = out_fwd.routing.boundary_prob
+                        pb = (bp[..., 1] if bp.dim() == 3 else bp).float().clamp(1e-6, 1 - 1e-6)
+                        jstats["jepa_bent"] = (-(pb * pb.log() + (1 - pb) * (1 - pb).log())).mean().detach()
+                        stats = {**stats, **jstats}
+                loss.backward()  # unnormalised sum; normalised once below
+            if self.feedback_mix is not None:
+                stats["passes"] = torch.tensor(float(n_pass), device=device)
             total_n = n if total_n is None else total_n + n
             for k, v in stats.items():
                 agg[k] = v if k not in agg else agg[k] + v
@@ -874,7 +971,20 @@ class Trainer:
                 out[k] = agg[k] / args.grad_accum
         if "ce_mbp_sum" in agg:
             out["ce_mbp"] = agg["ce_mbp_sum"] / total_n
+        if "ce_fb_sum" in agg:
+            out["ce_fb"] = agg["ce_fb_sum"] / total_n  # the feedback passes' CE per token (mean over the extra passes)
+        if "passes" in agg:
+            out["passes"] = agg["passes"] / args.grad_accum
         return out
+
+    def _feedback_passes(self) -> int:
+        """1, 2 or 3 forward passes for the next micro-batch, drawn from --feedback-mix on the run's
+        generator; always 1 when latent feedback is off (and nothing is drawn, so plain runs are unchanged)."""
+        if self.feedback_mix is None:
+            return 1
+        u = float(torch.rand((), generator=self.gen))
+        p1, p2 = self.feedback_mix[0], self.feedback_mix[0] + self.feedback_mix[1]
+        return 1 + int(u >= p1) + int(u >= p2)
 
     def _reselect(self):
         """One re-selection pass with the live model (docs/research/curriculum-2026-08-28.md). A generator: the

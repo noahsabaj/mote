@@ -142,6 +142,19 @@ class SpineCfg:
 
 
 @dataclass
+class FeedbackCfg:
+    """Latent feedback (2608.08888, signed 2026-08-28, docs/results/2026-08-28-latent-feedback-prereg.md):
+    the previous position's top state fused into the next input through a GLU, u = RMSNorm(W_U h_prev
+    ⊙ σ(W_G x)) — the state on the value path, the plain input only as the gate. `byte` fuses the
+    decoder's top state into the next byte's encoder input (the router sees the fully processed past);
+    `chunk` fuses the main network's top state into the next chunk's main input (the encoder and
+    routing are reused across passes). Trained by parallel multi-pass teacher forcing (train.py)."""
+
+    level: str = "off"  # off | byte | chunk
+    jitter: float = 0.02  # uniform ±jitter on the carried state in training passes (the paper's σ)
+
+
+@dataclass
 class MoteConfig:
     vocab_size: int = VOCAB_SIZE
     pad_vocab_to: int = 272  # embedding rows (16-aligned); logits for ids >= vocab_size are masked to -inf by the head
@@ -154,6 +167,7 @@ class MoteConfig:
     dc: DCCfg = field(default_factory=DCCfg)
     mamba3: Mamba3Cfg = field(default_factory=Mamba3Cfg)
     spine: SpineCfg = field(default_factory=SpineCfg)
+    feedback: FeedbackCfg = field(default_factory=FeedbackCfg)
     max_seq_len: int = 2048  # bytes
     # Serving reads a prompt in windows of this many bytes instead of one pass. The Mamba-3 prefill
     # workspace is linear in the window (measured 2026-08-27: 25.1 KiB per prompt byte per layer, so
@@ -179,6 +193,7 @@ class MoteConfig:
             dc=_make(DCCfg, d.pop("dc", {})),
             mamba3=_make(Mamba3Cfg, d.pop("mamba3", {})),
             spine=_make(SpineCfg, d.pop("spine", {})),
+            feedback=_make(FeedbackCfg, d.pop("feedback", {})),
             **d,
         )
 

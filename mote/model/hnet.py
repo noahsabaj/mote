@@ -22,6 +22,7 @@ from ..config import MoteConfig
 from .arena import ArenaState, RelationArena
 from .blocks import Isotropic, make_mamba3_stack, make_relation_stack
 from .dc import ChunkLayer, DeChunkLayer, DeChunkState, RoutingModule, RoutingOutput, RoutingState, ste_ones
+from .feedback import FeedbackInput, LatentFusion, fuse
 from .mbp import LCAHead
 
 
@@ -32,6 +33,11 @@ class HNetOutput:
     routing: RoutingOutput
     chunk_id: torch.Tensor  # [B, L] chunk index of every byte
     offset: torch.Tensor  # [B, L] offset of every byte within its chunk
+    # latent feedback (feedback.py): the top states a further pass fuses into its inputs — the decoder's
+    # h3 [B, L, D0] at byte level, the main network's full-width output [B, M, D1] at chunk level — and,
+    # at chunk level, the front half (h, residual, routing, hc_plain, next_mask) the next pass reuses
+    top: Optional[torch.Tensor] = None
+    front: Optional[tuple] = None
 
 
 @dataclass
@@ -48,6 +54,9 @@ class InferenceState:
     last_chunk_z: Optional[torch.Tensor] = None  # [1, 1, D] main output of the current chunk (dechunked)
     last_chunk_start_state: Optional[torch.Tensor] = None  # [1, 1, D] encoder state at the current chunk start
     cur_offset: int = 0
+    # latent feedback (Soft decoding): the carried top state the next input is fused with
+    h_prev: Optional[torch.Tensor] = None  # [1, 1, D0] decoder top of the last byte (byte level)
+    z_prev: Optional[torch.Tensor] = None  # [1, 1, D1] main-network top of the last chunk (chunk level)
 
 
 class HNetForCausalLM(nn.Module):
@@ -98,6 +107,17 @@ class HNetForCausalLM(nn.Module):
         if V > cfg.vocab_size:
             self.logit_mask[cfg.vocab_size:] = float("-inf")
         self.mbp_head = LCAHead(D0, cfg.mbp.n_layers, cfg.mbp.n_heads, cfg.mbp.d_ff, cfg.norm_eps, vocab=V, transition=getattr(cfg.mbp, "transition", False), **fk) if cfg.mbp.enabled else None
+        fb = getattr(cfg, "feedback", None)
+        self.feedback_level = fb.level if fb is not None else "off"
+        self.feedback_jitter = float(fb.jitter) if fb is not None else 0.0
+        if self.feedback_level == "byte":
+            self.fusion = LatentFusion(D0, D0, cfg.norm_eps, **fk)  # decoder top -> the next byte's encoder input
+        elif self.feedback_level == "chunk":
+            self.fusion = LatentFusion(D1, D1, cfg.norm_eps, **fk)  # main top -> the next chunk's main input
+        else:
+            assert self.feedback_level == "off", f"unknown feedback level {self.feedback_level!r}"
+            self.fusion = None
+        assert not (self.spine_on and self.fusion is not None), "latent feedback and the spine are separate arms"
         if cfg.tie_embeddings:
             self.lm_head.weight = self.embeddings.weight
         self.init_weights()
@@ -172,22 +192,36 @@ class HNetForCausalLM(nn.Module):
             return h
         return torch.cat([h, self.pad_dimension.to(h.dtype).expand(*h.shape[:-1], -1)], dim=-1)
 
-    def forward(self, input_ids: torch.Tensor, mask: Optional[torch.Tensor] = None) -> HNetOutput:
+    def forward(self, input_ids: torch.Tensor, mask: Optional[torch.Tensor] = None, feedback: Optional[FeedbackInput] = None) -> HNetOutput:
+        """`feedback`: a latent-feedback pass (feedback.py) — the previous pass's top states are shifted right
+        and fused into this pass's inputs at the level the config names. At byte level the fused embedding
+        feeds the encoder (so the router sees the fully processed past); at chunk level the fused chunk
+        vector feeds the main network and the previous pass's encoder/routing are reused."""
         B, L = input_ids.shape
         D0 = self.cfg.d_model_outer
         if mask is None:
             mask = torch.ones(B, L, dtype=torch.bool, device=input_ids.device)
-
-        h = self.embeddings(input_ids)
-        x = self.encoder(self._spine_in(h))  # [B, L, D0], or [B, L, n, ·] under the spine
-        if self.spine_on:
-            h, carried = self._spine_read(x)
+        level = self.feedback_level if feedback is not None else "off"
+        if level == "chunk" and feedback.front is not None:
+            h, residual, routing, hc, next_mask = feedback.front  # plain bytes in every pass: nothing to recompute
+            x = carried = None
         else:
-            h, residual = x, self.residual_proj(x.float())
-
-        routing = self.routing_module(h, mask)
-        hc, next_mask = self.chunk_layer(h, routing.boundary_mask)  # [B, M, D0]
-        zc = self.main_network(self._pad(hc), token_mask=next_mask)[..., :D0]  # [B, M, D0]; the mask keeps pads out of MoE stats
+            h = self.embeddings(input_ids)
+            if level == "byte":
+                h = fuse(self.fusion, h, feedback, self.feedback_jitter, self.training)
+            x = self.encoder(self._spine_in(h))  # [B, L, D0], or [B, L, n, ·] under the spine
+            if self.spine_on:
+                h, carried = self._spine_read(x)
+            else:
+                h, residual = x, self.residual_proj(x.float())
+            routing = self.routing_module(h, mask)
+            hc, next_mask = self.chunk_layer(h, routing.boundary_mask)  # [B, M, D0]
+            hc = self._pad(hc)
+        front = (h, residual, routing, hc, next_mask) if self.feedback_level == "chunk" else None
+        if level == "chunk":
+            hc = fuse(self.fusion, hc, feedback, self.feedback_jitter, self.training)
+        zc_full = self.main_network(hc, token_mask=next_mask)  # [B, M, D1]; the mask keeps pads out of MoE stats
+        zc = zc_full[..., :D0]
         z = self.dechunk_layer(zc, routing.boundary_mask, routing.boundary_prob)  # [B, L, D0]
 
         y = z.float() * ste_ones(routing.selected_probs.float())
@@ -212,7 +246,8 @@ class HNetForCausalLM(nn.Module):
             mbp_logits = self.head_logits(x)
             if self.mbp_head.transition is not None:
                 mbp_logits = mbp_logits + self.mbp_head.transition(input_ids).to(mbp_logits.dtype)  # teacher-forced previous byte
-        return HNetOutput(logits, mbp_logits, routing, chunk_id, offset)
+        top = h3 if self.feedback_level == "byte" else (zc_full if self.feedback_level == "chunk" else None)
+        return HNetOutput(logits, mbp_logits, routing, chunk_id, offset, top=top, front=front)
 
     # ------------------------------------------------------------------------------
     def new_arena(self, device, capacity: Optional[int] = None, bpic: Optional[float] = None,
@@ -256,6 +291,8 @@ class HNetForCausalLM(nn.Module):
         state.main.arena.ensure(state.main.n + T)
         zc, _ = self.main_network(self._pad(hc), caches=state.main, return_caches=True)
         state.main.advance(T)
+        if self.feedback_level == "chunk":
+            state.z_prev = zc[:, -1:]  # generated chunks fuse with it (`step`); prompt chunks stay plain
         return zc[..., : self.cfg.d_model_outer]
 
     @torch.no_grad()
@@ -288,6 +325,8 @@ class HNetForCausalLM(nn.Module):
         else:
             h3, state.decoder = self.decoder((z.float() + residual).to(h.dtype), caches=None, return_caches=True)
         logits = self.head_logits(h3[:, -1:] if last_logits_only else h3)
+        if self.feedback_level == "byte":
+            state.h_prev = h3[:, -1:]
 
         chunk_id = torch.cumsum(routing.boundary_mask.long(), dim=1) - 1
         pos = torch.arange(L, device=input_ids.device)[None, :]
@@ -342,6 +381,8 @@ class HNetForCausalLM(nn.Module):
         else:
             h3, state.decoder = self.decoder((z.float() + residual).to(h.dtype), caches=state.decoder, return_caches=True)
         logits = self.head_logits(h3[:, -1:] if last_logits_only else h3)
+        if self.feedback_level == "byte":
+            state.h_prev = h3[:, -1:]
 
         if self.mbp_head is not None:
             bm = routing.boundary_mask[0]
@@ -444,6 +485,8 @@ class HNetForCausalLM(nn.Module):
         assert input_ids.shape == (1, 1)
         D0 = self.cfg.d_model_outer
         h = self.embeddings(input_ids)
+        if self.feedback_level == "byte" and state.h_prev is not None:
+            h = self.fusion(state.h_prev, h)  # Soft decoding: the last byte's top state rides into this input
         x, state.encoder = self.encoder.step(self._spine_in(h), state.encoder)
         if self.spine_on:
             h, carried = self._spine_read(x)
@@ -454,8 +497,13 @@ class HNetForCausalLM(nn.Module):
         if is_boundary:
             hc = self.chunk_layer.step(h, routing.boundary_mask)  # [1,1,D0]
             state.main.arena.ensure(state.main.n + 1)
-            zc, _ = self.main_network.step(self._pad(hc), state.main)
+            xm = self._pad(hc)
+            if self.feedback_level == "chunk" and state.z_prev is not None:
+                xm = self.fusion(state.z_prev, xm)  # Soft decoding at chunk level
+            zc, _ = self.main_network.step(xm, state.main)
             state.main.advance(1)
+            if self.feedback_level == "chunk":
+                state.z_prev = zc
             zc = zc[..., :D0]
         else:
             zc = h[:0]
@@ -466,6 +514,8 @@ class HNetForCausalLM(nn.Module):
         else:
             h3, state.decoder = self.decoder.step((z.float() + residual).to(h.dtype), state.decoder)
         logits = self.head_logits(h3)
+        if self.feedback_level == "byte":
+            state.h_prev = h3
 
         mbp_logits = None
         if self.mbp_head is not None:

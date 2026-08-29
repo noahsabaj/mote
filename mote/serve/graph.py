@@ -85,6 +85,15 @@ class GraphDecoder:
         self.wpos = torch.zeros((), device=dev, dtype=torch.long)
         self.byte = torch.zeros(1, 1, device=dev, dtype=torch.long)
         self.zc = torch.zeros(1, 1, self.D0, device=dev, dtype=self.dtype)
+        # latent feedback (Soft decoding): the carried top state lives at a static address so the capture
+        # can fuse it into the next input in place (the paper's vLLM note does the same)
+        self.fb_level = getattr(model, "feedback_level", "off")
+        self.h_prev = torch.zeros(1, 1, self.D0, device=dev, dtype=self.dtype)
+        self.z_prev = torch.zeros(1, 1, cfg.main.d_model, device=dev, dtype=self.dtype)
+        if self.fb_level == "byte":
+            self.state.h_prev = self.h_prev  # the static state carries the buffer, so anchors and `load` see it
+        elif self.fb_level == "chunk":
+            self.state.z_prev = self.z_prev
         self.is_stop = torch.zeros(self.V, device=dev, dtype=torch.bool)
         for i in stop_ids:
             if i < self.V:
@@ -180,6 +189,8 @@ class GraphDecoder:
         """Main network over the boundary row `hc` [1,1,D0] → self.zc; S += 1."""
         m = self.model
         hidden = m._pad(hc)
+        if self.fb_level == "chunk":
+            hidden = m.fusion(self.z_prev, hidden)
         residual = None
         for li, (block, al) in enumerate(zip(m.main_network.layers, self.state.main)):
             hidden, residual = block.norm1(hidden, residual=residual, prenorm=True, residual_in_fp32=block.residual_in_fp32)
@@ -188,6 +199,8 @@ class GraphDecoder:
                 hidden, residual = block.norm2(hidden, residual=residual, prenorm=True, residual_in_fp32=block.residual_in_fp32)
                 hidden = block.mlp(hidden)
         zc = m.main_network.rmsnorm(hidden, residual=residual, prenorm=False, residual_in_fp32=True)
+        if self.fb_level == "chunk":
+            self.z_prev.copy_(zc)
         self.zc.copy_(zc[..., : self.D0])
         self.ring_xm.index_copy_(0, self.wpos.view(1), self.xm_dev.view(1, -1))
         self.S.add_(1)
@@ -197,6 +210,8 @@ class GraphDecoder:
         m, st = self.model, self.state
         self.byte.copy_(b.view(1, 1))
         h = m.embeddings(self.byte)
+        if self.fb_level == "byte":
+            h = m.fusion(self.h_prev, h)
         h = self._mamba_stack_step(m.encoder, h, st.encoder)
         residual = m.residual_proj(h.float())
         routing = m.routing_module.step(h, st.routing)
@@ -215,6 +230,8 @@ class GraphDecoder:
         st.dechunk.last_value.copy_(z.to(st.dechunk.last_value.dtype))
         h2 = (z[:, None, :] + residual).to(h.dtype)
         h3 = self._mamba_stack_step(m.decoder, h2, st.decoder)
+        if self.fb_level == "byte":
+            self.h_prev.copy_(h3)
         self.logits.copy_(m.head_logits(h3)[0, 0].float())
         if self.ret_dev:  # per-layer retention the mixers wrote into their device buffers this step
             self.ring_ret.index_copy_(0, slot, torch.stack([d["retention"] for d in self.ret_dev])[None])
@@ -374,6 +391,10 @@ class GraphDecoder:
         st.routing.last_hidden_state.copy_(state.routing.last_hidden_state)
         st.dechunk.last_value.copy_(state.dechunk.last_value)
         st.main.n = state.main.n
+        if self.fb_level == "byte" and state.h_prev is not None:
+            self.h_prev.copy_(state.h_prev)
+        if self.fb_level == "chunk" and state.z_prev is not None:
+            self.z_prev.copy_(state.z_prev)
         self.logits.copy_(logits.float())
         self.S.fill_(state.main.n)
 
