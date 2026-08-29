@@ -65,3 +65,13 @@ v2 tiles → #7 in the first bundle.
 Serving speed (a Rust/C++ CPU decoder: 3–6× at 32M, 2–4× at 96M — mostly bytes moved, not Python left
 behind); a deterministic backward (two-pass reductions in Triton); reversible outer layers and host-pinned
 optimizer state unless #1's probe needs them; moving the trunk to an H100 (a different decision, Noah's).
+
+
+## Candidates added 2026-08-29 (from the SSM sweep, abstracts only)
+
+* **Dion3** (2608.11612, Dao et al.): Muon's Newton–Schulz step up to 6× faster at matched loss (Gram NS, row
+  subsets). Worth measuring only if the optimizer step is a visible share of the 96M step — measure first.
+* **CODA** (2605.19269): normalization, activations and residual updates as GEMM epilogues — aimed at exactly the
+  31 % elementwise/copy bucket of the profile.
+* **2608.12700**: a contract-grade verifier for generated GPU kernels (NaN/inf handling, run-to-run determinism,
+  shape coverage) — its criteria are what the hot-swap gate's kernel checks should cover.

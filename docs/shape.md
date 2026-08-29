@@ -34,6 +34,17 @@ ways the correction is dated beside it.
   tests wait for an idle card (`docs/runbook.md`).
 * **The 7-day trunk launches on Noah's word, with `--serve`**; screening arms never touch what is served.
 * Noah reads any fit before a frozen number moves.
+* **Two scales, three seeds** (2026-08-29): an architecture claim is measured at 11M with three seeds and at 32M
+  with the same sign, with the plain-attention main and the pure-Mamba-3 main in the table
+  (`docs/results/2026-08-29-hybrid-ladder-prereg.md`).
+* **The chunk rate's controller is the decision threshold** (2026-08-29): the bounded-routing projection ranks the
+  whole window and is not causal when it binds; it stays a guardrail. `--bound-floor` is a rate over the training
+  window (`655ac24`).
+* **Unwon options expire** (2026-08-29): an option that has not won an arm 90 days after its build date is deleted
+  at the next housekeeping, its reading kept in `docs/research/`; retroactive (MoE 08-24, DPO/KTO/RLVR 08-25,
+  augmentations and FIM 08-26 fall due late November 2026). A number in a comment is a dated claim housekeeping owns.
+* **Prefix invariance is tested** (2026-08-29): `tests/test_prefix_invariance.py` runs the two-forward audit with a
+  positive control on every arm config before it is timed.
 
 ## The model — Mote-96M, frozen 2026-08-24
 

@@ -200,7 +200,8 @@ class Engine:
         # per-reply arena from the shared allocator, decodes eagerly (the prefix store's CPU pages still
         # rehydrate it) and hands the memory back; `rearm()` restores the fast path when the queue idles.
         self._released = False
-        self._graph_ok = self.device.type == "cuda" and os.environ.get("MOTE_GRAPH_DECODE", "1") != "0"
+        self._graph_ok = (self.device.type == "cuda" and os.environ.get("MOTE_GRAPH_DECODE", "1") != "0"
+                          and not getattr(self.model.cfg.main, "pattern", None))  # a hybrid main decodes eagerly
         self.arena = None
         self._gd: Optional[GraphDecoder] = None
         if released:

@@ -103,3 +103,14 @@ RLPT 2509.19249, TPT 2509.20186) keeps the target and adds process. On the RL si
 smarter than you think" (2510.14901, 2601.21590; pass@k inversion as overtraining, 2606.15455) says the
 prior is the capability and RL is a decoder for it — which is why *what gets predicted in pretraining* is
 the right question.
+
+
+## Amendment 2026-08-29 (from the SSM sweep)
+
+2607.06155 gives the architecture-level condition under which tool use adds expressivity to a finite-state
+recurrent path: the tool must be unbounded and addressable and its results re-readable — then memory problems
+become round-trip problems, while a bounded tool adds nothing. For the live environment this means the
+transcript and every earlier tool result are exposed as files in the sandbox (re-readable), calls are cheap
+enough to issue many, and a probe with n ≫ state bits (EQ_n) separates Relation-bearing from state-only
+models. Tool calls do not reduce the number of Relation layers a hybrid needs for in-context multi-hop reads
+(2605.16640: one attention-like layer per dependent hop).

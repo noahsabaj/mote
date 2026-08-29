@@ -42,6 +42,19 @@ class RelationCfg:
     # QK-Norm on p1/p2 before RoPE (2608.24814 §4.2 measures it as the biggest lever on how precisely
     # ELR collapse holds; not loss-neutral in Relation, see relation.HeadRMSNorm). Off until its arm passes.
     qk_norm: bool = False
+    # --- the hybrid main (signed 2026-08-29, docs/results/2026-08-29-hybrid-ladder-prereg.md) ---------
+    # `pattern`: one letter per main layer, 'R' = Relation block, 'M' = Mamba-3 block (both keep the FFN);
+    # None = all Relation. Every hybrid arm has 'M' at layer 0 and at least two 'R' (the 2-hop tool-result
+    # read needs one attention-like layer per dependent hop, 2605.16640). `mamba_expand` is the main-net
+    # Mamba-3's expansion. `out_gate`: an element-wise sigmoid output gate on Relation (the one stability
+    # lever with data in hybrids, 2608.12149). `mamba_out_norm`: RMSNorm on the Mamba-3 output before its
+    # gate and out-projection (2603.15569: "crucial for long-context extrapolation" in hybrids).
+    # `rope=False` is the NoPE-Relation variant a Raven partner needs (2607.25357 Table 9).
+    pattern: str | None = None
+    mamba_expand: int = 2
+    out_gate: bool = False
+    mamba_out_norm: bool = False
+    rope: bool = True
     # Mixture of experts in the FFN slot (signed 2026-08-24, docs/shape.md "MoE"; mote/model/moe.py)
     moe_experts: int = 0  # 0 = dense SwiGLU; E ≥ 2 = MoESwiGLU with E experts
     moe_topk: int = 2

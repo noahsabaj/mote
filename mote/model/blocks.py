@@ -130,24 +130,55 @@ def make_mamba3_stack(n_layers: int, d_model: int, cfg, eps: float, layer_offset
     return Isotropic(blocks, d_model, eps=eps, device=device, dtype=dtype)
 
 
-def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=None, dtype=None) -> Isotropic:
+def main_pattern(cfg) -> str:
+    """The main network's layer pattern: `cfg.pattern` validated, or all-Relation."""
+    pat = getattr(cfg, "pattern", None) or "R" * cfg.n_layers
+    pat = pat.upper()
+    assert len(pat) == cfg.n_layers and set(pat) <= {"R", "M"}, f"main pattern {pat!r} must be {cfg.n_layers} letters of R/M"
+    if "M" in pat:
+        assert pat.count("R") >= 2 and pat[0] == "M", f"a hybrid main starts with M and keeps >= 2 R layers (signed 2026-08-29), got {pat!r}"
+    return pat
+
+
+def make_relation_stack(cfg, eps: float, residual_in_fp32: bool = True, device=None, dtype=None, mamba_cfg=None) -> Isotropic:
     """Main network: Full Relation mixers with SwiGLU FFNs ('R' blocks); `cfg.moe_experts > 1` swaps the
-    FFN for `MoESwiGLU` (layer 0 stays dense under `moe_dense_first`)."""
+    FFN for `MoESwiGLU` (layer 0 stays dense under `moe_dense_first`). With `cfg.pattern` the 'M' positions
+    are Mamba-3 mixers at the main width (the hybrid main, signed 2026-08-29) — every block keeps its FFN."""
     blocks = []
     n_exp = int(getattr(cfg, "moe_experts", 0) or 0)
+    pat = main_pattern(cfg)
     for i in range(cfg.n_layers):
-        mixer = FullRelation(
-            cfg.d_model,
-            cfg.n_heads,
-            layer_idx=i,
-            tau_s=cfg.tau_s,
-            lambda_init=cfg.lambda_init,
-            rope_theta=cfg.rope_theta,
-            givens=cfg.givens,
-            qk_norm=getattr(cfg, "qk_norm", False),
-            device=device,
-            dtype=dtype,
-        )
+        if pat[i] == "M":
+            assert mamba_cfg is not None, "a hybrid main needs the Mamba-3 config"
+            mixer = Mamba3Mixer(
+                cfg.d_model,
+                d_state=mamba_cfg.d_state,
+                expand=getattr(cfg, "mamba_expand", 2),
+                headdim=mamba_cfg.headdim,
+                ngroups=mamba_cfg.ngroups,
+                rope_fraction=mamba_cfg.rope_fraction,
+                A_floor=mamba_cfg.A_floor,
+                chunk_size=mamba_cfg.chunk_size,
+                layer_idx=1000 + i,  # distinct from the outer stacks' indices
+                out_norm=getattr(cfg, "mamba_out_norm", False),
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            mixer = FullRelation(
+                cfg.d_model,
+                cfg.n_heads,
+                layer_idx=i,
+                tau_s=cfg.tau_s,
+                lambda_init=cfg.lambda_init,
+                rope_theta=cfg.rope_theta,
+                givens=cfg.givens,
+                qk_norm=getattr(cfg, "qk_norm", False),
+                out_gate=getattr(cfg, "out_gate", False),
+                rope=getattr(cfg, "rope", True),
+                device=device,
+                dtype=dtype,
+            )
         if n_exp > 1 and not (i == 0 and getattr(cfg, "moe_dense_first", False)):
             f = cfg.moe_d_ff or max(cfg.d_ff // cfg.moe_topk, 1)
             mlp = MoESwiGLU(cfg.d_model, f, n_exp, top_k=cfg.moe_topk, router=cfg.moe_router, aux_weight=cfg.moe_aux_weight,

@@ -79,7 +79,24 @@ def s1_job():
     return "mote-s1", f"{CD} && {ENV} && bash scripts/cloud_session1.sh"
 
 
+LADDER_PILOT = ("--data data/local_mix --batch-size 4 --seq-len 2048 --optimizer muon --lr 8e-4 --weight-decay 0.1 "
+                "--grad-accum 1 --schedule wsd --max-steps 122070 --eval-every 2000 --eval-batches 16 --eval-spread "
+                "--ckpt-minutes 30 --seed 42")  # 1.0 GB of bytes at 8192 a step; ~1.5 h on an L4 at the 11M shape
+LADDER_PILOT_ARMS = [("R", "--preset mote-11m"),
+                     ("3to1_evidence", "--preset mote-11m --main-pattern MMMRRM --main-mamba-expand 2 --main-d-ff 513 "
+                                       "--relation-out-gate --mamba-out-norm")]  # scripts/ladder_arms.py --argv 3to1_evidence
+
+
+def ladder_pilot_job():
+    """The hybrid ladder's cloud pilot (docs/results/2026-08-29-hybrid-ladder-prereg.md): the 11M control and the
+    3:1 evidence-placed hybrid at matched parameters (10,870,110 vs 10,868,394), one seed, 1 GB each, in sequence
+    on one L4 — a measured per-arm cost and the first hybrid bpb + boundary numbers. ≈ $2 of the free credits."""
+    runs = "; ".join(f"python -m mote.train.train {flags} {LADDER_PILOT} --out runs/cloud/ladder/{arm}" for arm, flags in LADDER_PILOT_ARMS)
+    return "mote-ladder-pilot", f"{CD} && {ENV} && {runs}; ls runs/cloud/ladder"
+
+
 JOBS = {
+    "ladder-pilot": ladder_pilot_job,
     "s1": s1_job,
     "bitwise-ctl": bitwise_ctl_job,
     "lr-3.6e-4": lambda: lr_job("3.6e-4", HORIZON),
@@ -93,6 +110,7 @@ RUN_PATHS = {  # job -> the run directories it writes, for `progress`
     "mote-lr-3p6e-4": ["lr/3.6e-4"], "mote-lr-7p2e-4": ["lr/7.2e-4"], "mote-lr-14p4e-4": ["lr/14.4e-4"],
     "mote-lr-28p8e-4": ["lr/28.8e-4"], "mote-qk": [f"qk/{a}" for a, _, _ in QK_ARMS],
     "mote-bitwise": ["bitwise/new", "bitwise/old"], "mote-bitwise-ctl": ["bitwise/a", "bitwise/b"],
+    "mote-ladder-pilot": [f"ladder/{a}" for a, _ in LADDER_PILOT_ARMS],
     "mote-s1": ["s1/ckpt/on", "s1/ckpt/off", "s1/pair/v2", "s1/pair/twopass", "s1/twins/eager", "s1/twins/compile"],
 }
 

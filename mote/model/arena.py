@@ -145,24 +145,42 @@ class ArenaLayer:
 
 class ArenaState:
     """The main-network half of an InferenceState: a reference to the shared arena and the chunk count
-    `n` this sequence has written. Copying it copies `n` only — the arena is never duplicated."""
+    `n` this sequence has written. Copying it copies `n` only — the arena is never duplicated.
 
-    __slots__ = ("arena", "n")
+    A hybrid main (config `pattern`, 2026-08-29) also carries the recurrent state of each Mamba-3 main
+    layer in `mamba` (layer -> Mamba3State); those tensors ARE copied and moved with the state, like the
+    outer stacks' — they are the constant-size part, the arena rows the growing part."""
 
-    def __init__(self, arena: RelationArena, n: int = 0):
+    __slots__ = ("arena", "n", "mamba")
+
+    def __init__(self, arena: RelationArena, n: int = 0, mamba: Optional[dict] = None):
         self.arena, self.n = arena, int(n)
+        self.mamba = dict(mamba) if mamba else {}
 
     def __len__(self) -> int:
         return self.arena.n_layers
 
-    def __getitem__(self, layer: int) -> ArenaLayer:
+    def __getitem__(self, layer: int):
+        if layer in self.mamba:
+            return self.mamba[layer]
         return ArenaLayer(self.arena, layer, self)
+
+    def set(self, layer: int, state) -> None:
+        """Write back a Mamba-3 main layer's new recurrent state (Relation layers write into the arena)."""
+        if layer in self.mamba:
+            self.mamba[layer] = state
+
+    def map(self, fn) -> "ArenaState":
+        """A copy with `fn` applied to every Mamba-3 state tensor; the arena reference is shared."""
+        from .tree import map_tree
+
+        return ArenaState(self.arena, self.n, {k: map_tree(v, fn) for k, v in self.mamba.items()})
 
     def __iter__(self) -> Iterator[ArenaLayer]:
         return (self[i] for i in range(len(self)))
 
     def copy(self) -> "ArenaState":
-        return ArenaState(self.arena, self.n)
+        return self.map(lambda t: t.clone()) if self.mamba else ArenaState(self.arena, self.n)
 
     def advance(self, T: int) -> None:
         self.n += int(T)

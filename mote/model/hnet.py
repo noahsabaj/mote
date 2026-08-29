@@ -20,6 +20,7 @@ from .arena import ArenaState, RelationArena
 from .blocks import make_mamba3_stack, make_relation_stack
 from .dc import ChunkLayer, DeChunkLayer, DeChunkState, RoutingModule, RoutingOutput, RoutingState, ste_ones
 from .feedback import FeedbackInput, LatentFusion, fuse
+from .relation import FullRelation
 from .tree import map_tree
 
 # State-dict prefixes of modules this version no longer has: the multi-byte head (retired 2026-08-29 —
@@ -81,7 +82,7 @@ class HNetForCausalLM(nn.Module):
         r.bound_window = cfg.max_seq_len  # the floor is a rate over the training window (dc.py)
         r.decode_threshold = cfg.dc.decode_threshold
         self.chunk_layer = ChunkLayer(bucket=getattr(cfg.dc, "chunk_bucket", 1))
-        self.main_network = make_relation_stack(cfg.main, cfg.norm_eps, **fk, residual_in_fp32=cfg.residual_in_fp32)
+        self.main_network = make_relation_stack(cfg.main, cfg.norm_eps, **fk, residual_in_fp32=cfg.residual_in_fp32, mamba_cfg=cfg.mamba3)
         self.dechunk_layer = DeChunkLayer(D0, prob_clamp=cfg.dc.prob_clamp)
         self.residual_proj = nn.Linear(D0, D0, device=device, dtype=torch.float32)
         nn.init.zeros_(self.residual_proj.weight)
@@ -233,10 +234,12 @@ class HNetForCausalLM(nn.Module):
     def allocate_inference_state(self, device, dtype=None, arena: Optional[RelationArena] = None) -> InferenceState:
         """A fresh state. `arena` is the shared decode arena (the engine passes its own); without one a
         private arena is allocated, which is what tests and one-off reads want."""
+        mamba_main = {i: b.allocate_inference_cache(1, device, dtype) for i, b in enumerate(self.main_network.layers)
+                      if not isinstance(b.mixer, FullRelation)}  # the hybrid main's recurrent layers
         return InferenceState(
             encoder=self.encoder.allocate_inference_cache(1, device, dtype),
             routing=self.routing_module.allocate_inference_cache(1, device, dtype),
-            main=ArenaState(arena if arena is not None else self.new_arena(device), 0),
+            main=ArenaState(arena if arena is not None else self.new_arena(device), 0, mamba_main),
             dechunk=self.dechunk_layer.allocate_inference_cache(1, device, dtype),
             decoder=self.decoder.allocate_inference_cache(1, device, dtype),
         )
@@ -245,7 +248,9 @@ class HNetForCausalLM(nn.Module):
         """Main network over T new chunks, written into the arena at rows [n, n+T); advances n."""
         T = hc.shape[1]
         state.main.arena.ensure(state.main.n + T)
-        zc, _ = self.main_network(self._pad(hc), caches=state.main, return_caches=True)
+        zc, new_caches = self.main_network(self._pad(hc), caches=state.main, return_caches=True)
+        for i in state.main.mamba:  # a hybrid main's Mamba-3 layers carry their state here, not in the arena
+            state.main.set(i, new_caches[i])
         state.main.advance(T)
         if self.feedback_level == "chunk":
             state.z_prev = zc[:, -1:]  # generated chunks fuse with it (`step`); prompt chunks stay plain
@@ -313,7 +318,7 @@ class HNetForCausalLM(nn.Module):
     def _map_state(state: InferenceState, fn) -> InferenceState:
         """Rebuild the state with `fn` applied to every tensor. The arena is shared, never copied: only its
         fill count (`ArenaState`) travels."""
-        return map_tree(state, lambda o: o.copy() if isinstance(o, ArenaState) else fn(o), atoms=(ArenaState,))
+        return map_tree(state, lambda o: o.map(fn) if isinstance(o, ArenaState) else fn(o), atoms=(ArenaState,))
 
     @staticmethod
     def clone_state(state: InferenceState) -> InferenceState:
@@ -366,7 +371,9 @@ class HNetForCausalLM(nn.Module):
             xm = self._pad(hc)
             if self.feedback_level == "chunk" and state.z_prev is not None:
                 xm = self.fusion(state.z_prev, xm)  # Soft decoding at chunk level
-            zc, _ = self.main_network.step(xm, state.main)
+            zc, new_caches = self.main_network.step(xm, state.main)
+            for i in state.main.mamba:
+                state.main.set(i, new_caches[i])
             state.main.advance(1)
             if self.feedback_level == "chunk":
                 state.z_prev = zc

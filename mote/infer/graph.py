@@ -107,6 +107,8 @@ class GraphDecoder:
         self.ring_ent = torch.zeros(R, device=dev)
         self.ring_bp = torch.zeros(R, device=dev)
         self.ring_bit = torch.zeros(R, device=dev, dtype=torch.bool)
+        if any(not isinstance(b.mixer, FullRelation) for b in model.main_network.layers):
+            raise NotImplementedError("graph decode: a hybrid main (config pattern) decodes eagerly until it is adopted")
         self.mixers: List[Mamba3Mixer] = [b.mixer for b in list(model.encoder.layers) + list(model.decoder.layers)]
         nh = self.mixers[0].nheads if self.mixers else 1
         self.ring_ret = torch.zeros(R, len(self.mixers), nh, device=dev)
@@ -157,8 +159,9 @@ class GraphDecoder:
         freqs = self.S.float() * inv_freq
         emb = torch.cat([freqs, freqs], dim=-1)
         cos, sin = emb.cos().to(x.dtype)[None, None, None], emb.sin().to(x.dtype)[None, None, None]
-        p1 = p1 * cos + _rotate_half(p1) * sin
-        p2 = p2 * cos + _rotate_half(p2) * sin
+        if mixer.use_rope:
+            p1 = p1 * cos + _rotate_half(p1) * sin
+            p2 = p2 * cos + _rotate_half(p2) * sin
         info = mixer._givens(info)
         p2buf, infobuf = self.arena.p2(li), self.arena.info(li)
         # Match the arena's dtype explicitly. The eager path gets this by accident — ArenaLayer.write
@@ -181,7 +184,7 @@ class GraphDecoder:
         flow = torch.softmax(r, dim=-1)
         y = torch.matmul(flow.to(info_all.dtype), info_all)  # [1,H,1,dh]
         self.xm_dev[li].copy_((1.0 - flow.gather(-1, idx.view(1, 1, 1, 1).expand(1, H, 1, 1)).squeeze(-1)).mean())
-        return mixer.wo(y.transpose(1, 2).reshape(1, 1, D))
+        return mixer._out(y, x)
 
     def _main_step(self, hc: torch.Tensor, Cb: int) -> None:
         """Main network over the boundary row `hc` [1,1,D0] → self.zc; S += 1."""

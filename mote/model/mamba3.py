@@ -78,6 +78,22 @@ def _segsum(x: torch.Tensor) -> torch.Tensor:
     return xs.masked_fill(~mask, -torch.inf)
 
 
+class _GateNorm(nn.Module):
+    """Plain RMSNorm over the inner width with a learnable gain, in fp32 (the pre-gate norm of a hybrid's
+    main-net Mamba-3 layer). Deliberately not `norm.RMSNorm`: that one's fused path and residual interface
+    are for the residual stream; this is a per-position normalisation of the scan output."""
+
+    def __init__(self, dim: int, eps: float = 1e-5, device=None, dtype=None):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim, device=device, dtype=dtype))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        xf = x.float()
+        y = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (y * self.weight.float()).to(x.dtype)
+
+
 class Mamba3Mixer(nn.Module):
     def __init__(
         self,
@@ -93,6 +109,7 @@ class Mamba3Mixer(nn.Module):
         A_floor: float = 1e-4,
         chunk_size: int = 64,
         layer_idx: Optional[int] = None,
+        out_norm: bool = False,
         device=None,
         dtype=None,
     ):
@@ -132,6 +149,10 @@ class Mamba3Mixer(nn.Module):
         self.D = nn.Parameter(torch.ones(self.nheads, device=device))
         self.D._no_weight_decay = True
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False, **fk)
+        # Pre-out-proj RMSNorm, applied to the scan output BEFORE the SiLU gate (Mamba-3's pre-gate norm,
+        # 2603.15569 §Table 4: dropped in pure Mamba-3, crucial for long-context extrapolation in hybrids).
+        # With it the kernel runs ungated (Z=None) and the gate is applied here after the norm.
+        self.out_norm = _GateNorm(self.d_inner, **fk) if out_norm else None
         self.telemetry: Optional[dict] = None  # set to a dict by the serving engine to collect live values
         # Decode-graph telemetry: {"retention": [H], "trapezoid": [H]} device buffers the step writes with
         # copy_ instead of .tolist() — nothing may synchronise inside a CUDA-graph capture (mote/infer/graph.py).
@@ -186,7 +207,8 @@ class Mamba3Mixer(nn.Module):
             out = mamba3_siso_combined(
                 Q=Cn, K=Bn, V=x, ADT=ADT, DT=DT, Trap=trap,
                 Q_bias=self.C_bias.squeeze(1), K_bias=self.B_bias.squeeze(1),
-                Angles=angles, D=self.D if torch.is_grad_enabled() else self.D.detach(), Z=z, chunk_size=self.chunk_size,
+                Angles=angles, D=self.D if torch.is_grad_enabled() else self.D.detach(),
+                Z=None if self.out_norm is not None else z, chunk_size=self.chunk_size,
                 Input_States=inp, return_final_states=return_final_states, cu_seqlens=None,
             )
             if return_final_states:
@@ -195,14 +217,17 @@ class Mamba3Mixer(nn.Module):
             else:
                 y, state = out, None
         else:
-            y, state = self._reference_forward_chunked(Cn, Bn, x, ADT, DT, trap, angles, z, initial_states)
+            y, state = self._reference_forward_chunked(Cn, Bn, x, ADT, DT, trap, angles, z, initial_states,
+                                                       gate=self.out_norm is None)
         y = y.reshape(u.shape[0], u.shape[1], self.d_inner)
+        if self.out_norm is not None:
+            y = self.out_norm(y) * F.silu(z.reshape(u.shape[0], u.shape[1], self.d_inner).float()).to(y.dtype)
         out = self.out_proj(y.to(u.dtype))
         return (out, state) if return_final_states else out
 
     # --- pure PyTorch (port of upstream mamba3_siso_fwd_ref, batch mode) ----------------
     def _reference_forward_chunked(self, Q, K, V, ADT, DT, Trap, Angles, Z, initial: Optional[Mamba3State],
-                                   chunk: Optional[int] = None):
+                                   chunk: Optional[int] = None, gate: bool = True):
         """`_reference_forward` in windows of `chunk` positions, the recurrent state carried between them.
 
         Exact algebra: a window that starts from the previous window's final state is the reference's own
@@ -215,16 +240,16 @@ class Mamba3Mixer(nn.Module):
         L = Q.shape[1]
         C = chunk or REF_CHUNK
         if C <= 0 or L <= C:
-            return self._reference_forward(Q, K, V, ADT, DT, Trap, Angles, Z, initial)
+            return self._reference_forward(Q, K, V, ADT, DT, Trap, Angles, Z, initial, gate=gate)
         ys, state = [], initial
         for a in range(0, L, C):
             b = min(a + C, L)
             y, state = self._reference_forward(Q[:, a:b], K[:, a:b], V[:, a:b], ADT[:, :, a:b], DT[:, :, a:b],
-                                               Trap[:, :, a:b], Angles[:, a:b], Z[:, a:b], state)
+                                               Trap[:, :, a:b], Angles[:, a:b], Z[:, a:b], state, gate=gate)
             ys.append(y)
         return torch.cat(ys, dim=1), state
 
-    def _reference_forward(self, Q, K, V, ADT, DT, Trap, Angles, Z, initial: Optional[Mamba3State]):
+    def _reference_forward(self, Q, K, V, ADT, DT, Trap, Angles, Z, initial: Optional[Mamba3State], gate: bool = True):
         dtype = torch.float32
         Q = self._expand_groups(Q).to(dtype)
         K = self._expand_groups(K).to(dtype)
@@ -276,7 +301,8 @@ class Mamba3Mixer(nn.Module):
             out = out + torch.einsum("bhpn,blhn,bhl->blhp", acc0, Q, da_cs)
         out = out + self.D.float()[None, None, :, None] * V
         out = out - V * qk_dot.unsqueeze(-1)
-        out = out * Z * torch.sigmoid(Z)
+        if gate:
+            out = out * Z * torch.sigmoid(Z)
 
         da_last = torch.exp(ADT.sum(-1))  # [B,H]
         da_rev = torch.exp(ADT.sum(-1, keepdim=True) - torch.cumsum(ADT, dim=-1))  # [B,H,L]
@@ -327,6 +353,10 @@ class Mamba3Mixer(nn.Module):
         ssm = ssm + gamma[:, :, None, None] * (v[:, :, :, None] * k_rot[:, :, None, :])
         out = torch.einsum("bhpn,bhn->bhp", ssm, q_rot)
         out = out + self.D.float()[None, :, None] * v
-        out = out * zz * torch.sigmoid(zz)
-        y = out.reshape(u.shape[0], 1, self.d_inner).to(u.dtype)
+        if self.out_norm is None:
+            out = out * zz * torch.sigmoid(zz)
+        y = out.reshape(u.shape[0], 1, self.d_inner)
+        if self.out_norm is not None:
+            y = self.out_norm(y) * F.silu(zz.reshape(u.shape[0], 1, self.d_inner))
+        y = y.to(u.dtype)
         return self.out_proj(y), Mamba3State(angle, ssm, k_rot, v)

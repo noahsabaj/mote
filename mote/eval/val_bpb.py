@@ -47,7 +47,10 @@ def run(checkpoint: str | Path, data: Optional[str], domains: Optional[str], bat
     model, cfg, step = load_model(checkpoint, device)
     seq_len = seq_len or cfg.max_seq_len
     ratio = cfg.dc.target_ratio_final
-    out: Dict = {"checkpoint": str(checkpoint), "step": step, "seq_len": seq_len, "batches": batches, "domains": {}}
+    out: Dict = {"checkpoint": str(checkpoint), "step": step, "seq_len": seq_len, "batches": batches, "domains": {},
+                 # per-source chunking (2026-08-29): the learned rate is byte-denominated and whitespace-ish in
+                 # Latin script (2608.17325), so a code/math-heavy source is where a low bytes-per-chunk comes from
+                 "domain_chunks": {}}
     with torch.no_grad():
         # spread=True: windows over the whole shard; the head of a source-blocked shard is one source only
         if data:
@@ -58,7 +61,9 @@ def run(checkpoint: str | Path, data: Optional[str], domains: Optional[str], bat
             d = Path(domains)
             for p in sorted(d.glob("*.val.bin")):
                 ev = evaluate(model, raw_shard(p), batch_size, seq_len, batches, device, ratio, spread=True)
-                out["domains"][p.name.split(".")[0]] = ev["val_bpb"]
+                name = p.name.split(".")[0]
+                out["domains"][name] = ev["val_bpb"]
+                out["domain_chunks"][name] = {"val_bpic": ev["val_bpic"], "boundary_on_separator_frac": ev["boundary_on_separator_frac"]}
     return out
 
 

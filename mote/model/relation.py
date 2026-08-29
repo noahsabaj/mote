@@ -105,6 +105,8 @@ class FullRelation(nn.Module):
         rope_theta: float = 10000.0,
         givens: bool = True,
         qk_norm: bool = False,
+        out_gate: bool = False,
+        rope: bool = True,
         device=None,
         dtype=None,
     ):
@@ -130,6 +132,13 @@ class FullRelation(nn.Module):
         self.w2 = nn.Linear(d_model, d_model, bias=False, **fk)
         self.wi = nn.Linear(d_model, d_model, bias=False, **fk)
         self.wo = nn.Linear(d_model, d_model, bias=False, **fk)
+        # Element-wise sigmoid output gate on the transported information, before wo (gated attention, Qiu et
+        # al.; the one lever 2608.12149 measured against the activation spikes a hybrid writes before each
+        # attention-like layer). Off in the pure-Relation trunk; on in every hybrid arm (2026-08-29).
+        self.out_gate = out_gate
+        if out_gate:
+            self.wg = nn.Linear(d_model, d_model, bias=False, **fk)
+        self.use_rope = rope  # False = NoPE Relation (the partner a Raven layer needs, 2607.25357 Table 9)
         # count calibration: one unconstrained fp32 scalar per layer, shared across heads
         self.lam = nn.Parameter(torch.tensor(float(lambda_init), dtype=torch.float32, device=device))
         self.lam._no_weight_decay = True
@@ -164,6 +173,14 @@ class FullRelation(nn.Module):
         out = torch.stack([c * ia - s * ib, s * ia + c * ib], dim=2).view(B, H, T, dh)
         return torch.roll(out, 1, dims=1) if odd else out
 
+    def _out(self, y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """[B, H, T, dh] transported information -> [B, T, D] through the optional output gate and wo."""
+        B, H, T, dh = y.shape
+        y = y.transpose(1, 2).reshape(B, T, H * dh)
+        if self.out_gate:
+            y = y * torch.sigmoid(self.wg(x))
+        return self.wo(y)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -191,9 +208,10 @@ class FullRelation(nn.Module):
         if self.qk_norm:
             p1 = self.p1_norm(p1)
             p2 = self.p2_norm(p2)
-        cos, sin = rope_tables(S, T, dh, self.rope_theta, x.dtype, x.device)
-        p1 = _apply_rope(p1, cos, sin)
-        p2 = _apply_rope(p2, cos, sin)
+        if self.use_rope:
+            cos, sin = rope_tables(S, T, dh, self.rope_theta, x.dtype, x.device)
+            p1 = _apply_rope(p1, cos, sin)
+            p2 = _apply_rope(p2, cos, sin)
         info = self._givens(info)
 
         if arena:
@@ -209,7 +227,7 @@ class FullRelation(nn.Module):
 
         if USE_FLASH and HAS_TRITON and (x.is_cuda or _INTERPRET) and T >= FLASH_MIN_T:
             y, g = flash_relation(p1, p2_all, info_all, self.lam, self.tau_s, q_start=S)
-            out = self.wo(y.transpose(1, 2).reshape(B, T, D))
+            out = self._out(y, x)
             extras = []
             if return_cache:
                 extras.append(new_cache)
@@ -234,7 +252,7 @@ class FullRelation(nn.Module):
         r = r.masked_fill(~(is_self | is_past), float("-inf"))
         flow = torch.softmax(r, dim=-1)
         y = torch.matmul(flow.to(info_all.dtype), info_all)  # [B,H,T,dh]
-        out = self.wo(y.transpose(1, 2).reshape(B, T, D))
+        out = self._out(y, x)
 
         extras = []
         if return_cache:

@@ -464,6 +464,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--branch-decay-frac", type=float, default=BRANCH_DECAY_FRAC, help="fraction of a `branch` run spent decaying (default 0.2). 2608.24814 App. F.1: 0.1 was too short to reveal the gain weight decay had already accumulated and 0.3 was long enough, at the same peak lr and budget \u2014 so the mid 2x2 runs this as a third arm rather than assuming it")
     ap.add_argument("--qk-norm", action="store_true", help="RMSNorm the Relation evidence projections p1/p2 per head before RoPE (QK-Norm). Not loss-neutral here — silu(u) and sigmoid(u/\u03c4_s) are not scale-covariant — so \u03c4_s and \u03bb are re-gated with it (mote/model/relation.py HeadRMSNorm)")
     ap.add_argument("--tau-s", type=float, default=None, help="Relation Self temperature (preset default 2.0); swept with --qk-norm because QK-Norm rescales the evidence u")
+    ap.add_argument("--main-pattern", default=None, metavar="RM...", help="hybrid main (docs/results/2026-08-29-hybrid-ladder-prereg.md): one letter per main layer, R = Relation, M = Mamba-3; starts with M and keeps >= 2 R")
+    ap.add_argument("--main-mamba-expand", type=int, default=None, help="expansion of the main network's Mamba-3 layers (default 2)")
+    ap.add_argument("--main-d-ff", type=int, default=None, help="override the main network's FFN width (the ladder trims it to match parameters across arms)")
+    ap.add_argument("--relation-out-gate", action="store_true", help="element-wise sigmoid output gate on every Relation layer (a hybrid-arm default)")
+    ap.add_argument("--mamba-out-norm", action="store_true", help="pre-gate RMSNorm on the main network's Mamba-3 layers (a hybrid-arm default)")
+    ap.add_argument("--no-rope", action="store_true", help="NoPE Relation: no rotary embedding on p1/p2 (the partner a Raven layer needs)")
     ap.add_argument("--lambda-init", type=float, default=None, help="Relation count-calibration \u03bb\u2080 (preset default 0.5); swept with --qk-norm for the same reason")
     ap.add_argument("--elr-trace-out", default=None, metavar="PATH", help="record this run's per-matrix ‖W‖_F on the logging cadence to PATH (default runs/<out>/elr_trace.json when --elr-match is used elsewhere); the reference half of an ELR-matched pair (2608.24814 App. B.2)")
     ap.add_argument("--elr-match", default=None, metavar="PATH", help="track the ELR schedule in an --elr-trace-out file: this run keeps its own optimizer and norm control, and only its per-matrix learning rates are adapted, η_i = η^eff,ref · ‖W_i‖. If the losses then collapse, the norm-control difference acted through ELR. Muon matrices only — the AdamW groups keep the schedule")
@@ -585,6 +591,18 @@ def config_from_args(args, cfg: MoteConfig) -> MoteConfig:
         cfg.main.tau_s = args.tau_s
     if args.lambda_init is not None:
         cfg.main.lambda_init = args.lambda_init
+    if args.main_pattern is not None:
+        cfg.main.pattern = args.main_pattern.upper()
+    if args.main_mamba_expand is not None:
+        cfg.main.mamba_expand = args.main_mamba_expand
+    if args.main_d_ff is not None:
+        cfg.main.d_ff = args.main_d_ff
+    if args.relation_out_gate:
+        cfg.main.out_gate = True
+    if args.mamba_out_norm:
+        cfg.main.mamba_out_norm = True
+    if args.no_rope:
+        cfg.main.rope = False
     return cfg
 
 
