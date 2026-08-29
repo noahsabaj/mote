@@ -72,7 +72,15 @@ def bitwise_ctl_job():
     return name, cmd
 
 
+def s1_job():
+    """Session 1 of the throughput line (docs/results/2026-08-29-throughput-line-prereg.md): the forward-only
+    bisect of the housekeeping commits, the --ckpt-main probe, the FlashRelation pair and the eager/--compile
+    twins. scripts/cloud_session1.sh never exits non-zero, so the job always reaches its summary."""
+    return "mote-s1", f"{CD} && {ENV} && bash scripts/cloud_session1.sh"
+
+
 JOBS = {
+    "s1": s1_job,
     "bitwise-ctl": bitwise_ctl_job,
     "lr-3.6e-4": lambda: lr_job("3.6e-4", HORIZON),
     "lr-7.2e-4": lambda: lr_job("7.2e-4", HORIZON),
@@ -85,6 +93,7 @@ RUN_PATHS = {  # job -> the run directories it writes, for `progress`
     "mote-lr-3p6e-4": ["lr/3.6e-4"], "mote-lr-7p2e-4": ["lr/7.2e-4"], "mote-lr-14p4e-4": ["lr/14.4e-4"],
     "mote-lr-28p8e-4": ["lr/28.8e-4"], "mote-qk": [f"qk/{a}" for a, _, _ in QK_ARMS],
     "mote-bitwise": ["bitwise/new", "bitwise/old"], "mote-bitwise-ctl": ["bitwise/a", "bitwise/b"],
+    "mote-s1": ["s1/ckpt/on", "s1/ckpt/off", "s1/pair/v2", "s1/pair/twopass", "s1/twins/eager", "s1/twins/compile"],
 }
 
 
