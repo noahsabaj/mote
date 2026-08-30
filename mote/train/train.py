@@ -457,6 +457,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--clip", type=float, default=1.0)
     ap.add_argument("--max-steps", type=int, default=0, help="0 = derive from --max-minutes after a throughput probe")
     ap.add_argument("--max-minutes", type=float, default=60.0)
+    # Stop-only limits (2026-08-30): they end the run gracefully — final eval, checkpoint, `done` — WITHOUT touching the
+    # schedule, whose horizon stays --max-steps / --max-minutes. Cloud arms used to get this from a shell poller that
+    # SIGTERMed `$!`; on the L4 studio that PID was a launcher shim, the trainer ran on as an orphan to its full
+    # horizon and the job billed 12.8 h for a 3-h point (mote-lr-28p8e-4, 2026-08-29).
+    ap.add_argument("--stop-step", type=int, default=0, help="stop gracefully at this step, schedule untouched (0 = off)")
+    ap.add_argument("--stop-minutes", type=float, default=0.0, help="stop gracefully after this many minutes of the run's clock, schedule untouched (0 = off)")
     ap.add_argument("--eval-every", type=int, default=200)
     ap.add_argument("--eval-batches", type=int, default=8)
     ap.add_argument("--ckpt-minutes", type=float, default=10.0)
@@ -1008,6 +1014,10 @@ class Trainer:
             stats = yield from self._train_step(target_ratio)
             self._loss_window.append(float(stats["ce"]))  # ATDC's proficiency trigger reads this window
             self.step += 1
+            if args.stop_step and self.step >= args.stop_step and not self._stop:
+                self.request_stop("stop-step")
+            if args.stop_minutes and (time.time() - self.t_start) / 60 >= args.stop_minutes and not self._stop:
+                self.request_stop("stop-minutes")
             if args.snapshot_steps and self.step // args.snapshot_steps > snap_idx:
                 snap_idx = self.step // args.snapshot_steps
                 self.snapshot()

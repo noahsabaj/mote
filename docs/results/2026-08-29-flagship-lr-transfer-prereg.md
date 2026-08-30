@@ -84,3 +84,14 @@ finish ≈ Sun 2026-08-30 13:00 EDT.
   the same-code envelope on every logged field. The gap protocol is re-stated in the housekeeping prereg's
   amendment (forward-only bisect + a ≥3-run envelope). The cloud `pytest` also caught a stale GPU-only test
   (`c7cc1d9`).
+
+
+**Amendment 2026-08-30 00:55 EDT.** `mote-lr-28p8e-4` was meant to stop at 15,259 steps (D = 5.0e8, shared warmup)
+and ran to the full 61,035-step horizon instead: `cloud_arm.sh`'s poller did fire ("step 15290 >= 15259, sending
+SIGTERM", "trainer exited with 143"), but `$!` on the L4 studio was a launcher shim — the trainer ran on as an orphan,
+the job billed 12.8 h ($6.19) for a 3-h point, and its `log.jsonl` is one continuous run to 61,035. Read it as a fourth
+full-horizon point, not the short one (its `--max-steps` and warmup were the horizon's all along). The trainer now
+stops itself (`--stop-step` / `--stop-minutes`, schedule untouched); the poller is gone. Measured L4 throughput at this
+recipe is 39–45 KB/s (evals every 500 steps included), not the 74.8 the budget assumed: each full arm ≈ $6.2, the four
+≈ $25 against 25 credits — session 1 (submitted 00:54, pending) and the ladder pilot run only if credits remain;
+the pilot's waiter was disarmed.

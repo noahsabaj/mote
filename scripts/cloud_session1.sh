@@ -40,11 +40,11 @@ for v in v2 twopass; do
   env $e python -m mote.train.train $BASE --grad-accum 2 --ckpt-main --lr 8e-4 --max-minutes 30 --log-every 10 --out "$OUT/pair/$v" > "$OUT/pair_$v.log" 2>&1 || { echo "pair $v FAILED"; tail -5 "$OUT/pair_$v.log"; }
 done
 
-echo "== 3. eager vs --compile twins: 500 steps each (30-min cap; --max-minutes is ignored when step-driven)"
+echo "== 3. eager vs --compile twins: 500 steps each (--stop-minutes 30 caps the wall clock without touching the schedule)"
 for v in eager compile; do
   flag=""; [ "$v" = compile ] && flag="--compile"
   echo "-- twin $v $(t)"
-  timeout 1800 python -m mote.train.train $BASE --grad-accum 2 --ckpt-main --lr 8e-4 --max-steps 500 --log-every 10 $flag --out "$OUT/twins/$v" > "$OUT/twin_$v.log" 2>&1 || { echo "twin $v FAILED/TIMEOUT"; tail -8 "$OUT/twin_$v.log"; }
+  python -m mote.train.train $BASE --grad-accum 2 --ckpt-main --lr 8e-4 --max-steps 500 --stop-minutes 30 --log-every 10 $flag --out "$OUT/twins/$v" > "$OUT/twin_$v.log" 2>&1 || { echo "twin $v FAILED"; tail -8 "$OUT/twin_$v.log"; }
 done
 
 echo "== summary $(t)"
