@@ -151,3 +151,10 @@ its stdout was the record. Reads should come from the log stream (as here), or `
 
 Cost: $24.64 of the 25 org credits (lr arms $24.31, failed submissions $0.33). Session 1 of the throughput
 line and the ladder pilot move to the local card after the Monday drain.
+
+**Fixed (2026-08-30, the commit after `d0ebcf4`):** the trainer's `--eval-ema` average is zero-started, the
+checkpoint carries `ema_steps` / `ema_zero_init` / `ema_decay`, and every read divides by 1 − β^n — the trainer's
+own eval, `load_weights` (engine, `mote.eval.val_bpb`, `scripts/recirc_sweep.py`) and the daemon's serving shadow
+(`jobs.Ema`, 0.999): the average is a read from step 1, and the served weights are bitwise the ones scored.
+Checkpoints from before carry no `ema_zero_init` and stay as they are. `lr_horizon --min-frac` skips the blind
+stretch of the old logs (`t3l24_dense_*`: budgets past ~50k steps). Tests: `tests/test_ema_bias_correction.py`.

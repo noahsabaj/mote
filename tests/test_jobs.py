@@ -309,12 +309,14 @@ def test_ema_math_and_engine_hot_swap(tmp_path):
     with torch.no_grad():
         m.weight.fill_(0.0)
     ema = Ema(m, decay=0.5)
+    assert torch.equal(ema.state_dict(m)["weight"], m.weight)  # no update yet: the model's own weights
     with torch.no_grad():
         m.weight.fill_(1.0)
     ema.update(m)
-    assert torch.allclose(ema.shadow["weight"], torch.full((4, 4), 0.5))
+    assert torch.allclose(ema.shadow["weight"], torch.full((4, 4), 0.5))  # zero-started
     sd = ema.state_dict(m)
-    assert torch.allclose(sd["weight"], torch.full((4, 4), 0.5))
+    # bias-corrected: 0.5 / (1 − 0.5) = the one weight seen so far; before 2026-08-30 this read 0.5 — half init
+    assert torch.allclose(sd["weight"], torch.full((4, 4), 1.0))
 
     # engine: EMA weights swap in place, the cache clears, `live` shows the run
     from mote.model.hnet import HNetForCausalLM

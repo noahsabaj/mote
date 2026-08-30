@@ -189,7 +189,7 @@ to `.mote/jobs.json`: a job that was running when the process died resumes in fr
 death before it logs a step holds it and halts the queue (`DEATHS_BEFORE_HALT`); a CUDA OOM is retried from
 the front with a growing delay once free + reserved memory covers the failed run's peak plus a margin, three
 times per lineage, and a retry the card could never satisfy is held with the reason; `GET
-/api/training/queue` says why each queued job is waiting. An EMA shadow (0.999) follows the run and is synced
+/api/training/queue` says why each queued job is waiting. An EMA shadow (0.999; zero-started and bias-corrected at every read since 2026-08-30, as is the trainer's `--eval-ema` — `hnet.ema_scale`) follows the run and is synced
 into the served engine every 100 steps — only for a job **on the air**. Jobs run in-process and nothing
 reloads modules: `run.json` records the commit the worker loaded.
 

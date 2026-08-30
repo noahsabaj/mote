@@ -33,7 +33,7 @@ import torch.nn.functional as F  # noqa: E402
 from mote.config import MoteConfig  # noqa: E402
 from mote.data.loader import ByteShard  # noqa: E402
 from mote.model.dc import ste_ones  # noqa: E402
-from mote.model.hnet import HNetForCausalLM  # noqa: E402
+from mote.model.hnet import HNetForCausalLM, load_weights  # noqa: E402
 from mote.train.train import load_checkpoint  # noqa: E402
 
 LN2 = math.log(2)
@@ -44,11 +44,8 @@ def load_model(path: Path, ema: bool):
     cfg = MoteConfig.from_dict(ck["config"])
     model = HNetForCausalLM(cfg, device=torch.device("cpu"))
     load_checkpoint(path, model, ck=ck)
-    if ema:
-        vals = ck["extra"]["ema"]
-        with torch.no_grad():
-            for p, v in zip(model.parameters(), vals):
-                p.copy_(v.to(p.dtype))
+    if ema:  # the checkpoint format's one reader applies the bias correction (hnet.load_weights, 2026-08-30)
+        assert load_weights(model, ck) == "ema", f"{path}: no EMA in the checkpoint"
     model.eval()
     return model, cfg, int(ck["step"])
 

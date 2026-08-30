@@ -19,7 +19,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -37,7 +37,7 @@ import mote
 from .. import determinism, runinfo
 from .flops import _n as _n_active
 from ..model.feedback import feedback_from
-from ..model.hnet import HNetForCausalLM, strip_retired
+from ..model.hnet import HNetForCausalLM, ema_scale, strip_retired
 from ..tokenizer import OFFSET_ID, ByteTokenizer
 from .flops import flops_per_byte, peak_tflops_for
 from . import elr
@@ -708,15 +708,23 @@ class Trainer:
         self.step, self.t_start = 0, time.time()
         self.sched_total = None  # step horizon of the trunk/branch schedules: fixed at the first probe, survives resume
         self.ckpt_path = out_dir / "last.pt"
-        self._ema_state = None
+        self._ema_state, self._ema_meta = None, {}
         if args.resume and self.ckpt_path.exists():
             self._resume()
 
         self.ema_decay = float(getattr(args, "eval_ema", 0.0) or 0.0)
-        self.ema = [p.detach().clone() for p in self.model.parameters()] if self.ema_decay > 0 else None
+        # The average starts at ZERO and every read divides by 1 − decay^steps (`hnet.ema_scale`, Adam's bias
+        # correction; 2026-08-30). Started at the init weights it carried them for ~50k steps at 0.9999 (0.37 at
+        # 10k), which blinded the flagship lr read and would have served a mostly-init model for the trunk's
+        # first hours. A checkpoint from before carries no `ema_zero_init`: its init-started average continues
+        # as it was, and its reads stay uncorrected.
+        self.ema = [torch.zeros_like(p.detach()) for p in self.model.parameters()] if self.ema_decay > 0 else None
+        self.ema_steps, self.ema_zero_init = 0, True
         if self.ema is not None and self._ema_state:
             for e, s in zip(self.ema, self._ema_state):
                 e.copy_(s.to(e.device))
+            self.ema_zero_init = bool(self._ema_meta.get("ema_zero_init", False))
+            self.ema_steps = int(self._ema_meta.get("ema_steps") or 0)
         self.fwd = torch.compile(self.model) if args.compile else self.model
         if getattr(args, "tf32", False):
             torch.set_float32_matmul_precision("high")  # TF32 for fp32 GEMMs; off (="highest") is the frozen default
@@ -788,6 +796,7 @@ class Trainer:
         if "shard_rng" in extra:  # checkpoints before 2026-08-29 carry none: the augmentation stream restarts
             self.train_shard.set_rng_state(extra["shard_rng"])
         self._ema_state = extra.get("ema")
+        self._ema_meta = {k: extra.get(k) for k in ("ema_steps", "ema_zero_init", "ema_decay")}
         elapsed = extra.get("elapsed_sec")
         if elapsed is None:
             elapsed = runinfo.last_elapsed_sec(self.out_dir)
@@ -835,15 +844,24 @@ class Trainer:
                  "shard_rng": self.train_shard.rng_state()}
         if self.ema is not None:
             extra["ema"] = self.ema
+            extra.update(self._ema_extra())
         save_checkpoint(self.ckpt_path, self.model, self.opt, self.step, self.cfg, extra)
+
+    def _ema_extra(self) -> Dict[str, Any]:
+        """The average's bookkeeping, as the checkpoint carries it and `hnet.ema_scale` reads it."""
+        return {"ema_steps": self.ema_steps, "ema_zero_init": self.ema_zero_init, "ema_decay": self.ema_decay}
 
     @torch.no_grad()
     def _swap_in_ema(self):
-        """Put the EMA weights into the model and return the raw ones (swap back with `_restore`)."""
+        """Put the bias-corrected EMA weights into the model and return the raw ones (swap back with `_restore`).
+        The division is the one `load_weights` applies, in the same dtype: the served weights are these, bitwise."""
         params = list(self.model.parameters())
         raw = [p.detach().clone() for p in params]
+        scale = ema_scale(self._ema_extra())
         for p, e in zip(params, self.ema):
             p.copy_(e)
+            if scale is not None and scale != 1.0:
+                p.div_(scale)
         return raw
 
     @torch.no_grad()
@@ -874,7 +892,7 @@ class Trainer:
 
         try:
             ev = yield from drain(windows(), "eval")
-            if self.ema is not None:
+            if self.ema is not None and ema_scale(self._ema_extra()) is not None:  # None: no update yet, all zeros
                 raw = self._swap_in_ema()
                 try:
                     ev["val_bpb_ema"] = (yield from drain(windows(), "eval ema"))["val_bpb"]
@@ -932,6 +950,7 @@ class Trainer:
         if self.ema is not None:
             with torch.no_grad():
                 torch._foreach_lerp_(self.ema, [p.detach() for p in self.model.parameters()], 1.0 - self.ema_decay)
+            self.ema_steps += 1
         out = {"ce": agg["ce_sum"] / total_n, "ratio": agg["ratio"] / args.grad_accum, "bpic": agg["bpic"] / args.grad_accum, "grad_norm": gnorm}
         for k in agg:
             if k.startswith("moe_"):

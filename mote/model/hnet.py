@@ -46,17 +46,44 @@ def load_weights(model: nn.Module, ck: Dict[str, Any], prefer_ema: bool = True) 
     The trainer keeps its `--eval-ema` average as a list of tensors in `extra["ema"]`, in `model.parameters()`
     order (tied weights once), and every gate reads that average (`val_bpb_ema`). Until 2026-08-29 the engine
     and `mote.eval.val_bpb` loaded `ck["model"]` — the raw weights — so a finished --serve job, a pinned boot
-    and the standalone eval all served/scored 0.075–0.098 bpb worse than the number the run was judged on."""
+    and the standalone eval all served/scored 0.075–0.098 bpb worse than the number the run was judged on.
+
+    Since 2026-08-30 the trainer's average is ZERO-started and bias-corrected here, by `ema_scale`: divided by
+    1 − decay^steps, the same division the trainer's own `val_bpb_ema` eval applies, so the served weights are
+    bitwise the weights the run was scored on. Started at the init weights (as before), a 0.9999 average carried
+    them for ~50k steps — 0.37 at 10k — which blinded the flagship lr read and would have put a mostly-init model
+    on the air for the trunk's first hours. A checkpoint from before carries no `ema_zero_init`: its init-started
+    average is loaded as it is (nothing corrects it without the init)."""
     model.load_state_dict(strip_retired(ck["model"]))
-    ema = (ck.get("extra") or {}).get("ema") if prefer_ema else None
+    extra = ck.get("extra") or {}
+    ema = extra.get("ema") if prefer_ema else None
     params = list(model.parameters())
     if isinstance(ema, (list, tuple)) and len(ema) == len(params) and all(
             torch.is_tensor(e) and tuple(e.shape) == tuple(p.shape) for e, p in zip(ema, params)):
+        scale = ema_scale(extra)
+        if scale is None:  # zero-started, no update yet: all zeros, not a model
+            return "raw"
         with torch.no_grad():
             for p, e in zip(params, ema):
                 p.copy_(e.to(p.device, p.dtype))
+                if scale != 1.0:
+                    p.div_(scale)
         return "ema"
     return "raw"
+
+
+def ema_scale(extra: Dict[str, Any]) -> Optional[float]:
+    """The bias-correction divisor for a checkpoint's `extra["ema"]` (Adam's, 1 − decay^steps): 1.0 for an
+    average from before 2026-08-30 (`ema_zero_init` absent — it started at the init weights and nothing can
+    take them out), None for a zero-started average that has had no update yet (all zeros, not a model).
+    The trainer's eval and `load_weights` both divide by this, in the parameter dtype: one formula, one owner."""
+    if not extra.get("ema_zero_init"):
+        return 1.0
+    steps = int(extra.get("ema_steps") or 0)
+    decay = extra.get("ema_decay")
+    if steps <= 0 or decay is None:
+        return None
+    return 1.0 - float(decay) ** steps
 
 
 @dataclass

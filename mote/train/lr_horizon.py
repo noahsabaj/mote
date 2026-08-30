@@ -209,10 +209,11 @@ def main(argv=None):
     ap.add_argument("--lr-in-use", type=float, default=None, help="report the parabola's bpb gain at the last budget vs this lr")
     ap.add_argument("--coord", default="lr", choices=["lr", "elr"], help="fit in ln lr (as signed) or in ln \u03b7/\u2016W\u2016_F. At a fixed weight decay with norms at equilibrium the two are a relabeling; they part company the moment norm control differs (2608.24814)")
     ap.add_argument("--json", default=None, help="write the fit here")
+    ap.add_argument("--min-frac", type=float, default=0.15, help="budgets start at this fraction of the shortest run. Logs from before 2026-08-30 carry a val_bpb_ema that started at the init weights: at 0.9999 it is no read until ~50k steps, so set this past that point for them")
     args = ap.parse_args(argv)
     runs = [read_run(Path(r)) for r in args.runs]
     fb = [endpoint_elr(Path(r), lr) for r, (lr, _) in zip(args.runs, runs)] if args.coord == "elr" else None
-    res = fit(runs, coord=args.coord, fallback_elr=fb)
+    res = fit(runs, min_frac=args.min_frac, coord=args.coord, fallback_elr=fb)
     if res.get("elr_approximated"):
         print("note: some arms predate ELR logging — their endpoint \u2016W\u2016 from last.pt stands in at every "
               "budget, which is only sound near the norm equilibrium\n")

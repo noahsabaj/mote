@@ -155,12 +155,17 @@ class JobRecord:
 
 
 class Ema:
-    """Exponential moving average of a model's floating-point parameters, kept on the same device."""
+    """Exponential moving average of a model's floating-point parameters, kept on the same device: the shadow a
+    --serve job puts on the air between checkpoints. Zero-started and bias-corrected at every read (`state_dict`
+    divides by 1 − decay^n, Adam's correction): started at the weights, as until 2026-08-30, it carried them for
+    ~1/(1 − decay) updates — an hour of a mostly-init model on the air at the start of a run (the trainer's
+    --eval-ema had the same defect; `hnet.ema_scale`)."""
 
     def __init__(self, model: torch.nn.Module, decay: float = 0.999):
         self.decay = decay
+        self.n = 0
         self.shadow: Dict[str, torch.Tensor] = {
-            k: v.detach().clone() for k, v in model.state_dict().items() if v.dtype.is_floating_point
+            k: torch.zeros_like(v.detach()) for k, v in model.state_dict().items() if v.dtype.is_floating_point
         }
 
     @torch.no_grad()
@@ -168,12 +173,16 @@ class Ema:
         sd = model.state_dict()
         for k, s in self.shadow.items():
             s.lerp_(sd[k].detach(), 1.0 - self.decay)
+        self.n += 1
 
     @torch.no_grad()
     def state_dict(self, model: torch.nn.Module) -> Dict[str, torch.Tensor]:
-        """The model's state with the floating entries replaced by their EMA."""
+        """The model's state with the floating entries replaced by their bias-corrected EMA (the model's own
+        weights before the first update: the shadow is all zeros then, not a model)."""
         out = {k: v.detach().clone() for k, v in model.state_dict().items()}
-        out.update({k: s.clone() for k, s in self.shadow.items()})
+        if self.n > 0:
+            scale = 1.0 - self.decay ** self.n
+            out.update({k: s / scale for k, s in self.shadow.items()})
         return out
 
 
