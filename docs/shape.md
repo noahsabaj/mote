@@ -130,8 +130,10 @@ finds decay at any stage costs post-SFT quality while 2607.12360 finds a normali
 self-anneal; the EMA already buys 0.075–0.098 bpb over the raw weights. A fifth arm — the trunk snapshot's
 EMA through the same SFT — is a floor, not a contestant.
 
-*Gate: one decider, the rest guards.* Decider `proxy_agree` (`mote.eval.proxy`: inverse-frequency-weighted
-top-1 byte agreement with held-out expert trajectories; 2605.18607 — cross-entropy ranks candidates at
+*Gate: one decider, the rest guards.* Decider `proxy_track` (`mote.eval.proxy`: mean reciprocal rank of the
+expert's next byte over held-out trajectories, unweighted — chosen 2026-08-26 by measuring which of a 12-metric library
+reproduces a known quality ordering; `proxy_agree` is reported, not voted — corrected here 2026-08-30, the code has
+decided on `proxy_track` since 08-26; 2605.18607 — cross-entropy ranks candidates at
 Spearman 0.36, trajectory proxies at 0.81). Guards, all of which must hold: shared val bpb ≤ control + 0.005
 within the same decay condition, and no regression on `needle_auto`, `false_fire_rate` or `recovery_rate` beyond
 the two arms' combined standard error (2026-08-29, Noah's option C: the guards were single-item vetoes at 24 / 40 / 40
