@@ -52,7 +52,7 @@ pure Mamba-3). New families (built after the trunk week): **Raven** slot-memory 
 Relation (2606.02332; a cheap falsifier — it lost to Mamba-3 at 369M); **banded decay init** for Mamba-3 (Harmonic
 2606.24650's one solid number; outer fast ≈ chunk size, main slow); **GDN[−1,1] partner** with a parity/S3
 state-tracking probe (2606.12364; bpb will not separate linear partners — ≤0.05 nats within the family). Linear
-Relation (the paper's own 3 Full + 9 Linear) needs no new kernel: its recurrence is in SSD form, so `mamba_ssm`'s SSD chunk-scan primitive (a Mamba-2-era kernel; no Mamba-2 layer exists in Mote) could compute it — the same optional fast path `dc.py` imports for the dechunk EMA and keeps disabled (`use_kernel = False`: it re-autotunes per chunk count; chunked torch is faster).
+Relation (the paper's own 3 Full + 9 Linear) needs a compute path decision: its retention is CHANNEL-wise (α ∈ (0,1]^{d_h}, KDA-style), and `mamba_ssm`'s SSD chunk-scan takes `A: (nheads)` — scalar-per-head decay only (verified 2026-08-30 against the checkout; the 08-30 note claiming SSD reuse was wrong) — so the paper-faithful form needs a GLA-class chunked scan (pure-torch like the dechunk EMA's, or the `fla` kernel), while a scalar-α variant rides the SSD kernel at the cost of the paper's retention class. No Mamba-2 layer exists in Mote either way.
 
 ## What decides
 
