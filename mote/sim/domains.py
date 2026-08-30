@@ -678,15 +678,20 @@ def _schedule(seed: int, diff: Dict[str, int]) -> Trace:
 DOMAINS = {"household": _household, "inventory": _inventory, "kinship": _kinship, "schedule": _schedule}
 
 
-def sample_difficulty(rng: random.Random, p_fail: int = 0) -> Dict[str, int]:
-    """`p_fail` is a PERCENTAGE, kept an int so it survives the difficulty dict's JSON round-trip in the
+def sample_difficulty(rng: random.Random, p_fail: int = 0, people=(2, 5), rooms=(3, 5), objects=(3, 6),
+                      ticks=(4, 18)) -> Dict[str, int]:
+    """The one difficulty sampler: every generator's world is drawn here, so a knob added to the world (like
+    `p_fail`) reaches all of them. The ranges are the ordinary generator's; `mote.sim.long` passes wider ones.
+    The draw order (people, rooms, objects, ticks) is part of every seed's identity — never reorder it.
+
+    `p_fail` is a PERCENTAGE, kept an int so it survives the difficulty dict's JSON round-trip in the
     generators' `meta`. 0 reproduces every trace generated before 2026-08-26 exactly (true again since
     2026-08-29: a zero p_fail makes no failure draw)."""
     return {
-        "people": rng.randint(2, 5),
-        "rooms": rng.randint(3, 5),
-        "objects": rng.randint(3, 6),
-        "ticks": rng.randint(4, 18),
+        "people": rng.randint(*people),
+        "rooms": rng.randint(*rooms),
+        "objects": rng.randint(*objects),
+        "ticks": rng.randint(*ticks),
         "p_fail": p_fail,
     }
 

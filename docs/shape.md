@@ -119,7 +119,8 @@ is a variable, not a constant) and `--schedule constant` (token-matched, no deca
 mix C (the ANNEAL table in `mote/data/sources.py`); the extras are identical in both — 15 % of each branch:
 `data/spec_plain:0.03:plain`, `data/sim_traces:0.03:fim`, `data/sim_long_plain:0.04:plain`,
 `data/sft_local:0.05:plain` — so the A/B varies the web half alone. The sim regenerates before any of this
-runs (`--p-fail` swept 5 / 15 / 30, `--parallel-frac`, `--swap-frac`, retrodiction, `mote.sim.long`;
+runs (`--p-fail` swept 5 / 15 / 30 and passed with the SAME value to `mote.sim.long` — its worlds come from the one
+difficulty sampler since 2026-08-29 and had no failures before; `--parallel-frac`, `--swap-frac`, retrodiction;
 `build_spec_docs --typo-frac`). The three 2606.16246 augmentations (`--aug-noise` / `--aug-r2l` /
 `--aug-offset`) exist and stay OFF here; they are their own two-arm comparison afterwards. The old
 `cooldown` (1−√t to 0.1× over the whole branch, 55 % of peak by the first quarter — Index-1.9B 2607.09885

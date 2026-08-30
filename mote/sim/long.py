@@ -33,25 +33,25 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .domains import DOMAINS, OBJECTS, PEOPLE, ROOMS, make_trace
+from .domains import DOMAINS, OBJECTS, PEOPLE, ROOMS, make_trace, sample_difficulty
 from .render import narrative, qa_pairs
 
 LOCALE_WEIGHTS = [("en", 0.6), ("ru", 0.2), ("ja", 0.2)]
 
 
-def long_difficulty(rng: random.Random, ticks_lo: int, ticks_hi: int) -> Dict[str, int]:
+def long_difficulty(rng: random.Random, ticks_lo: int, ticks_hi: int, p_fail: int = 0) -> Dict[str, int]:
     """The ordinary difficulty knobs, opened up as far as the entity pools allow.
 
     More ticks is what makes the narrative long. More people, rooms and objects is what stops the extra
     ticks being the same two entities moving back and forth, which would be length without dependency —
     but the pools in `domains` are small (8 people, 6 rooms, 8 objects), and asking for more than exists
-    raises from `random.sample`. So each knob is capped at its pool and the length comes from ticks."""
-    return {
-        "people": rng.randint(4, len(PEOPLE)),
-        "rooms": rng.randint(4, len(ROOMS)),
-        "objects": rng.randint(5, len(OBJECTS)),
-        "ticks": rng.randint(ticks_lo, ticks_hi),
-    }
+    raises from `random.sample`. So each knob is capped at its pool and the length comes from ticks.
+
+    One sampler, wider ranges (2026-08-29): this used to be its own dict and so had no `p_fail` — the long
+    mix was the flawless-expert corpus the 08-26 reading argued against. Same draw order as before, so a
+    long trace at p_fail 0 is the trace it always was."""
+    return sample_difficulty(rng, p_fail, people=(4, len(PEOPLE)), rooms=(4, len(ROOMS)),
+                             objects=(5, len(OBJECTS)), ticks=(ticks_lo, ticks_hi))
 
 
 _STOP = {"where", "what", "who", "when", "how", "many", "is", "was", "are", "were", "the", "a", "an",
@@ -79,7 +79,7 @@ def dependency_distance(doc: str, question: str) -> Optional[int]:
 
 
 def generate(mb: float, seed: int, min_bytes: int, max_bytes: int, ticks: Tuple[int, int],
-             per_trace: int) -> Tuple[List[Dict], Dict]:
+             per_trace: int, p_fail: int = 0) -> Tuple[List[Dict], Dict]:
     rng = random.Random(seed)
     domains = sorted(DOMAINS)
     rows: List[Dict] = []
@@ -96,7 +96,7 @@ def generate(mb: float, seed: int, min_bytes: int, max_bytes: int, ticks: Tuple[
         s += 1
         domain = domains[s % len(domains)]
         locale = rng.choices([l for l, _ in LOCALE_WEIGHTS], [w for _, w in LOCALE_WEIGHTS])[0]
-        trace = make_trace(domain, s, long_difficulty(random.Random(s ^ 0x10119), *ticks))
+        trace = make_trace(domain, s, long_difficulty(random.Random(s ^ 0x10119), *ticks, p_fail=p_fail))
         try:
             doc = narrative(trace, locale)
             pairs = qa_pairs(trace, locale)
@@ -155,9 +155,10 @@ def main(argv=None):
     ap.add_argument("--max-bytes", type=int, default=16000, help="one window is 16384 bytes; a document should fit in one")
     ap.add_argument("--ticks", default="60,220", help="events per trace, lo,hi (the ordinary generator uses 4,18)")
     ap.add_argument("--per-trace", type=int, default=2, help="questions appended per narrative")
+    ap.add_argument("--p-fail", type=int, default=0, help="percentage of scripted actions that are deliberately illegal, exactly as mote.sim.generate's flag — regenerate the long mix with the SAME value as the short traces (2026-08-29); 0 keeps every long trace as it was")
     args = ap.parse_args(argv)
     lo, hi = (int(x) for x in args.ticks.split(","))
-    rows, manifest = generate(args.mb, args.seed, args.min_bytes, args.max_bytes, (lo, hi), args.per_trace)
+    rows, manifest = generate(args.mb, args.seed, args.min_bytes, args.max_bytes, (lo, hi), args.per_trace, args.p_fail)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(f"{out}.jsonl", "w", encoding="utf-8") as f:

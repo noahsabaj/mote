@@ -112,3 +112,22 @@ def test_zero_p_fail_draws_no_failure():
     for dom in ("household", "inventory", "schedule"):
         for t in _each(dom, range(1, 41), p_fail=0):
             assert not any(e.kind == "failed" for e in t.events), (dom, t.seed)
+
+
+def test_long_traces_share_the_one_difficulty_sampler():
+    """long.py used to build its own difficulty dict and so had no p_fail: the long mix was failure-free."""
+    from mote.sim.long import long_difficulty
+
+    d0 = long_difficulty(random.Random(5 ^ 0x10119), 60, 220)
+    assert d0["p_fail"] == 0 and 4 <= d0["people"] <= 8 and 4 <= d0["rooms"] <= 6 and 5 <= d0["objects"] <= 8 and 60 <= d0["ticks"] <= 220
+    # the same seed draws the same world knobs whatever p_fail is (p_fail is not a draw)
+    d30 = long_difficulty(random.Random(5 ^ 0x10119), 60, 220, p_fail=30)
+    assert {k: v for k, v in d30.items() if k != "p_fail"} == {k: v for k, v in d0.items() if k != "p_fail"} and d30["p_fail"] == 30
+    failed = 0
+    for s in range(1, 13):
+        t = make_trace(["household", "inventory", "schedule"][s % 3], s, long_difficulty(random.Random(s ^ 0x10119), 60, 120, p_fail=30))
+        try:
+            failed += sum(1 for e in t.events if e.kind == "failed")
+        finally:
+            t.world.close()
+    assert failed > 30  # a long trace at p_fail 30 carries refusals, like a short one
