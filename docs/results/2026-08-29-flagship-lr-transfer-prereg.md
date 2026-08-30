@@ -95,3 +95,59 @@ stops itself (`--stop-step` / `--stop-minutes`, schedule untouched); the poller 
 recipe is 39–45 KB/s (evals every 500 steps included), not the 74.8 the budget assumed: each full arm ≈ $6.2, the four
 ≈ $25 against 25 credits — session 1 (submitted 00:54, pending) and the ladder pilot run only if credits remain;
 the pilot's waiter was disarmed.
+
+## Read (2026-08-30, 13:37–14:15 EDT)
+
+**What ran.** Lightning stopped `mote-lr-14p4e-4` (step 52,810, $6.12) and `mote-lr-7p2e-4` (step 45,630,
+$5.22) at 13:37:42 EDT — the org credits ran out ($24.64 across every job; the four lr arms $24.31) — and
+`mote-s1b` failed to get a machine three seconds later ("job reconciliation failed", $0). A stopped job's
+artifact folder is empty (`Teamspace.download_folder` finds no files), so the runs were recovered from the
+jobs' stdout — the trainer's own log lines — into `runs/cloud/lr/<lr>/log.jsonl`: 28.8e-4 and 3.6e-4
+complete at 61,035; 14.4e-4 to 52,810 (86 %); 7.2e-4 to 45,630 (75 %). Matched-step comparisons are fair
+(the four arms share `--max-steps`, hence the schedule at every step); only the end-of-horizon read is
+missing for two arms.
+
+**The preregistered curve is unreadable at this horizon.** `val_bpb_ema` at decay 0.9999 starts from the
+init weights with no bias correction (`train.py:716`, `:934`): the init still weighs 0.9999^n = 0.37 at 10k
+steps, 0.05 at 30k, 0.011 at 45.5k. The ema's val_bpb is 5.7–12.9 at step 5,000 against raw 1.9 and only
+drops below raw at ≈ 50k steps. Its "crossovers" (33,500 / 8,000 / 8,500 — in inverted order; a two-point
+fit through them has β = +0.48) are the arms shedding the init at different rates, not quality. The read
+below is on raw `val_bpb`, which the prereg reports beside the ema; the ema column is recorded, not used.
+
+**Crossovers on raw `val_bpb`** (first eval at which the lower lr leads and keeps the lead to the end of
+the shorter arm; evals every 500 steps):
+
+| pair | predicted step | window (½×–2× in D) | observed | in window |
+|---|---|---|---|---|
+| 28.8e-4 → 14.4e-4 | 5,800 | 2,900–11,600 | **4,000** | yes |
+| 14.4e-4 → 7.2e-4 | 27,700 | 13,850–55,400 | **13,000** | no (0.47×) |
+| 7.2e-4 → 3.6e-4 | 135,000 | 67,500–270,000 | **18,000** | no (0.13×) |
+
+Third prong: 3.6e-4 does not trail 7.2e-4 — it leads from step 18,000 to the end of the 7.2e-4 arm, by
+0.009–0.021 over the last 15k steps (0.0173 at 45,500), and leads every arm at every step past 18k. Raw at
+45,500: 28.8e-4 1.598 · 14.4e-4 1.246 · 7.2e-4 1.183 · 3.6e-4 1.166; 3.6e-4 ends 61,035 at 1.1396 raw /
+1.1102 ema. 28.8e-4 finished normally at 1.599 (the norm guard never fired): an upper bound on the usable
+lr — too hot, not unstable.
+
+**Transfer does not hold.** The 35M fit puts lr\*(2.0e9) at 7.2e-4; at the flagship shape lr\*(2.0e9) ≤
+3.6e-4 — the sweep's floor, unbracketed from below — so the fit is ≥ 2× high here, and every crossover
+came *earlier* than predicted (lr\* lower at every D). Two-point fit through the first two raw crossovers:
+β = −0.59, lr\*(2.0e9) = 4.1e-4, lr\*(2.53e10) = 0.92e-4; through all three: β = −0.83, lr\*(2.53e10) =
+0.27e-4. The three crossovers span only 4.5× in D, so β is poorly determined and the trunk-horizon numbers
+are 60× extrapolations; what is supported is the factor: the fit's 2.38e-4 for the trunk is high by ≥ 2×
+if the correction measured at 2.0e9 carries — ≈ 1.2e-4 is the least-extrapolated estimate, and the true
+value may be lower. **The signed launch rule does not fire on its own; the trunk lr goes to Noah.** The
+local three-point rule (`2026-08-28-lr-prereg.md` § Signed 3) still reads Monday on `t3l24_dense_*`; it
+reads `val_bpb_ema` too, which is sound only past ≈ 50k steps — its budgets must start there.
+
+**Two defects this read found.** (1) The EMA has no bias correction and starts at the init: as a read it
+is blind for the first ≈ 50k steps of any run, and the trunk serves this EMA from step one
+(`load_weights(prefer_ema=True)`), so the trunk's first 6–11 h (42–75 KB/s) would serve weights carrying a
+large init component (0.37 at 10k steps, 0.05 at 30k). Fix before the launch: bias-correct at read and
+serve time — `(ema − β^n·θ₀)/(1 − β^n)` with θ₀ kept once beside the run and `ema_steps` in the checkpoint,
+training bitwise untouched — or start the EMA at the end of warmup. (2) A stopped job leaves no artifacts;
+its stdout was the record. Reads should come from the log stream (as here), or `cloud_arm.sh` should copy
+`log.jsonl` into the artifacts path at each log interval.
+
+Cost: $24.64 of the 25 org credits (lr arms $24.31, failed submissions $0.33). Session 1 of the throughput
+line and the ladder pilot move to the local card after the Monday drain.
