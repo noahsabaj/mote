@@ -113,3 +113,35 @@ layer per dependent hop; scratchpad does not rescue a fixed state); 2608.22876 (
 title/abstract only: 211 further papers, of which Dion3 2608.11612, CODA 2605.19269 and the kernel verifier
 2608.12700 go to the throughput line, Attention Amnesia 2606.11052 to post-training, asymmetric paging
 2605.22416 to serving.
+
+## Amendment 2026-08-30 (grilled and signed): Linear Relation, the second partner family
+
+Grilled in three rounds on 2026-08-30 out of the source paper's own hybrid (2608.20172 §5.2/A.4, read in
+full today); Mamba-3 stays the primary partner. Nothing above moves.
+
+1. **Operator: paper-faithful Linear Relation.** Channel-wise KDA-style retention α ∈ (0,1]^{d_h}
+   (`α = exp(−exp(A_log) ⊙ softplus(W↑W↓x̄ + dt_bias))`), L2-normalized RoPE'd relation coordinates,
+   the Self relation S_t = σ(p₁ᵀp₂ / τ_S√d_h) gating both the read `E_t = S_t (C_t⁻)ᵀ p̂₁` and the write
+   `C_t = C_t⁻ + S_t p̂₂ Ĩᵀ`, strictly-historical read, `Y = Ĩ + E` with no out-norm and no gate. The
+   pre-gate-norm lever is the NAMED FALLBACK if an LR arm spikes — applied and recorded, never silent.
+2. **Arms: paired minimal.** `LLLRRL` (the evidence twin of `MMMRRM`) and `LLRLLR` (the uniform twin of
+   `MMRMMR`), 3 seeds each at 11M / 2048 / 1 GB (~11 h of local GPU inside the ladder's signed slot);
+   d_ff solved by building and counting, as every arm. Winners compete for the 32M top-three on equal
+   footing with the Mamba-3 arms. No other LR variants (no NoPE twin, no ratio sweep) in this round.
+3. **Layer 0 is L.** The signed layer-0 rule's rationale (2608.12149: the first layer wants the linear
+   operator) generalizes to "a hybrid starts with its linear partner"; `main_pattern` gains the letter
+   `L` under the same invariants (≥ 2 R, layer 0 non-R).
+4. **Pre-registered falsifier:** Linear Relation's α ∈ (0,1] retention class (no rotational/negative
+   eigenvalues) FAILS the parity/S3 state-tracking probe where Mamba-3's rotational state passes. If LR
+   passes, the expressivity-class story is wrong and is retired with numbers. Decider and guards are
+   otherwise the ladder's own (2-hop tool-result probe decides; bpb inside the control's 3-seed range;
+   wall-clock reported; the prefix-invariance audit before any arm is timed).
+5. **Compute path:** `flash-linear-attention`'s GLA chunked scan, version-pinned, optional import in the
+   house pattern; the pure-torch chunked scan (the dechunk-EMA pattern) is written FIRST as the
+   correctness oracle and the CPU/fallback path. S_t folds into q and k; a diagonal-inclusive kernel gets
+   the current-token term subtracted exactly. The SSD chunk scan cannot run this operator (`A: (nheads)`
+   — scalar-per-head decay; verified 2026-08-30). If fla is incompatible with torch 2.13 / triton 3.7.1,
+   the arms run on the torch scan and the kernel question comes back with numbers.
+6. **Timing:** the layer, scan, decode path and tests are CPU-side work in the trunk week; the arms run in
+   the ladder's slot after the signed pipeline. The 3:1 ratio/placement questions stay with the existing
+   arms (3:1 evidence-placed is the prior; the ladder decides).
