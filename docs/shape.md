@@ -132,7 +132,9 @@ EMA through the same SFT — is a floor, not a contestant.
 *Gate: one decider, the rest guards.* Decider `proxy_agree` (`mote.eval.proxy`: inverse-frequency-weighted
 top-1 byte agreement with held-out expert trajectories; 2605.18607 — cross-entropy ranks candidates at
 Spearman 0.36, trajectory proxies at 0.81). Guards, all of which must hold: shared val bpb ≤ control + 0.005
-within the same decay condition, and no regression on `needle_auto`, `false_fire_rate` or `recovery_rate`
+within the same decay condition, and no regression on `needle_auto`, `false_fire_rate` or `recovery_rate` beyond
+the two arms' combined standard error (2026-08-29, Noah's option C: the guards were single-item vetoes at 24 / 40 / 40
+items; they are 144 / 120 / 120 with a sem each, under the decider's own rule)
 (`mote.eval.recovery_probe`, 2608.20314). Reading EM, sim-QA EM, chat val bpb, identity / hold / concede and
 the per-domain vals are reported and do not vote (at this scale exact match sits on its noise floor). Missing
 numbers fail closed. Driver `scripts/mid_2x2.sh`; the winner's final checkpoint is the base for post-training.

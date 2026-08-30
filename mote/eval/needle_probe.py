@@ -20,14 +20,34 @@ from typing import Dict, List
 
 from ..infer.engine import Engine, GenParams
 
+# (fact, questions, needle). Two phrasings per fact and 18 facts: 36 items per (distance, mode), 144 for the
+# `auto` guard over four distances. Six facts with one question each (24 items) made the guard a single-item
+# veto — one flip between two equal checkpoints was near-certain (2026-08-29, decided with Noah: option C).
 FACTS = [
-    ("My dog's name is Biscuit.", "What is my dog's name?", "biscuit"),
-    ("I live in Lisbon.", "Which city do I live in?", "lisbon"),
-    ("My favourite colour is green.", "What is my favourite colour?", "green"),
-    ("My sister is called Mara.", "What is my sister's name?", "mara"),
-    ("I drive a red Fiat.", "What car do I drive?", "fiat"),
-    ("My birthday is in March.", "In which month is my birthday?", "march"),
+    ("My dog's name is Biscuit.", ["What is my dog's name?", "Remind me what my dog is called."], "biscuit"),
+    ("I live in Lisbon.", ["Which city do I live in?", "Where do I live?"], "lisbon"),
+    ("My favourite colour is green.", ["What is my favourite colour?", "Which colour do I like most?"], "green"),
+    ("My sister is called Mara.", ["What is my sister's name?", "What is my sister called?"], "mara"),
+    ("I drive a red Fiat.", ["What car do I drive?", "Which make of car is mine?"], "fiat"),
+    ("My birthday is in March.", ["In which month is my birthday?", "When is my birthday?"], "march"),
+    ("My cat is called Pepper.", ["What is my cat's name?", "Remind me what I named my cat."], "pepper"),
+    ("I work as a baker.", ["What is my job?", "What do I do for work?"], "baker"),
+    ("My house has a blue door.", ["What colour is my front door?", "Which colour did I say my door is?"], "blue"),
+    ("I play the violin.", ["Which instrument do I play?", "What instrument did I mention playing?"], "violin"),
+    ("My brother lives in Oslo.", ["Where does my brother live?", "Which city is my brother in?"], "oslo"),
+    ("I was born in 1990.", ["In which year was I born?", "What is my birth year?"], "1990"),
+    ("My favourite fruit is mango.", ["What is my favourite fruit?", "Which fruit did I say I like most?"], "mango"),
+    ("I take the number 42 bus to work.", ["Which bus do I take to work?", "What number is my bus?"], "42"),
+    ("My daughter is named Sofia.", ["What is my daughter's name?", "What did I call my daughter?"], "sofia"),
+    ("I grow tomatoes in Kent.", ["Where do I grow tomatoes?", "Which county do I grow tomatoes in?"], "kent"),
+    ("My car is parked on Elm Street.", ["Which street is my car parked on?", "Where did I park my car?"], "elm"),
+    ("I speak Portuguese at home.", ["Which language do I speak at home?", "What language did I say I use at home?"], "portuguese"),
 ]
+
+
+def sem_of_rate(p: float, n: int) -> float:
+    """Standard error of a proportion over n Bernoulli items — the noise a guard's delta must clear."""
+    return (p * (1.0 - p) / n) ** 0.5 if n > 0 else 0.0
 
 FILLER = [
     ("Can you tell me something about rivers?", "Rivers carry fresh water from high ground to the sea, shaping valleys as they go."),
@@ -61,17 +81,23 @@ def conversation(fact: str, question: str, distance: int) -> List[Dict]:
 
 
 def run(eng: Engine, distances: List[int]) -> Dict:
-    rows, rates = [], {}
+    rows, rates, sems = [], {}, {}
     for d in distances:
         for mode in ("auto", "off"):
-            hits = 0
-            for fact, q, needle in FACTS:
-                a = _reply(eng, conversation(fact, q, d), mode)
-                ok = needle in a.lower()
-                hits += ok
-                rows.append({"distance": d, "mode": mode, "q": q, "a": a, "ok": ok})
-            rates[f"{mode}@{d}"] = hits / len(FACTS)
-    return {"rates": rates, "n_facts": len(FACTS), "context_limit": eng.cfg.max_seq_len, "rows": rows}
+            hits, n = 0, 0
+            for fact, questions, needle in FACTS:
+                for q in questions:
+                    a = _reply(eng, conversation(fact, q, d), mode)
+                    ok = needle in a.lower()
+                    hits += ok
+                    n += 1
+                    rows.append({"distance": d, "mode": mode, "q": q, "a": a, "ok": ok})
+            rates[f"{mode}@{d}"] = hits / n
+            sems[f"{mode}@{d}"] = sem_of_rate(hits / n, n)
+    auto = [r for r in rows if r["mode"] == "auto"]
+    p_auto = sum(r["ok"] for r in auto) / max(len(auto), 1)
+    return {"rates": rates, "sems": sems, "n_facts": len(FACTS), "n_items": len(rows) // 2, "context_limit": eng.cfg.max_seq_len,
+            "needle_auto": p_auto, "needle_auto_sem": sem_of_rate(p_auto, len(auto)), "rows": rows}
 
 
 def main(argv=None):

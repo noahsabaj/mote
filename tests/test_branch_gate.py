@@ -18,7 +18,10 @@ import pytest
 from mote.eval.branch_gate import final_chat_val, render_md, sft_argv, verdict
 
 CTL = {"proxy_track": 0.300, "val_bpb": 1.100, "needle_auto": 0.50, "false_fire_rate": 0.20,
-       "recovery_rate": 0.40}
+       "recovery_rate": 0.40,
+       # the guards' standard errors at 144 / 120 / 120 items (2026-08-29): a guard's delta must clear the two
+       # arms' combined sem, exactly like the decider's
+       "needle_auto_sem": 0.042, "false_fire_rate_sem": 0.037, "recovery_rate_sem": 0.045}
 
 
 def _anneal(**kw):
@@ -48,10 +51,33 @@ def test_every_guard_can_block_a_winning_decider():
 def test_missing_numbers_fail_closed():
     """An arm that failed to measure must not be promoted by the absence of evidence."""
     assert verdict(CTL, {k: v for k, v in _anneal(proxy_track=0.33).items() if k != "proxy_track"})["winner"] == "control"
-    for missing in ("val_bpb", "needle_auto", "false_fire_rate", "recovery_rate"):
+    for missing in ("val_bpb", "needle_auto", "false_fire_rate", "recovery_rate", "needle_auto_sem", "recovery_rate_sem"):
         a = {k: v for k, v in _anneal(proxy_track=0.33).items() if k != missing}
         v = verdict(CTL, a)
         assert v["winner"] == "control" and not v["guard_ok"], missing
+
+
+def test_a_guard_regression_inside_its_noise_does_not_veto():
+    """Decided 2026-08-29 (option C). Before this, needle_auto had 24 items and any flip vetoed the anneal — a
+    one-item tie between equal checkpoints was near-certain, so the gate was biased to control by construction.
+    Now a guard trips only past the combined standard error of the two arms, the decider's own rule."""
+    win = {"proxy_track": 0.33}
+    v = verdict(CTL, _anneal(**win, needle_auto=0.493))  # one item of 144
+    assert v["winner"] == "anneal" and v["guards"]["needle_auto"] and abs(v["guard_noise"]["needle_auto"] - 0.0594) < 1e-3
+    assert verdict(CTL, _anneal(**win, needle_auto=0.45))["winner"] == "anneal"     # 0.05 short: inside the combined 0.059
+    assert verdict(CTL, _anneal(**win, needle_auto=0.42))["winner"] == "control"    # 0.08 short: a real regression
+    assert verdict(CTL, _anneal(**win, false_fire_rate=0.24))["winner"] == "anneal"  # +0.04 < combined 0.052
+    assert verdict(CTL, _anneal(**win, false_fire_rate=0.27))["winner"] == "control"
+    assert verdict(CTL, _anneal(**win, recovery_rate=0.35))["winner"] == "anneal"
+    assert verdict(CTL, _anneal(**win, recovery_rate=0.31))["winner"] == "control"
+
+
+def test_probe_sets_are_big_enough_to_carry_a_sem():
+    from mote.eval import needle_probe, probe
+
+    assert len(needle_probe.FACTS) == 18 and all(len(qs) == 2 for _, qs, _ in needle_probe.FACTS)
+    assert len(probe.NEUTRAL) >= 120 and len(set(probe.NEUTRAL)) == len(probe.NEUTRAL)
+    assert abs(needle_probe.sem_of_rate(0.5, 144) - 0.0417) < 1e-3
 
 
 def test_a_delta_inside_the_noise_is_not_a_decision():

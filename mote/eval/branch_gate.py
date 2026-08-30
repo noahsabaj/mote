@@ -29,7 +29,10 @@ bpb and shipped the anneal on any 2 of 3. Three things were wrong with it:
 
 Guards, all of which must hold or the anneal does not ship: val bpb ≤ control + 0.005 **within the same
 decay condition** (so the mixture is never charged for the decay axis's outcome), and no regression on
-`needle_auto`, `false_fire_rate` or `recovery_rate`. Everything else is reported, not voted.
+`needle_auto`, `false_fire_rate` or `recovery_rate` **beyond the two arms' combined standard error** — the
+same rule the decider lives under. Decided 2026-08-29 (option C): at 24 / 40 / 40 items the guards were
+single-item vetoes, so a one-flip tie between equal checkpoints sent every anneal back to control; they are
+144 / 120 / 120 items now and each carries a sem. Everything else is reported, not voted.
 
 Writes <out>.json (everything) and <out> (the table). `--skip-sft` reuses runs/<branch>_sft.
 """
@@ -116,7 +119,6 @@ def measure_sft(sft_ckpt: Path, device: Optional[str], n_read: int, n_sim: int, 
     read = read_probe.run(eng, read_probe.load_items(n_read, 0))
     needle = needle_probe.run(eng, [512, 1024, 2048, 4096])
     sim = sim_probe.run(eng, sim_probe.heldout_items(n_sim, ["en", "ru", "ja"]), k=k)
-    auto = [v for kk, v in needle["rates"].items() if kk.startswith("auto@")]
     # The decider. One forward pass per item, no generation, on the same checkpoint the probes just ran —
     # it is the cheapest number in this function and the only one that votes.
     import torch
@@ -128,17 +130,19 @@ def measure_sft(sft_ckpt: Path, device: Optional[str], n_read: int, n_sim: int, 
                    identity_card(eng.info()["params"]))
     # Recovery: does the model do something else after the environment refuses? Its own guard because a
     # mixture that teaches the world but not the response to it is not ready for RLVR-1 (2608.20314).
-    rec = recovery_probe.run(eng, recovery_probe.build_items(max(n_sim // 3, 12), ["en", "ru", "ja"]))
+    rec = recovery_probe.run(eng, recovery_probe.build_items(n_sim, ["en", "ru", "ja"]))  # 120 items, not 40 (2026-08-29)
     head = {"proxy_track": px.get("recip_rank_uniform"), "proxy_track_sem": px.get("recip_rank_uniform_sem"),
             "proxy_agree": px.get("agree"), "proxy_ce": px.get("ce"),
             "proxy_result": (px.get("per_source") or {}).get("result"),
-            "recovery_rate": rec.get("recovery_rate"), "repeat_rate": rec.get("repeat_rate"),
+            "recovery_rate": rec.get("recovery_rate"), "recovery_rate_sem": rec.get("recovery_rate_sem"), "repeat_rate": rec.get("repeat_rate"),
             "unparseable_rate": rec.get("unparseable_rate"),
             "reading_em": read["exact_match"], "reading_f1": read["f1"], "sim_em": sim["em"], "sim_pass_at_1": sim["pass_at_1"],
             "identity_acc": ident["identity_acc"], "hold_rate": ident["hold_rate"], "concede_rate": ident["concede_rate"],
-            "false_fire_rate": ident.get("false_fire_rate"), "identity_recite_rate": ident.get("identity_recite_rate"),
+            "false_fire_rate": ident.get("false_fire_rate"), "false_fire_rate_sem": ident.get("false_fire_rate_sem"),
+            "identity_recite_rate": ident.get("identity_recite_rate"),
             "template_fire_rate": ident.get("template_fire_rate"),
-            "needle_auto": sum(auto) / max(len(auto), 1), "chat_val_bpb": final_chat_val(sft_ckpt.parent)}
+            "needle_auto": needle.get("needle_auto"), "needle_auto_sem": needle.get("needle_auto_sem"),
+            "chat_val_bpb": final_chat_val(sft_ckpt.parent)}
     if k > 1:
         head[f"sim_pass_at_{k}"] = sim[f"pass_at_{k}"]
     return {"head": head, "rows": {"identity": ident["rows"], "reading": read["rows"], "needle": needle["rows"],
@@ -180,26 +184,35 @@ def verdict(control: Dict, anneal: Dict, guard: float = GUARD) -> Dict:
 
     cv, av = control.get("val_bpb"), anneal.get("val_bpb")
     checks = {"val_bpb": bool(cv is not None and av is not None and av <= cv + guard)}
+    guard_noise = {}
     for g, gb in GUARDS:
         gc, ga = control.get(g), anneal.get(g)
-        checks[g] = bool(gc is not None and ga is not None and ((ga >= gc) if gb == "max" else (ga <= gc)))
+        sc, sa = control.get(f"{g}_sem"), anneal.get(f"{g}_sem")
+        if gc is None or ga is None or sc is None or sa is None:  # fail closed: no number, or no noise estimate
+            checks[g] = False
+            continue
+        gn = (sc * sc + sa * sa) ** 0.5  # the guards live under the decider's rule (2026-08-29)
+        guard_noise[g] = gn
+        checks[g] = bool((ga >= gc - gn) if gb == "max" else (ga <= gc + gn))
     guard_ok = all(checks.values())
     return {"winner": "anneal" if (decided and guard_ok) else "control", "decider": key,
             "decided": decided, "noise": noise, "guard_ok": guard_ok, "guard": guard, "guards": checks,
-            "deltas": deltas}
+            "guard_noise": guard_noise, "deltas": deltas}
 
 
 def render_md(results: Dict[str, Dict], v: Dict, title: str) -> str:
     names = list(results)
     keys = ["proxy_track", "proxy_track_sem", "proxy_agree", "proxy_result", "proxy_ce", "val_bpb",
-            "needle_auto", "false_fire_rate", "recovery_rate", "repeat_rate", "unparseable_rate", *REPORTED]
+            "needle_auto", "needle_auto_sem", "false_fire_rate", "false_fire_rate_sem", "recovery_rate", "recovery_rate_sem",
+            "repeat_rate", "unparseable_rate", *REPORTED]
     keys += sorted({k for r in results.values() for k in r if k.startswith("sim_pass_at_") and k != "sim_pass_at_1"})
     dom = sorted({d for r in results.values() for d in (r.get("domains") or {})})
     tripped = [g for g, ok in v["guards"].items() if not ok]
     lines = [f"# {title}", "",
              f"**Verdict: {v['winner']}** — decider `{v['decider']}` {'favours anneal' if v['decided'] else 'does not favour anneal'}"
              f" ({fmt_delta(v['deltas'].get(v['decider']))}, noise +/-{v['noise']:.4f}); guards {'all ok' if v['guard_ok'] else 'TRIPPED: ' + ', '.join(tripped)}"
-             f" (val bpb ≤ control + {v['guard']}, needle and false-fire no-regression).", "",
+             f" (val bpb ≤ control + {v['guard']}; needle, false-fire and recovery no-regression beyond their combined sem"
+             + (": " + ", ".join(f"{g} ±{n:.3f}" for g, n in v.get("guard_noise", {}).items()) if v.get("guard_noise") else "") + ").", "",
              "| metric | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
 
     def fmt(x):
@@ -212,7 +225,8 @@ def render_md(results: Dict[str, Dict], v: Dict, title: str) -> str:
     lines += ["", "**Decider**: `proxy_track` — mean reciprocal rank of the expert's next byte over "
               "held-out trajectories (mote.eval.proxy, 2605.18607), which must also beat the two arms' "
               "combined standard error. **Guards**: shared val bpb ≤ control + "
-              f"{v['guard']}, `needle_auto` and `false_fire_rate` no-regression. Everything else in this "
+              f"{v['guard']}; `needle_auto` (144 items), `false_fire_rate` (120) and `recovery_rate` (120) may not "
+              "regress beyond the two arms' combined standard error (2026-08-29). Everything else in this "
               "table is reported, not voted: at this scale the exact-match rows sit on their noise floor "
               "(docs/search.md records a flat 0 on reading at 35M), and 2605.18607 §5.2 is the measurement "
               "of why a metric that cannot discriminate should not cast a vote.",

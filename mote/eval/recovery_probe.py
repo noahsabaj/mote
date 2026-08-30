@@ -130,7 +130,8 @@ def run(eng: Engine, items: List[Dict]) -> Dict:
         rows.append({**{k: it[k] for k in ("domain", "locale", "seed")},
                      "refused": it["refused_call"], "reply": reply, "kind": kind})
     acted = counts["repeat"] + counts["other"] + counts["unparseable"]
-    return {"n": len(items), "recovery_rate": counts["other"] / acted if acted else 0.0,
+    p = counts["other"] / acted if acted else 0.0
+    return {"n": len(items), "recovery_rate": p, "recovery_rate_sem": (p * (1 - p) / acted) ** 0.5 if acted else 0.0,
             "repeat_rate": counts["repeat"] / acted if acted else 0.0,
             "unparseable_rate": counts["unparseable"] / acted if acted else 0.0,
             "no_action_rate": counts["none"] / max(len(items), 1),
