@@ -75,3 +75,10 @@ in the gap before the arms.
 - **Memory.** Without detach, a k-pass micro-batch keeps k passes of activations. Profiled at the flagship
   shape before the arms are queued; the byte arm's fallbacks are `--feedback-window 8192` then
   `--feedback-detach`, applied by hand and recorded here.
+
+**Amendment 2026-08-31 (signed, CoT-line grilling): a fourth arm.** T²MLR (2607.15178) reports that fusing
+the previous position's MIDDLE-layer state into an EARLIER layer beats top-state→input in matched-budget
+runs — the only placement evidence in this mechanism's family. Arm 4 (`tap-mid`): the chunk-level arm's
+recipe with the fusion tap moved to the main network's middle layer and injection into an earlier layer,
+24 h on the trunk snapshot beside the three signed arms; mid slips one day. The gate is unchanged and reads
+the best of the four.

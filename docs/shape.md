@@ -154,7 +154,7 @@ scored identity 0.833 and false-fire 0.90 at once). **Round A** bakes off DPO / 
 from `t3l_dense_8e-4`, with a second SFT at `--neutral-frac 0.15` as its own arm; **Round B** runs the winner and
 runner-up on the 20k sim pairs against the real gate (`docs/research/dpo-rlvr-2026-08-25.md`).
 
-1. **SFT-1** (format): init = the base; `sft_local` + identity 5 % + sim QA ~10 %; the tool-protocol traces
+1. **SFT-1** (format): init = the base; `sft_local` + identity 5 % + sim QA ~10 % + interleaved think-traces ~10 % (sim plans rendered programmatically, verifier-gated; Claude-distilled chat traces on grader pass — the CoT line, `docs/results/2026-08-31-cot-line-prereg.md`); the tool-protocol traces
    moved to mid-training (2608.20314; 2607.12463), so SFT elicits the protocol rather than teaching it;
    difficulty selection (`mote.data.select_sft`, ~4 GPU-min per 127 MB) and the mid-run re-selection
    (`--reselect-every`, the trajectory rule of `docs/research/curriculum-2026-08-28.md`) is A/B-gated before it
@@ -179,8 +179,10 @@ runner-up on the 20k sim pairs against the real gate (`docs/research/dpo-rlvr-20
    0.2; guards pass@64 never below the pre-RL model, identity / hold / concede, false_fire_rate, chat val, KL
    bounded. Budget ~20 % of the rung's compute (2607.16097), never taken from the trunk; pass@8 reported beside
    EM by every gate; `mote/eval/rl_taxonomy.py` bins the policy change; the self-proposal SFT-1 arm between
-   `<|think|>` / `<|end_think|>` is queued against the pruned-expert traces. Post stages run with k=3 feedback
-   passes throughout.
+   `<|think|>` / `<|end_think|>` is the CoT traces' A/B, and RLVR-1's action space gains the think-tags under the
+   interleaved recipe — conditional intermediate rewards, correct-only length cost — with the engine-side compute
+   allocator choosing k and think-on/off (no user knob; the CoT line, signed 2026-08-31). Post stages run with k=3
+   feedback passes throughout.
 
 Served = the last stage that passed its gate; every stage checkpoint sits in the studio picker. Everything
 in the build order exists (`docs/results/2026-08-24-pipeline-build.md`); what remains is operational: the
