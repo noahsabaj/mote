@@ -25,6 +25,12 @@ ways the correction is dated beside it.
   11M and 32M since 2026-08-29, when retiring the multi-byte head moved them from 13M and 35M). The retired
   role names `smoke` / `pilot` / `local` / `flagship` and the old sizes resolve as aliases because queued argv
   carries them. Runs go under `runs/<model>/<experiment>-<arm>`; the flat directories are dated records.
+* **Replies size to the question** (Noah, 2026-08-31): short by default — a what-is gets a few sentences,
+  a yes/no gets "Yes, …"; expand only when asked or when the task clearly requires it (progressive
+  disclosure: the user can always ask for more; an essay can't be taken back). Enforced where behaviour is
+  made: SFT-1 traces and filters (length-inappropriate replies are cut), the preference rubric's rule 6
+  (`docs/rubric.md`), and a length-calibration probe (short-question set; reply-length distribution) read
+  beside the post stages' guards.
 * **The chunk rate is an observable, not a setting** (2026-08-27): three trained runs measured 3.2–3.45 bytes
   a chunk; the arena and the profiler read it from the run (`mote/runinfo.py`), never from ATDC's target.
 * **Runs are reproducible to an envelope, not bitwise** (corrected 2026-08-29: the 2026-08-28 rule said bitwise —
